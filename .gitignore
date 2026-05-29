@@ -1,13 +1,35 @@
+# === Node.js ===
 node_modules/
 dist/
-.env
+dist-electron/
+
+# === Python ===
 *.pyc
 __pycache__/
-.DS_Store
-*.log
-*.tmp
+*.egg-info/
+.venv/
+
+# === 构建输出 ===
+client/release/
+
+# === 本地缓存（不入库）===
 .cache/
+
+# === IDE ===
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# === 系统文件 ===
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# === 环境与日志 ===
+.env
+*.log
+*.tmp
+
+# === 打包资源中的二进制（构建时从 .cache 复制）===
+client/resources/winsw/*.exe
