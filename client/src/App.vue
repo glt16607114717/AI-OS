@@ -1,27 +1,61 @@
 <template>
-  <div class="app-shell">
+  <div class="shell">
     <div class="titlebar">
-      <div class="titlebar-drag">
-        <span class="titlebar-title">AI-OS</span>
+      <div class="titlebar-left">
+        <div class="app-icon"></div>
+        <span class="app-name">AI-OS</span>
       </div>
       <div class="titlebar-actions">
-        <button class="titlebar-btn" @click="minimize">&#x2500;</button>
-        <button class="titlebar-btn" @click="maximize">&#x25A1;</button>
-        <button class="titlebar-btn titlebar-btn-close" @click="close">&#x2715;</button>
+        <button class="tb-btn" @click="windowAiOS.windowMinimize()">
+          <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
+        </button>
+        <button class="tb-btn" @click="windowAiOS.windowMaximize()">
+          <svg width="10" height="10" viewBox="0 0 10 10">
+            <rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1"/>
+          </svg>
+        </button>
+        <button class="tb-btn tb-btn-close" @click="windowAiOS.windowClose()">
+          <svg width="10" height="10" viewBox="0 0 10 10">
+            <line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.2"/>
+            <line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.2"/>
+          </svg>
+        </button>
       </div>
     </div>
-    <div class="main-content">
-      <div class="status-card">
-        <div class="status-indicator" :class="agentOnline ? 'online' : 'offline'"></div>
-        <div class="status-info">
-          <h2>Agent Service</h2>
-          <p>{{ agentOnline ? `Online · Uptime ${agentUptime}s` : 'Offline' }}</p>
-          <p class="version" v-if="agentOnline">v{{ agentVersion }}</p>
+
+    <div class="content">
+      <div class="hero">
+        <div class="logo-ring">
+          <div class="logo-core"></div>
         </div>
+        <h1 class="hero-title">AI-OS</h1>
+        <p class="hero-subtitle">Enterprise AI Asset Operating System</p>
       </div>
-      <div class="placeholder">
-        <p>AI-OS Shell Ready</p>
-        <p class="hint">Backend service is running as Windows Service via WinSW</p>
+
+      <div class="status-panel">
+        <div class="status-row">
+          <span class="status-label">Agent Service</span>
+          <div class="status-badge" :class="online ? 'badge-online' : 'badge-offline'">
+            <span class="badge-dot"></span>
+            <span>{{ online ? 'Online' : 'Offline' }}</span>
+          </div>
+        </div>
+        <div class="status-row" v-if="online">
+          <span class="status-label">Uptime</span>
+          <span class="status-value">{{ formatUptime(uptime) }}</span>
+        </div>
+        <div class="status-row" v-if="online">
+          <span class="status-label">Version</span>
+          <span class="status-value">{{ version }}</span>
+        </div>
+        <div class="status-row" v-if="online">
+          <span class="status-label">PID</span>
+          <span class="status-value">{{ pid }}</span>
+        </div>
+        <div class="status-row" v-if="!online">
+          <span class="status-label">Status</span>
+          <span class="status-value status-waiting">Waiting for service...</span>
+        </div>
       </div>
     </div>
   </div>
@@ -30,28 +64,37 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 
-const agentOnline = ref(false)
-const agentUptime = ref(0)
-const agentVersion = ref('')
+const windowAiOS = window.aiOS
+
+const online = ref(false)
+const uptime = ref(0)
+const version = ref('')
+const pid = ref(0)
 
 let timer: ReturnType<typeof setInterval> | null = null
 
-async function checkHealth() {
-  try {
-    const result = await window.aiOS.agentHealth()
-    agentOnline.value = result.ok
-    if (result.ok) {
-      agentUptime.value = result.uptime ?? 0
-      agentVersion.value = result.version ?? ''
-    }
-  } catch {
-    agentOnline.value = false
-  }
+function formatUptime(seconds: number): string {
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = seconds % 60
+  if (h > 0) return `${h}h ${m}m ${s}s`
+  if (m > 0) return `${m}m ${s}s`
+  return `${s}s`
 }
 
-function minimize() { window.aiOS.windowMinimize() }
-function maximize() { window.aiOS.windowMaximize() }
-function close() { window.aiOS.windowClose() }
+async function checkHealth() {
+  try {
+    const res = await windowAiOS.agentHealth()
+    online.value = res.ok
+    if (res.ok) {
+      uptime.value = res.uptime ?? 0
+      version.value = res.version ?? ''
+      pid.value = res.pid ?? 0
+    }
+  } catch {
+    online.value = false
+  }
+}
 
 onMounted(() => {
   checkHealth()
@@ -64,40 +107,58 @@ onUnmounted(() => {
 </script>
 
 <style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-
-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: #0a0a0a;
-  color: #e0e0e0;
-  overflow: hidden;
-  user-select: none;
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
 }
 
-.app-shell {
+body {
+  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: #09090b;
+  color: #fafafa;
+  overflow: hidden;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+.shell {
   height: 100vh;
   display: flex;
   flex-direction: column;
 }
 
 .titlebar {
-  height: 36px;
+  height: 38px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: #1a1a2e;
+  background: #09090b;
+  border-bottom: 1px solid #1a1a1f;
   -webkit-app-region: drag;
+  flex-shrink: 0;
 }
 
-.titlebar-drag {
-  flex: 1;
-  padding-left: 12px;
+.titlebar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 14px;
 }
 
-.titlebar-title {
+.app-icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+}
+
+.app-name {
   font-size: 12px;
-  color: #888;
-  letter-spacing: 2px;
+  font-weight: 600;
+  color: #a1a1aa;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
 }
 
 .titlebar-actions {
@@ -105,86 +166,154 @@ body {
   -webkit-app-region: no-drag;
 }
 
-.titlebar-btn {
+.tb-btn {
   width: 46px;
-  height: 36px;
+  height: 38px;
   border: none;
   background: transparent;
-  color: #888;
-  font-size: 14px;
+  color: #71717a;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: background 0.15s, color 0.15s;
 }
 
-.titlebar-btn:hover { background: #2a2a3e; color: #fff; }
-.titlebar-btn-close:hover { background: #e81123; color: #fff; }
+.tb-btn:hover {
+  background: #18181b;
+  color: #e4e4e7;
+}
 
-.main-content {
+.tb-btn-close:hover {
+  background: #dc2626;
+  color: #ffffff;
+}
+
+.content {
   flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 40px;
+  gap: 48px;
 }
 
-.status-card {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  padding: 30px 50px;
-  background: #141422;
-  border-radius: 12px;
-  border: 1px solid #222;
-}
-
-.status-indicator {
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  transition: all 0.3s;
-}
-
-.status-indicator.online {
-  background: #00d26a;
-  box-shadow: 0 0 12px #00d26a55;
-}
-
-.status-indicator.offline {
-  background: #555;
-}
-
-.status-info h2 {
-  font-size: 18px;
-  font-weight: 600;
-  margin-bottom: 4px;
-}
-
-.status-info p {
-  font-size: 13px;
-  color: #888;
-}
-
-.status-info .version {
-  color: #555;
-  font-size: 11px;
-}
-
-.placeholder {
+.hero {
   text-align: center;
 }
 
-.placeholder p:first-child {
-  font-size: 14px;
-  color: #444;
-  letter-spacing: 3px;
+.logo-ring {
+  width: 80px;
+  height: 80px;
+  border-radius: 20px;
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a78bfa 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 24px;
+  box-shadow: 0 0 40px rgba(99, 102, 241, 0.15);
+  animation: logo-pulse 3s ease-in-out infinite;
 }
 
-.placeholder .hint {
-  font-size: 11px;
-  color: #333;
-  margin-top: 8px;
+.logo-core {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: #09090b;
+}
+
+@keyframes logo-pulse {
+  0%, 100% { box-shadow: 0 0 40px rgba(99, 102, 241, 0.15); }
+  50% { box-shadow: 0 0 60px rgba(99, 102, 241, 0.25); }
+}
+
+.hero-title {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: 4px;
+  color: #fafafa;
+  margin-bottom: 8px;
+}
+
+.hero-subtitle {
+  font-size: 13px;
+  color: #52525b;
+  letter-spacing: 1px;
+}
+
+.status-panel {
+  width: 380px;
+  background: #111113;
+  border: 1px solid #1e1e23;
+  border-radius: 12px;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.status-label {
+  font-size: 13px;
+  color: #71717a;
+  font-weight: 500;
+}
+
+.status-value {
+  font-size: 13px;
+  color: #d4d4d8;
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+}
+
+.status-waiting {
+  color: #52525b;
+  font-style: italic;
+  font-family: inherit;
+}
+
+.status-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.badge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.badge-online {
+  background: rgba(34, 197, 94, 0.1);
+  color: #22c55e;
+}
+
+.badge-online .badge-dot {
+  background: #22c55e;
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.5);
+  animation: dot-pulse 2s ease-in-out infinite;
+}
+
+.badge-offline {
+  background: rgba(113, 113, 122, 0.1);
+  color: #71717a;
+}
+
+.badge-offline .badge-dot {
+  background: #52525b;
+}
+
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 </style>

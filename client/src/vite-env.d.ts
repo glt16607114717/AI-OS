@@ -6,8 +6,16 @@ declare module '*.vue' {
   export default component
 }
 
+interface AgentHealthResult {
+  ok: boolean
+  uptime?: number
+  version?: string
+  pid?: number
+  started_at?: string
+}
+
 interface AiOSApi {
-  agentHealth: () => Promise<{ ok: boolean; uptime?: number; version?: string }>
+  agentHealth: () => Promise<AgentHealthResult>
   windowMinimize: () => Promise<void>
   windowMaximize: () => Promise<void>
   windowClose: () => Promise<void>
@@ -19,3 +27,5 @@ declare global {
     aiOS: AiOSApi
   }
 }
+
+export {}

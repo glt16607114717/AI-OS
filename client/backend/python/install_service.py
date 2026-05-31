@@ -1,12 +1,6 @@
-"""
-AI-OS Agent service installer.
-Called by NSIS during install/uninstall.
-Usage:
-    python install_service.py install   -- register and start service
-    python install_service.py uninstall -- stop and remove service
-"""
 import os
 import sys
+import time
 import subprocess
 import xml.etree.ElementTree as ET
 
@@ -19,7 +13,10 @@ def get_winsw_dir(install_dir):
     return os.path.join(install_dir, "resources", "winsw")
 
 
-def find_python():
+def get_embedded_python(install_dir):
+    python_exe = os.path.join(install_dir, "runtime", "python", "python.exe")
+    if os.path.exists(python_exe):
+        return python_exe
     return sys.executable
 
 
@@ -65,7 +62,7 @@ def do_install():
     install_dir = get_install_dir()
     winsw_dir = get_winsw_dir(install_dir)
     agent_script = os.path.join(install_dir, "resources", "backend", "python", "agent", "main.py")
-    python_exe = find_python()
+    python_exe = get_embedded_python(install_dir)
 
     print(f"Install dir: {install_dir}")
     print(f"Python: {python_exe}")
@@ -88,6 +85,9 @@ def do_uninstall():
 
     print("Stopping service...")
     run_winsw(winsw_dir, "stop")
+
+    print("Waiting 2 seconds...")
+    time.sleep(2)
 
     print("Uninstalling service...")
     run_winsw(winsw_dir, "uninstall")

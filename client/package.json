@@ -3,11 +3,14 @@
   "version": "0.1.0",
   "description": "AI-OS Enterprise AI Asset Operating System",
   "author": "桂良涛 <桂良涛@nndrobot.com>",
-  "main": "dist-electron/main.js",
+  "main": "dist-electron/main/index.js",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "package": "vite build && electron-builder",
+    "build": "npx vite build",
+    "build:python": "python scripts/build_python_runtime.py",
+    "package": "npx vite build && npx electron-builder --win",
+    "installer": "iscc installer\\setup.iss",
+    "release": "npm run build:python && npm run package && npm run installer",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -26,12 +29,15 @@
   "build": {
     "appId": "com.nndrobot.ai-os",
     "productName": "AI-OS",
+    "compression": "store",
     "directories": {
-      "output": "release"
+      "output": "release-v2"
     },
     "files": [
       "dist/**/*",
-      "dist-electron/**/*"
+      "dist-electron/**/*",
+      "!node_modules",
+      "!src"
     ],
     "extraResources": [
       {
@@ -43,21 +49,19 @@
         "to": "winsw"
       }
     ],
+    "extraFiles": [
+      {
+        "from": "resources/python-runtime.zip",
+        "to": "resources/python-runtime.zip"
+      }
+    ],
     "win": {
       "target": [
         {
-          "target": "nsis",
+          "target": "dir",
           "arch": ["x64"]
         }
-      ],
-      "icon": "public/icon.ico"
-    },
-    "nsis": {
-      "oneClick": false,
-      "perMachine": true,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "include": "installer/installer.nsh"
+      ]
     }
   }
 }

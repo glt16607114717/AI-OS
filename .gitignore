@@ -11,6 +11,13 @@ __pycache__/
 
 # === 构建输出 ===
 client/release/
+client/release-v2/
+
+# === Python 运行时环境包（构建脚本自动生成）===
+client/resources/python-runtime.zip
+
+# === Python 构建缓存 ===
+client/scripts/.cache/
 
 # === 本地缓存（不入库）===
 .cache/

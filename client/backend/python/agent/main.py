@@ -1,10 +1,7 @@
-"""
-AI-OS Agent - Minimal shell version
-Just a health check endpoint to prove the service is alive.
-"""
 import os
 import sys
 import time
+import signal
 import logging
 from datetime import datetime
 
@@ -39,6 +36,15 @@ async def health():
 async def on_startup():
     logger.info(f"AI-OS Agent v{VERSION} started (pid={os.getpid()})")
 
+
+def handle_shutdown(signum, frame):
+    sig_name = signal.Signals(signum).name
+    logger.info(f"Received {sig_name}, shutting down gracefully...")
+    sys.exit(0)
+
+
+signal.signal(signal.SIGTERM, handle_shutdown)
+signal.signal(signal.SIGINT, handle_shutdown)
 
 if __name__ == "__main__":
     port = int(os.environ.get("AIOS_PORT", "18731"))
