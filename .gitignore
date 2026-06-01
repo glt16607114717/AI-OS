@@ -19,6 +19,9 @@ client/resources/python-runtime.zip
 # === Python 构建缓存 ===
 client/scripts/.cache/
 
+# === 构建信息（自动生成）===
+client/backend/python/build_info.json
+
 # === 本地缓存（不入库）===
 .cache/
 

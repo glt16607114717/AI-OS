@@ -5,219 +5,109 @@ param(
   [string]$ProgressFile = ""
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 
 $PythonExe = Join-Path $AppDir "runtime\python\python.exe"
 $RequirementsFile = Join-Path $AppDir "resources\backend\python\requirements.txt"
-$InstalledHashFile = Join-Path $AppDir "runtime\python\.installed_deps_hash.txt"
+$TargetDir = Join-Path $AppDir "runtime\python\Lib\site-packages"
 $PipIndex = "https://mirrors.aliyun.com/pypi/simple"
+$DoneFile = Join-Path $AppDir ".progress.done"
+$ExitCode = 1
 
 function Write-Progress-Info {
   param([string]$Message)
 
-  if ($ProgressFile -and (Test-Path $ProgressFile)) {
-    Add-Content -Path $ProgressFile -Value $Message
+  if ($ProgressFile) {
+    try { Add-Content -Path $ProgressFile -Value $Message -ErrorAction SilentlyContinue } catch {}
   }
   Write-Host $Message
 }
 
-function Get-FileHash {
-  param([string]$FilePath)
-
-  if (-not (Test-Path $FilePath)) {
-    return ""
-  }
-
-  $hash = Get-FileHash -Path $FilePath -Algorithm MD5
-  return $hash.Hash
+function Get-PackageName {
+  param([string]$Requirement)
+  return ($Requirement -split "[><=!~\[]")[0].Trim()
 }
 
-function Install-Pip {
-  param([string]$PythonExe)
-
-  Write-Progress-Info "PIP:正在安装 pip..."
-
-  $nugetLibDir = Join-Path (Split-Path $PythonExe -Parent) "Lib"
-
-  if (Test-Path (Join-Path $nugetLibDir "ensurepip")) {
-    try {
-      & $PythonExe (Join-Path $nugetLibDir "ensurepip\__main__.py") 2>&1 | ForEach-Object {
-        Write-Progress-Info "PIP:$_"
-      }
-
-      if ($LASTEXITCODE -ne 0) {
-        throw "pip 安装失败（退出码: $LASTEXITCODE）"
-      }
-    } catch {
-      throw "pip 安装失败: $($_.Exception.Message)"
-    }
-  } else {
-    throw "未找到 ensurepip，请使用完整版 Python"
+try {
+  if (-not (Test-Path $PythonExe)) {
+    Write-Progress-Info "ERROR:Python not found"
+    return
   }
-}
-
-function Upgrade-Pip {
-  param([string]$PythonExe)
-
-  Write-Progress-Info "PIP:正在升级 pip..."
-
-  try {
-    & $PythonExe -m pip install --upgrade pip -i $PipIndex --no-warn-script-location 2>&1 | ForEach-Object {
-      Write-Progress-Info "PIP:$_"
-    }
-
-    if ($LASTEXITCODE -ne 0) {
-      throw "pip 升级失败（退出码: $LASTEXITCODE）"
-    }
-  } catch {
-    throw "pip 升级失败: $($_.Exception.Message)"
-  }
-}
-
-function Get-RequirementsList {
-  param([string]$RequirementsFile)
 
   if (-not (Test-Path $RequirementsFile)) {
-    throw "requirements.txt 文件不存在: $RequirementsFile"
+    Write-Progress-Info "ERROR:requirements.txt not found"
+    return
   }
+
+  if (-not (Test-Path $TargetDir)) {
+    New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
+  }
+
+  $pipCheck = & $PythonExe -m pip --version 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    Write-Progress-Info "Installing pip..."
+    $nugetLibDir = Join-Path (Split-Path $PythonExe -Parent) "Lib"
+    $ensurepipPath = Join-Path $nugetLibDir "ensurepip\__main__.py"
+    if (Test-Path $ensurepipPath) {
+      & $PythonExe $ensurepipPath 2>$null
+      if ($LASTEXITCODE -ne 0) {
+        Write-Progress-Info "ERROR:pip install failed"
+        return
+      }
+    } else {
+      Write-Progress-Info "ERROR:ensurepip not found"
+      return
+    }
+  }
+
+  Write-Progress-Info "Upgrading pip..."
+  & $PythonExe -m pip install --upgrade pip -i $PipIndex --no-warn-script-location --target $TargetDir 2>$null | Out-Null
 
   $requirements = Get-Content $RequirementsFile | Where-Object {
     $_.Trim() -ne "" -and -not $_.StartsWith("#")
   }
 
-  return $requirements
-}
-
-function Install-Dependencies {
-  param(
-    [string]$PythonExe,
-    [string]$RequirementsFile
-  )
-
-  $requirements = Get-RequirementsList $RequirementsFile
   $total = $requirements.Count
+  $installed = 0
+  $skipped = 0
+  $failed = @()
   $current = 0
-
-  Write-Progress-Info "DEPS:准备安装 $total 个依赖包..."
 
   foreach ($req in $requirements) {
     $current++
-    $pkgName = ($req -split "==")[0].Trim()
+    $pkgName = Get-PackageName $req
 
-    Write-Progress-Info "DEPS:[$current/$total] 正在安装 $pkgName..."
-
-    try {
-      & $PythonExe -m pip install $req -i $PipIndex --no-warn-script-location 2>&1 | ForEach-Object {
-        if ($_ -match "Successfully installed|Requirement already satisfied") {
-          Write-Progress-Info "DEPS:[$current/$total] $pkgName - 成功"
-        } elseif ($_ -match "Downloading|Collecting") {
-          Write-Progress-Info "DEPS:[$current/$total] $pkgName - 下载中..."
-        }
-      }
-
-      if ($LASTEXITCODE -ne 0) {
-        throw "$pkgName 安装失败（退出码: $LASTEXITCODE）"
-      }
-
-      Write-Progress-Info "DEPS:[$current/$total] $pkgName - 完成"
-    } catch {
-      throw "$pkgName 安装失败: $($_.Exception.Message)"
+    $null = & $PythonExe -m pip show $pkgName --path $TargetDir 2>$null
+    if ($LASTEXITCODE -eq 0) {
+      $skipped++
+      continue
     }
-  }
-}
 
-function Verify-Installation {
-  param(
-    [string]$PythonExe,
-    [string]$RequirementsFile
-  )
+    Write-Progress-Info "Installing $pkgName ($current/$total)..."
 
-  Write-Progress-Info "VERIFY:正在验证依赖安装..."
+    & $PythonExe -m pip install $req -i $PipIndex --no-warn-script-location --target $TargetDir 2>$null | Out-Null
 
-  $requirements = Get-RequirementsList $RequirementsFile
-  $failed = @()
-
-  foreach ($req in $requirements) {
-    $pkgName = ($req -split "==")[0].Trim()
-    $versionSpec = ($req -split "==")[1]
-
-    try {
-      $result = & $PythonExe -m pip show $pkgName 2>&1
-
-      if ($LASTEXITCODE -ne 0) {
-        $failed += $pkgName
-      } elseif ($versionSpec) {
-        if ($result -match "Version: (.+)") {
-          $installedVersion = $matches[1]
-
-          if ($installedVersion -ne $versionSpec) {
-            $failed += "$pkgName (需要: $versionSpec, 已安装: $installedVersion)"
-          }
-        }
-      }
-    } catch {
+    if ($LASTEXITCODE -eq 0) {
+      $installed++
+    } else {
       $failed += $pkgName
+      Write-Progress-Info "ERROR:Failed to install $pkgName"
     }
   }
 
   if ($failed.Count -gt 0) {
-    throw "依赖验证失败: $($failed -join ', ')"
+    Write-Progress-Info "ERROR:Failed: $($failed -join ', ')"
+    return
   }
 
-  Write-Progress-Info "VERIFY:所有依赖验证通过"
-}
-
-try {
-  Write-Progress-Info "=== 开始安装 Python 依赖 ==="
-  Write-Progress-Info "Python: $PythonExe"
-  Write-Progress-Info "Requirements: $RequirementsFile"
-
-  if (-not (Test-Path $PythonExe)) {
-    throw "Python 不存在，请先安装 Python 环境"
-  }
-
-  if (-not (Test-Path $RequirementsFile)) {
-    throw "requirements.txt 不存在"
-  }
-
-  $currentHash = Get-FileHash $RequirementsFile
-
-  if (Test-Path $InstalledHashFile) {
-    $installedHash = Get-Content $InstalledHashFile
-
-    if ($installedHash -eq $currentHash) {
-      Write-Progress-Info "SKIP:依赖已安装且版本一致，跳过"
-      Write-Progress-Info "OK:依赖安装完成"
-      exit 0
-    } else {
-      Write-Progress-Info "UPDATE:依赖配置已变更，重新安装..."
-    }
-  }
-
-  $sitePackagesDir = Join-Path (Split-Path $PythonExe -Parent) "Lib\site-packages"
-  if (-not (Test-Path $sitePackagesDir)) {
-    New-Item -ItemType Directory -Path $sitePackagesDir -Force | Out-Null
-  }
-
-  Write-Progress-Info "STEP:1/4 - 安装 pip..."
-  Install-Pip -PythonExe $PythonExe
-
-  Write-Progress-Info "STEP:2/4 - 升级 pip..."
-  Upgrade-Pip -PythonExe $PythonExe
-
-  Write-Progress-Info "STEP:3/4 - 安装依赖包..."
-  Install-Dependencies -PythonExe $PythonExe -RequirementsFile $RequirementsFile
-
-  Write-Progress-Info "STEP:4/4 - 验证安装..."
-  Verify-Installation -PythonExe $PythonExe -RequirementsFile $RequirementsFile
-
-  Set-Content -Path $InstalledHashFile -Value $currentHash -Encoding UTF8
-  Write-Progress-Info "OK:依赖安装完成"
-  Write-Progress-Info "OK:依赖哈希已保存: $currentHash"
-
-  exit 0
+  $msg = "$total packages checked"
+  if ($installed -gt 0) { $msg += ", $installed installed" }
+  if ($skipped -gt 0) { $msg += ", $skipped up-to-date" }
+  Write-Progress-Info "OK:$msg"
+  $ExitCode = 0
 
 } catch {
-  Write-Progress-Info "ERROR:依赖安装失败: $($_.Exception.Message)"
-  exit 1
+  Write-Progress-Info "ERROR:Unexpected: $($_.Exception.Message)"
+} finally {
+  try { Set-Content -Path $DoneFile -Value $ExitCode -NoNewline -ErrorAction SilentlyContinue } catch {}
 }

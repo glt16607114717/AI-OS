@@ -12,10 +12,10 @@ DefaultDirName={autopf}\AI-OS
 DefaultGroupName=AI-OS
 UninstallDisplayName=AI-OS
 UninstallDisplayIcon={app}\AI-OS.exe
-OutputDir=..\release-v2\installer
+OutputDir=..\release-v3\installer
 OutputBaseFilename=AI-OS-Setup-{#MyAppVersion}
-Compression=lzma2/ultra64
-SolidCompression=yes
+Compression=lzma2/normal
+SolidCompression=no
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -38,7 +38,7 @@ StatusRestartingApplications=正在重启应用程序...
 StatusCreateDirs=正在创建目录...
 
 [Files]
-Source: "..\release-v2\win-unpacked\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\release-v3\win-unpacked\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\AI-OS"; Filename: "{app}\AI-OS.exe"
@@ -49,12 +49,40 @@ Name: "{autodesktop}\AI-OS"; Filename: "{app}\AI-OS.exe"; Tasks: desktopicon
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加选项:"
 
 [Run]
-Filename: "{app}\AI-OS.exe"; Description: "运行 AI-OS"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\AI-OS.exe"; Description: "运行 AI-OS"; Flags: nowait postinstall skipifsilent unchecked
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\runtime"
 
 [Code]
+type
+  TMsg = record
+    hwnd: HWND;
+    message: Cardinal;
+    wParam: Longint;
+    lParam: Longint;
+    time: Cardinal;
+    pt: TPoint;
+  end;
+
+function PeekMessageMsg(var lpMsg: TMsg; hWnd: HWND; wMsgFilterMin: UINT; wMsgFilterMax: UINT; wRemoveMsg: UINT): BOOL; external 'PeekMessageW@user32.dll stdcall';
+function TranslateMessageMsg(var lpMsg: TMsg): BOOL; external 'TranslateMessage@user32.dll stdcall';
+function DispatchMessageMsg(var lpMsg: TMsg): Longint; external 'DispatchMessageW@user32.dll stdcall';
+
+const
+  PM_REMOVE = 1;
+
+procedure ProcessMessages;
+var
+  Msg: TMsg;
+begin
+  while PeekMessageMsg(Msg, 0, 0, 0, PM_REMOVE) do
+  begin
+    TranslateMessageMsg(Msg);
+    DispatchMessageMsg(Msg);
+  end;
+end;
+
 var
   ProgressLabel: TLabel;
   DetailLabel: TLabel;
@@ -65,25 +93,27 @@ begin
   WizardForm.ProgressGauge.Min := 0;
   WizardForm.ProgressGauge.Max := 100;
 
-  ProgressLabel := TLabel.Create(WizardForm.InstallingPage);
-  ProgressLabel.Parent := WizardForm.InstallingPage;
+  ProgressLabel := TLabel.Create(WizardForm);
+  ProgressLabel.Parent := WizardForm;
   ProgressLabel.Left := WizardForm.ProgressGauge.Left;
-  ProgressLabel.Top := WizardForm.ProgressGauge.Top + WizardForm.ProgressGauge.Height + 12;
-  ProgressLabel.Width := WizardForm.InstallingPage.Width;
+  ProgressLabel.Top := WizardForm.ProgressGauge.Top + WizardForm.ProgressGauge.Height + 16;
+  ProgressLabel.Width := 400;
   ProgressLabel.Height := 20;
   ProgressLabel.Font.Size := 9;
+  ProgressLabel.AutoSize := False;
   ProgressLabel.Caption := '';
 
-  DetailLabel := TLabel.Create(WizardForm.InstallingPage);
-  DetailLabel.Parent := WizardForm.InstallingPage;
+  DetailLabel := TLabel.Create(WizardForm);
+  DetailLabel.Parent := WizardForm;
   DetailLabel.Left := WizardForm.ProgressGauge.Left;
   DetailLabel.Top := ProgressLabel.Top + 24;
-  DetailLabel.Width := WizardForm.InstallingPage.Width - 20;
-  DetailLabel.Height := 60;
+  DetailLabel.Width := 400;
+  DetailLabel.Height := 120;
   DetailLabel.Font.Size := 8;
   DetailLabel.Font.Color := clGray;
-  DetailLabel.Caption := '';
+  DetailLabel.AutoSize := False;
   DetailLabel.WordWrap := True;
+  DetailLabel.Caption := '';
 
   WizardForm.BackButton.Caption := '< 上一步(&B)';
   WizardForm.NextButton.Caption := '下一步(&N) >';
@@ -178,12 +208,14 @@ begin
   end;
 end;
 
+function GetTickCount64: Cardinal; external 'GetTickCount@kernel32.dll stdcall';
+
 function WaitForServiceStop(const ServiceName: String; MaxSeconds: Integer): Boolean;
 var
   StartTime, Elapsed: Cardinal;
 begin
-  StartTime := GetTickCount;
-  while (GetTickCount - StartTime < MaxSeconds * 1000) do
+  StartTime := GetTickCount64;
+  while (GetTickCount64 - StartTime < MaxSeconds * 1000) do
   begin
     if not IsServiceRunning(ServiceName) then
     begin
@@ -195,45 +227,93 @@ begin
   Result := False;
 end;
 
-function RunPowerShellScript(const AppDir, ScriptName, Args: String; var ProgressDetail: String): Boolean;
+function RunPowerShellScript(const AppDir, ScriptName: String; const MainMsg: String): Boolean;
 var
-  ScriptPath, ProgressFilePath, Cmd: String;
+  ScriptPath, ProgressFilePath, DoneFilePath, Cmd: String;
   ResultCode: Integer;
+  LastLineCount, WaitCount: Integer;
   FileText: TArrayOfString;
   I: Integer;
 begin
   Result := False;
   ScriptPath := AppDir + '\resources\backend\python\' + ScriptName;
   ProgressFilePath := AppDir + '\.progress.log';
+  DoneFilePath := AppDir + '\.progress.done';
 
   if FileExists(ProgressFilePath) then
     DeleteFile(ProgressFilePath);
+  if FileExists(DoneFilePath) then
+    DeleteFile(DoneFilePath);
+
+  LastLineCount := 0;
+  ProgressLabel.Caption := MainMsg;
+  DetailLabel.Caption := '';
+  WizardForm.Repaint;
 
   Cmd := Format('-ExecutionPolicy Bypass -NoProfile -File "%s" "%s" -ProgressFile "%s"', [ScriptPath, AppDir, ProgressFilePath]);
 
-  if Exec('powershell.exe', Cmd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  if not Exec('powershell.exe', Cmd, '', SW_HIDE, ewNoWait, ResultCode) then
+  begin
+    DetailLabel.Caption := 'Failed to start PowerShell';
+    WizardForm.Repaint;
+    Result := False;
+    Exit;
+  end;
+
+  WaitCount := 0;
+  while not FileExists(DoneFilePath) do
   begin
     if FileExists(ProgressFilePath) then
     begin
       LoadStringsFromFile(ProgressFilePath, FileText);
-      for I := 0 to GetArrayLength(FileText) - 1 do
+      if GetArrayLength(FileText) > LastLineCount then
       begin
-        ProgressDetail := FileText[I];
-        Sleep(100);
+        for I := LastLineCount to GetArrayLength(FileText) - 1 do
+        begin
+          DetailLabel.Caption := FileText[I];
+        end;
+        LastLineCount := GetArrayLength(FileText);
       end;
-      DeleteFile(ProgressFilePath);
     end;
-
-    Result := (ResultCode = 0);
+    WizardForm.Repaint;
+    ProcessMessages;
+    Sleep(200);
+    WaitCount := WaitCount + 1;
+    if WaitCount > 3000 then
+    begin
+      DetailLabel.Caption := 'Operation timed out (10 min)';
+      WizardForm.Repaint;
+      Result := False;
+      Exit;
+    end;
   end;
+
+  if FileExists(DoneFilePath) then
+  begin
+    LoadStringsFromFile(DoneFilePath, FileText);
+    if (GetArrayLength(FileText) > 0) and (FileText[0] = '0') then
+      Result := True
+    else
+      Result := False;
+    DeleteFile(DoneFilePath);
+  end;
+
+  if FileExists(ProgressFilePath) then
+  begin
+    LoadStringsFromFile(ProgressFilePath, FileText);
+    if GetArrayLength(FileText) > 0 then
+      DetailLabel.Caption := FileText[GetArrayLength(FileText) - 1];
+    DeleteFile(ProgressFilePath);
+  end;
+
+  WizardForm.Repaint;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   AppDir, WinswExe, XmlPath, XmlContent: String;
   ResultCode: Integer;
-  ProgressDetail: String;
-  PythonExe, VersionCheck: String;
+  PythonExe: String;
 begin
   if CurStep = ssInstall then
   begin
@@ -264,22 +344,14 @@ begin
     WinswExe := AppDir + '\resources\winsw\ai-os-agent.exe';
     PythonExe := AppDir + '\runtime\python\python.exe';
 
-    ProgressDetail := '正在检查 Python 环境...';
-    if RunPowerShellScript(AppDir, 'download_python.ps1', '', ProgressDetail) then
-    begin
-      SetProgress(3, 6, '步骤 3/6：正在配置 Python 运行环境...', ProgressDetail);
-    end
-    else
+    if not RunPowerShellScript(AppDir, 'download_python.ps1', '步骤 3/6：正在配置 Python 运行环境...') then
     begin
       RaiseException('Python 环境配置失败，安装已中断。');
     end;
 
-    ProgressDetail := '正在安装 Python 依赖...';
-    if RunPowerShellScript(AppDir, 'install_deps.ps1', '', ProgressDetail) then
-    begin
-      SetProgress(4, 6, '步骤 4/6：正在安装 Python 依赖...', ProgressDetail);
-    end
-    else
+    SetProgress(4, 6, '步骤 4/6：正在安装 Python 依赖...', '');
+
+    if not RunPowerShellScript(AppDir, 'install_deps.ps1', '步骤 4/6：正在安装 Python 依赖...') then
     begin
       RaiseException('Python 依赖安装失败，安装已中断。');
     end;

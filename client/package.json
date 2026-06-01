@@ -6,8 +6,8 @@
   "main": "dist-electron/main/index.js",
   "scripts": {
     "dev": "vite",
-    "build": "npx vite build",
-    "package": "npx vite build && npx electron-builder --win",
+    "build": "node scripts/generate-build-info.js && npx vite build",
+    "package": "node scripts/generate-build-info.js && npx vite build && npx electron-builder --win",
     "installer": "iscc installer\\setup.iss",
     "release": "npm run package && npm run installer",
     "preview": "vite preview"
@@ -33,7 +33,7 @@
     "nodeGypRebuild": false,
     "buildDependenciesFromSource": false,
     "directories": {
-      "output": "release-v2"
+      "output": "release-v3"
     },
     "files": [
       "dist/**/*",
@@ -45,10 +45,6 @@
       {
         "from": "backend/python",
         "to": "backend/python"
-      },
-      {
-        "from": "resources/backend/python",
-        "to": "resources/backend/python"
       },
       {
         "from": "resources/winsw",

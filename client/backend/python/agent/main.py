@@ -4,6 +4,7 @@ import time
 import signal
 import logging
 import threading
+import json
 from datetime import datetime
 
 import uvicorn
@@ -12,6 +13,18 @@ from fastapi import FastAPI
 START_TIME = time.time()
 VERSION = "0.1.0"
 SHUTDOWN_DELAY = 5
+
+
+def load_build_info():
+    build_info_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'build_info.json')
+    try:
+        with open(build_info_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+BUILD_INFO = load_build_info()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,7 +68,8 @@ async def shutdown():
 
 @app.on_event("startup")
 async def on_startup():
-    logger.info(f"AI-OS Agent v{VERSION} started (pid={os.getpid()})")
+    build_time = BUILD_INFO.get("build_time", "unknown")
+    logger.info(f"AI-OS Agent v{VERSION} started (pid={os.getpid()}, build_time={build_time})")
 
 
 def handle_shutdown(signum, frame):
