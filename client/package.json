@@ -7,10 +7,9 @@
   "scripts": {
     "dev": "vite",
     "build": "npx vite build",
-    "build:python": "python scripts/build_python_runtime.py",
     "package": "npx vite build && npx electron-builder --win",
     "installer": "iscc installer\\setup.iss",
-    "release": "npm run build:python && npm run package && npm run installer",
+    "release": "npm run package && npm run installer",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -30,6 +29,9 @@
     "appId": "com.nndrobot.ai-os",
     "productName": "AI-OS",
     "compression": "store",
+    "npmRebuild": false,
+    "nodeGypRebuild": false,
+    "buildDependenciesFromSource": false,
     "directories": {
       "output": "release-v2"
     },
@@ -45,14 +47,12 @@
         "to": "backend/python"
       },
       {
+        "from": "resources/backend/python",
+        "to": "resources/backend/python"
+      },
+      {
         "from": "resources/winsw",
         "to": "winsw"
-      }
-    ],
-    "extraFiles": [
-      {
-        "from": "resources/python-runtime.zip",
-        "to": "resources/python-runtime.zip"
       }
     ],
     "win": {

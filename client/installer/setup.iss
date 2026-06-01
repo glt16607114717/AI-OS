@@ -24,6 +24,7 @@ DisableWelcomePage=no
 DisableDirPage=no
 DisableProgramGroupPage=yes
 CloseApplications=no
+AllowCancelDuringInstall=False
 
 [Messages]
 StatusExtractFiles=正在解压文件...
@@ -57,6 +58,7 @@ Type: filesandordirs; Name: "{app}\runtime"
 var
   ProgressLabel: TLabel;
   DetailLabel: TLabel;
+  ProgressFile: String;
 
 procedure InitializeWizard;
 begin
@@ -76,11 +78,12 @@ begin
   DetailLabel.Parent := WizardForm.InstallingPage;
   DetailLabel.Left := WizardForm.ProgressGauge.Left;
   DetailLabel.Top := ProgressLabel.Top + 24;
-  DetailLabel.Width := WizardForm.InstallingPage.Width;
-  DetailLabel.Height := 40;
+  DetailLabel.Width := WizardForm.InstallingPage.Width - 20;
+  DetailLabel.Height := 60;
   DetailLabel.Font.Size := 8;
   DetailLabel.Font.Color := clGray;
   DetailLabel.Caption := '';
+  DetailLabel.WordWrap := True;
 
   WizardForm.BackButton.Caption := '< 上一步(&B)';
   WizardForm.NextButton.Caption := '下一步(&N) >';
@@ -119,7 +122,7 @@ begin
     begin
       WizardForm.PageNameLabel.Caption := '准备安装';
       WizardForm.PageDescriptionLabel.Caption := '安装程序已准备好开始安装';
-      WizardForm.ReadyLabel.Caption := '安装程序已准备好开始在您的计算机上安装 AI-OS。' + #13#10 + #13#10 + '单击"安装"开始安装。';
+      WizardForm.ReadyLabel.Caption := '安装程序已准备好开始在您的计算机上安装 AI-OS。' + #13#10 + #13#10 + '注意：安装过程需要下载 Python 运行时环境（约 50MB），请确保网络连接正常。' + #13#10 + #13#10 + '单击"安装"开始安装。';
       WizardForm.NextButton.Caption := '安装(&I)';
     end;
     wpInstalling:
@@ -147,47 +150,141 @@ begin
   WizardForm.Repaint;
 end;
 
+function IsServiceRunning(const ServiceName: String): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := False;
+  if Exec('sc.exe', 'query ' + ServiceName + '', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    Result := (ResultCode = 0);
+  end;
+end;
+
+function SendShutdownSignal(const AppDir: String): Boolean;
+var
+  PythonExe, AgentScript, Cmd: String;
+  ResultCode: Integer;
+begin
+  Result := False;
+  PythonExe := AppDir + '\runtime\python\python.exe';
+  AgentScript := AppDir + '\resources\backend\python\agent\main.py';
+
+  if FileExists(PythonExe) and FileExists(AgentScript) and IsServiceRunning('AI-OS-Agent') then
+  begin
+    Cmd := Format('"%s" -c "import urllib.request; urllib.request.urlopen(''http://127.0.0.1:18731/shutdown'', timeout=5).read()"', [PythonExe]);
+    Exec('cmd.exe', '/c ' + Cmd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Result := (ResultCode = 0);
+  end;
+end;
+
+function WaitForServiceStop(const ServiceName: String; MaxSeconds: Integer): Boolean;
+var
+  StartTime, Elapsed: Cardinal;
+begin
+  StartTime := GetTickCount;
+  while (GetTickCount - StartTime < MaxSeconds * 1000) do
+  begin
+    if not IsServiceRunning(ServiceName) then
+    begin
+      Result := True;
+      Exit;
+    end;
+    Sleep(500);
+  end;
+  Result := False;
+end;
+
+function RunPowerShellScript(const AppDir, ScriptName, Args: String; var ProgressDetail: String): Boolean;
+var
+  ScriptPath, ProgressFilePath, Cmd: String;
+  ResultCode: Integer;
+  FileText: TArrayOfString;
+  I: Integer;
+begin
+  Result := False;
+  ScriptPath := AppDir + '\resources\backend\python\' + ScriptName;
+  ProgressFilePath := AppDir + '\.progress.log';
+
+  if FileExists(ProgressFilePath) then
+    DeleteFile(ProgressFilePath);
+
+  Cmd := Format('-ExecutionPolicy Bypass -NoProfile -File "%s" "%s" -ProgressFile "%s"', [ScriptPath, AppDir, ProgressFilePath]);
+
+  if Exec('powershell.exe', Cmd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    if FileExists(ProgressFilePath) then
+    begin
+      LoadStringsFromFile(ProgressFilePath, FileText);
+      for I := 0 to GetArrayLength(FileText) - 1 do
+      begin
+        ProgressDetail := FileText[I];
+        Sleep(100);
+      end;
+      DeleteFile(ProgressFilePath);
+    end;
+
+    Result := (ResultCode = 0);
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  AppDir: String;
-  WinswExe: String;
-  XmlPath: String;
-  XmlContent: String;
-  SetupScript: String;
-  PythonZip: String;
+  AppDir, WinswExe, XmlPath, XmlContent: String;
   ResultCode: Integer;
+  ProgressDetail: String;
+  PythonExe, VersionCheck: String;
 begin
   if CurStep = ssInstall then
   begin
-    WinswExe := ExpandConstant('{app}') + '\resources\winsw\ai-os-agent.exe';
-    if FileExists(WinswExe) then
+    AppDir := ExpandConstant('{app}');
+    WinswExe := AppDir + '\resources\winsw\ai-os-agent.exe';
+
+    if FileExists(WinswExe) and IsServiceRunning('AI-OS-Agent') then
     begin
-      Exec(WinswExe, 'stop', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-      Sleep(2000);
+      SetProgress(1, 6, '步骤 1/6：正在停止旧服务...', '发送优雅关闭信号，等待服务停止');
+      SendShutdownSignal(AppDir);
+      if not WaitForServiceStop('AI-OS-Agent', 30) then
+      begin
+        Exec(WinswExe, 'stop', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+        Sleep(2000);
+      end;
+    end
+    else
+    begin
+      SetProgress(1, 6, '步骤 1/6：正在准备安装...', '解压应用程序文件');
     end;
-    SetProgress(1, 6, '步骤 1/6：正在安装应用程序文件...', '正在将程序文件复制到目标文件夹');
+
+    SetProgress(2, 6, '步骤 2/6：正在解压应用程序文件...', '正在将程序文件复制到目标文件夹');
   end;
 
   if CurStep = ssPostInstall then
   begin
     AppDir := ExpandConstant('{app}');
     WinswExe := AppDir + '\resources\winsw\ai-os-agent.exe';
-    SetupScript := AppDir + '\resources\backend\python\setup_env.ps1';
-    PythonZip := AppDir + '\resources\python-runtime.zip';
+    PythonExe := AppDir + '\runtime\python\python.exe';
 
-    if FileExists(PythonZip) then
+    ProgressDetail := '正在检查 Python 环境...';
+    if RunPowerShellScript(AppDir, 'download_python.ps1', '', ProgressDetail) then
     begin
-      SetProgress(2, 6, '步骤 2/6：正在检查并配置 Python 运行环境...', '检测版本，如有更新则重新解压');
-      if FileExists(SetupScript) then
-        Exec('powershell.exe',
-          '-ExecutionPolicy Bypass -NoProfile -File "' + SetupScript + '" "' + AppDir + '"',
-          '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    end else
+      SetProgress(3, 6, '步骤 3/6：正在配置 Python 运行环境...', ProgressDetail);
+    end
+    else
     begin
-      SetProgress(2, 6, '步骤 2/6：未找到 Python 运行环境包', '将在首次启动时配置');
+      RaiseException('Python 环境配置失败，安装已中断。');
     end;
 
-    SetProgress(3, 6, '步骤 3/6：正在注册后台服务...', '更新服务配置并重启');
+    ProgressDetail := '正在安装 Python 依赖...';
+    if RunPowerShellScript(AppDir, 'install_deps.ps1', '', ProgressDetail) then
+    begin
+      SetProgress(4, 6, '步骤 4/6：正在安装 Python 依赖...', ProgressDetail);
+    end
+    else
+    begin
+      RaiseException('Python 依赖安装失败，安装已中断。');
+    end;
+
+    SetProgress(5, 6, '步骤 5/6：正在注册后台服务...', '生成服务配置文件并注册系统服务');
 
     XmlPath := AppDir + '\resources\winsw\ai-os-agent.xml';
     XmlContent :=
@@ -212,27 +309,28 @@ begin
 
     if FileExists(WinswExe) then
     begin
-      SetProgress(4, 6, '步骤 4/6：正在重启后台服务...', '停止旧服务 → 更新配置 → 重新注册 → 启动');
-      Exec(WinswExe, 'stop', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-      Sleep(2000);
-      Exec(WinswExe, 'uninstall', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-      Sleep(1000);
-      Exec(WinswExe, 'install', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-      Sleep(2000);
-      Exec(WinswExe, 'start', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      SetProgress(5, 6, '步骤 5/6：正在注册后台服务...', '停止旧服务 → 更新配置 → 重新注册 → 启动');
+
+      if FileExists(XmlPath) then
+      begin
+        Exec(WinswExe, 'stop', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+        Sleep(1000);
+        Exec(WinswExe, 'uninstall', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+        Sleep(1000);
+        Exec(WinswExe, 'install', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+        Sleep(1000);
+        Exec(WinswExe, 'start', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      end;
     end;
 
-    SetProgress(5, 6, '步骤 5/6：正在验证安装...', '检查服务状态');
-
-    SetProgress(6, 6, '步骤 6/6：安装完成！', 'AI-OS 已准备就绪，单击"完成"关闭安装向导。');
-    Sleep(1500);
+    SetProgress(6, 6, '步骤 6/6：安装完成！', 'AI-OS 已成功安装并运行，单击"完成"关闭安装向导。');
+    Sleep(2000);
   end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
-  AppDir: String;
-  WinswExe: String;
+  AppDir, WinswExe: String;
   ResultCode: Integer;
 begin
   if CurUninstallStep = usPostUninstall then
@@ -242,8 +340,15 @@ begin
 
     if FileExists(WinswExe) then
     begin
-      Exec(WinswExe, 'stop', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-      Sleep(3000);
+      SendShutdownSignal(AppDir);
+      Sleep(5000);
+
+      if IsServiceRunning('AI-OS-Agent') then
+      begin
+        Exec(WinswExe, 'stop', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+        Sleep(3000);
+      end;
+
       Exec(WinswExe, 'uninstall', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     end;
   end;

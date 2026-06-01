@@ -3,6 +3,7 @@ import sys
 import time
 import signal
 import logging
+import threading
 from datetime import datetime
 
 import uvicorn
@@ -10,6 +11,7 @@ from fastapi import FastAPI
 
 START_TIME = time.time()
 VERSION = "0.1.0"
+SHUTDOWN_DELAY = 5
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +31,25 @@ async def health():
         "version": VERSION,
         "pid": os.getpid(),
         "started_at": datetime.fromtimestamp(START_TIME).isoformat(),
+    }
+
+
+@app.post("/shutdown")
+async def shutdown():
+    logger.info("Received shutdown request, shutting down gracefully in {} seconds...".format(SHUTDOWN_DELAY))
+
+    def delayed_exit():
+        time.sleep(SHUTDOWN_DELAY)
+        logger.info("Executing shutdown...")
+        sys.exit(0)
+
+    thread = threading.Thread(target=delayed_exit, daemon=True)
+    thread.start()
+
+    return {
+        "ok": True,
+        "message": "Graceful shutdown initiated",
+        "delay_seconds": SHUTDOWN_DELAY
     }
 
 
