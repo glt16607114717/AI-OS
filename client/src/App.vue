@@ -24,45 +24,60 @@
     </div>
 
     <div class="content">
-      <div class="hero">
-        <div class="logo-ring">
-          <div class="logo-core"></div>
-        </div>
-        <h1 class="hero-title">AI-OS</h1>
-        <p class="hero-subtitle">Enterprise AI Asset Operating System</p>
-      </div>
+      <SetupWizard
+        v-if="setupMode"
+        :current-step="setupProgress.stepIndex"
+        :step-name="setupProgress.step || ''"
+        :total-steps="setupProgress.totalSteps"
+        :percent="setupProgress.percent"
+        :detail="setupProgress.detail"
+        :error="setupProgress.error"
+        :done="setupProgress.done"
+        @retry="retrySetup"
+      />
 
-      <div class="status-panel">
-        <div class="status-row">
-          <span class="status-label">Agent Service</span>
-          <div class="status-badge" :class="online ? 'badge-online' : 'badge-offline'">
-            <span class="badge-dot"></span>
-            <span>{{ online ? 'Online' : 'Offline' }}</span>
+      <template v-else>
+        <div class="hero">
+          <div class="logo-ring">
+            <div class="logo-core"></div>
+          </div>
+          <h1 class="hero-title">AI-OS</h1>
+          <p class="hero-subtitle">Enterprise AI Asset Operating System</p>
+        </div>
+
+        <div class="status-panel">
+          <div class="status-row">
+            <span class="status-label">Agent Service</span>
+            <div class="status-badge" :class="online ? 'badge-online' : 'badge-offline'">
+              <span class="badge-dot"></span>
+              <span>{{ online ? 'Online' : 'Offline' }}</span>
+            </div>
+          </div>
+          <div class="status-row" v-if="online">
+            <span class="status-label">Uptime</span>
+            <span class="status-value">{{ formatUptime(uptime) }}</span>
+          </div>
+          <div class="status-row" v-if="online">
+            <span class="status-label">Version</span>
+            <span class="status-value">{{ version }}</span>
+          </div>
+          <div class="status-row" v-if="online">
+            <span class="status-label">PID</span>
+            <span class="status-value">{{ pid }}</span>
+          </div>
+          <div class="status-row" v-if="!online">
+            <span class="status-label">Status</span>
+            <span class="status-value status-waiting">Waiting for service...</span>
           </div>
         </div>
-        <div class="status-row" v-if="online">
-          <span class="status-label">Uptime</span>
-          <span class="status-value">{{ formatUptime(uptime) }}</span>
-        </div>
-        <div class="status-row" v-if="online">
-          <span class="status-label">Version</span>
-          <span class="status-value">{{ version }}</span>
-        </div>
-        <div class="status-row" v-if="online">
-          <span class="status-label">PID</span>
-          <span class="status-value">{{ pid }}</span>
-        </div>
-        <div class="status-row" v-if="!online">
-          <span class="status-label">Status</span>
-          <span class="status-value status-waiting">Waiting for service...</span>
-        </div>
-      </div>
+      </template>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
+import SetupWizard from './setup/SetupWizard.vue'
 
 const windowAiOS = window.aiOS
 
@@ -70,8 +85,26 @@ const online = ref(false)
 const uptime = ref(0)
 const version = ref('')
 const pid = ref(0)
+const setupMode = ref(false)
+
+const setupProgress = ref<{
+  step: string
+  stepIndex: number
+  totalSteps: number
+  percent: number
+  detail: string
+  error?: string
+  done?: boolean
+}>({
+  step: '',
+  stepIndex: 0,
+  totalSteps: 5,
+  percent: 0,
+  detail: '',
+})
 
 let timer: ReturnType<typeof setInterval> | null = null
+let healthChecking = false
 
 function formatUptime(seconds: number): string {
   const h = Math.floor(seconds / 3600)
@@ -83,6 +116,8 @@ function formatUptime(seconds: number): string {
 }
 
 async function checkHealth() {
+  if (healthChecking) return
+  healthChecking = true
   try {
     const res = await windowAiOS.agentHealth()
     online.value = res.ok
@@ -93,12 +128,57 @@ async function checkHealth() {
     }
   } catch {
     online.value = false
+  } finally {
+    healthChecking = false
   }
 }
 
-onMounted(() => {
+async function checkSetupNeeded() {
+  const needed = await windowAiOS.checkSetupNeeded()
+  if (needed) {
+    setupMode.value = true
+    startSetup()
+  } else {
+    setupMode.value = false
+    checkHealth()
+    timer = setInterval(checkHealth, 10000)
+  }
+}
+
+async function startSetup() {
+  try {
+    await windowAiOS.runSetup((info: any) => {
+      setupProgress.value = { ...info }
+      if (info.done) {
+        setTimeout(() => {
+          finishSetup()
+        }, 1500)
+      }
+    })
+  } catch {}
+}
+
+async function retrySetup() {
+  setupProgress.value = {
+    step: '',
+    stepIndex: 0,
+    totalSteps: 5,
+    percent: 0,
+    detail: '',
+    error: undefined,
+    done: undefined,
+  }
+  await startSetup()
+}
+
+function finishSetup() {
+  setupMode.value = false
   checkHealth()
-  timer = setInterval(checkHealth, 5000)
+  timer = setInterval(checkHealth, 10000)
+}
+
+onMounted(() => {
+  checkSetupNeeded()
 })
 
 onUnmounted(() => {

@@ -1,25 +1,171 @@
-import { app, ipcMain } from 'electron'
-import { logger } from './logger'
-import { windowManager } from './window-manager'
-import { healthCheck, ensureService } from './service-manager'
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } from 'electron'
+import * as path from 'path'
+import * as fs from 'fs'
+import * as http from 'http'
+import { SetupManager } from './setup-manager'
 
-app.whenReady().then(async () => {
-  logger.info('========== AI-OS Client Starting ==========')
-  logger.info(`Platform: ${process.platform}`)
-  logger.info(`Packaged: ${app.isPackaged}`)
+let mainWindow: BrowserWindow | null = null
+let tray: Tray | null = null
 
-  const result = await ensureService()
-  logger.info(`Service ensure result: ok=${result.ok}, error=${result.error || 'none'}`)
+function getAppDir(): string {
+  if (app.isPackaged) {
+    const exePath = app.getPath('exe')
+    const dir = path.dirname(exePath)
+    const logLine = `[getAppDir] exe=${exePath} dir=${dir}\n`
+    try { fs.appendFileSync(path.join(dir, 'setup-debug.log'), logLine) } catch {}
+    return dir
+  }
+  return path.join(__dirname, '..', '..')
+}
 
-  windowManager.create()
+function createTray() {
+  const iconPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'icon.ico')
+    : path.join(__dirname, '..', '..', 'public', 'icon.ico')
+  const icon = nativeImage.createFromPath(iconPath)
+  tray = new Tray(icon.resize({ width: 16, height: 16 }))
+  tray.setToolTip('AI-OS')
 
-  ipcMain.handle('agent:health', () => healthCheck())
-  ipcMain.handle('window:minimize', () => windowManager.minimize())
-  ipcMain.handle('window:maximize', () => windowManager.maximize())
-  ipcMain.handle('window:close', () => windowManager.close())
-  ipcMain.handle('window:isMaximized', () => windowManager.isMaximized())
-})
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: '显示 AI-OS',
+      click: () => {
+        if (!mainWindow) createWindow()
+        mainWindow?.show()
+        mainWindow?.focus()
+      },
+    },
+    { type: 'separator' },
+    {
+      label: '退出',
+      click: () => {
+        tray?.destroy()
+        tray = null
+        app.quit()
+      },
+    },
+  ])
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+  tray.setContextMenu(contextMenu)
+
+  tray.on('double-click', () => {
+    if (!mainWindow) createWindow()
+    mainWindow?.show()
+    mainWindow?.focus()
+  })
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 800,
+    height: 600,
+    frame: false,
+    resizable: true,
+    minWidth: 640,
+    minHeight: 480,
+    webPreferences: {
+      preload: path.join(__dirname, '..', 'preload', 'index.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  })
+
+  if (app.isPackaged) {
+    mainWindow.loadFile(path.join(__dirname, '..', '..', 'dist', 'index.html'))
+  } else {
+    mainWindow.loadURL('http://localhost:5173')
+  }
+
+  mainWindow.on('close', (e) => {
+    e.preventDefault()
+    mainWindow?.hide()
+  })
+
+  mainWindow.on('closed', () => {
+    mainWindow = null
+  })
+}
+
+function registerIpcHandlers() {
+  ipcMain.handle('window:minimize', () => mainWindow?.minimize())
+  ipcMain.handle('window:maximize', () => {
+    if (mainWindow?.isMaximized()) {
+      mainWindow.unmaximize()
+    } else {
+      mainWindow?.maximize()
+    }
+  })
+  ipcMain.handle('window:close', () => mainWindow?.close())
+
+  ipcMain.handle('agent:health', async () => {
+    try {
+      return await new Promise((resolve) => {
+        const req = http.get('http://127.0.0.1:18731/health', { timeout: 3000 }, (res) => {
+          let data = ''
+          res.on('data', (chunk: string) => { data += chunk })
+          res.on('end', () => {
+            try { resolve(JSON.parse(data)) } catch { resolve({ ok: false }) }
+          })
+        })
+        req.on('error', () => resolve({ ok: false }))
+        req.on('timeout', () => { req.destroy(); resolve({ ok: false }) })
+      })
+    } catch {
+      return { ok: false }
+    }
+  })
+
+  ipcMain.handle('setup:checkNeeded', async () => {
+    const appDir = getAppDir()
+    const manager = new SetupManager(appDir, () => {})
+    if (!manager.isPythonReady()) return true
+
+    return await new Promise((resolve) => {
+      const req = http.get('http://127.0.0.1:18731/health', { timeout: 3000 }, (res) => {
+        let data = ''
+        res.on('data', (chunk: string) => { data += chunk })
+        res.on('end', () => {
+          try { resolve(!JSON.parse(data).ok) } catch { resolve(true) }
+        })
+      })
+      req.on('error', () => resolve(true))
+      req.on('timeout', () => { req.destroy(); resolve(true) })
+    })
+  })
+
+  ipcMain.handle('setup:run', async (_event, channel: string) => {
+    const appDir = getAppDir()
+    const manager = new SetupManager(appDir, (info) => {
+      mainWindow?.webContents.send(channel, info)
+    })
+    await manager.runFullSetup()
+  })
+}
+
+const gotTheLock = app.requestSingleInstanceLock()
+
+if (!gotTheLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow) createWindow()
+    mainWindow?.show()
+    mainWindow?.focus()
+  })
+
+  app.whenReady().then(() => {
+    registerIpcHandlers()
+    createTray()
+    createWindow()
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow()
+      }
+    })
+  })
+}
+
+app.on('before-quit', () => {
+  mainWindow?.removeAllListeners('close')
 })

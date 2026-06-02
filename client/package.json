@@ -8,8 +8,6 @@
     "dev": "vite",
     "build": "node scripts/generate-build-info.js && npx vite build",
     "package": "node scripts/generate-build-info.js && npx vite build && npx electron-builder --win",
-    "installer": "iscc installer\\setup.iss",
-    "release": "npm run package && npm run installer",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -33,7 +31,7 @@
     "nodeGypRebuild": false,
     "buildDependenciesFromSource": false,
     "directories": {
-      "output": "release-v3"
+      "output": "release-v4"
     },
     "files": [
       "dist/**/*",
@@ -42,6 +40,10 @@
       "!src"
     ],
     "extraResources": [
+      {
+        "from": "public/icon.ico",
+        "to": "icon.ico"
+      },
       {
         "from": "backend/python",
         "to": "backend/python"
@@ -52,12 +54,27 @@
       }
     ],
     "win": {
+      "icon": "public/icon.ico",
       "target": [
         {
-          "target": "dir",
+          "target": "nsis",
           "arch": ["x64"]
         }
       ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "installerLanguages": ["zh-CN"],
+      "language": "2052",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AI-OS",
+      "uninstallDisplayName": "AI-OS",
+      "artifactName": "AI-OS-Setup-${version}.${ext}",
+      "include": "installer/installer.nsh"
     }
   }
 }

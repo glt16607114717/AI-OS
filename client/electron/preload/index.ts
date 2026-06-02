@@ -1,9 +1,16 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('aiOS', {
-  agentHealth: () => ipcRenderer.invoke('agent:health'),
   windowMinimize: () => ipcRenderer.invoke('window:minimize'),
   windowMaximize: () => ipcRenderer.invoke('window:maximize'),
   windowClose: () => ipcRenderer.invoke('window:close'),
-  windowIsMaximized: () => ipcRenderer.invoke('window:isMaximized'),
+  agentHealth: () => ipcRenderer.invoke('agent:health'),
+  checkSetupNeeded: () => ipcRenderer.invoke('setup:checkNeeded'),
+  runSetup: (onProgress: (info: any) => void) => {
+    const channel = 'setup:progress:' + Date.now()
+    ipcRenderer.on(channel, (_event, info) => onProgress(info))
+    return ipcRenderer.invoke('setup:run', channel).finally(() => {
+      ipcRenderer.removeAllListeners(channel)
+    })
+  },
 })
