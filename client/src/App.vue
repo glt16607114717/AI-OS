@@ -37,37 +37,18 @@
       />
 
       <template v-else>
-        <div class="hero">
+        <!-- Splash: pulsing logo, shown for 2.5s -->
+        <div v-if="!showDashboard" class="splash-page">
           <div class="logo-ring">
             <div class="logo-core"></div>
           </div>
-          <h1 class="hero-title">AI-OS</h1>
-          <p class="hero-subtitle">Enterprise AI Asset Operating System</p>
+          <h1 class="splash-title">AI-OS</h1>
         </div>
 
-        <div class="status-panel">
-          <div class="status-row">
-            <span class="status-label">Agent Service</span>
-            <div class="status-badge" :class="online ? 'badge-online' : 'badge-offline'">
-              <span class="badge-dot"></span>
-              <span>{{ online ? 'Online' : 'Offline' }}</span>
-            </div>
-          </div>
-          <div class="status-row" v-if="online">
-            <span class="status-label">Uptime</span>
-            <span class="status-value">{{ formatUptime(uptime) }}</span>
-          </div>
-          <div class="status-row" v-if="online">
-            <span class="status-label">Version</span>
-            <span class="status-value">{{ version }}</span>
-          </div>
-          <div class="status-row" v-if="online">
-            <span class="status-label">PID</span>
-            <span class="status-value">{{ pid }}</span>
-          </div>
-          <div class="status-row" v-if="!online">
-            <span class="status-label">Status</span>
-            <span class="status-value status-waiting">Waiting for service...</span>
+        <!-- Dashboard -->
+        <div v-if="showDashboard" class="dashboard">
+          <div class="dash-body">
+            <router-view />
           </div>
         </div>
       </template>
@@ -85,7 +66,8 @@ const online = ref(false)
 const uptime = ref(0)
 const version = ref('')
 const pid = ref(0)
-const setupMode = ref(false)
+const setupMode = ref(true)
+const showDashboard = ref(false)
 
 const setupProgress = ref<{
   step: string
@@ -133,18 +115,6 @@ async function checkHealth() {
   }
 }
 
-async function checkSetupNeeded() {
-  const needed = await windowAiOS.checkSetupNeeded()
-  if (needed) {
-    setupMode.value = true
-    startSetup()
-  } else {
-    setupMode.value = false
-    checkHealth()
-    timer = setInterval(checkHealth, 10000)
-  }
-}
-
 async function startSetup() {
   try {
     await windowAiOS.runSetup((info: any) => {
@@ -174,11 +144,24 @@ async function retrySetup() {
 function finishSetup() {
   setupMode.value = false
   checkHealth()
-  timer = setInterval(checkHealth, 10000)
+  // Show splash for 2.5s, then switch to dashboard
+  setTimeout(() => {
+    showDashboard.value = true
+  }, 2500)
 }
 
-onMounted(() => {
-  checkSetupNeeded()
+onMounted(async () => {
+  const needed = await windowAiOS.checkSetupNeeded()
+  if (needed) {
+    startSetup()
+  } else {
+    setupMode.value = false
+    checkHealth()
+    setTimeout(() => {
+      showDashboard.value = true
+      timer = setInterval(checkHealth, 10000)
+    }, 2500)
+  }
 })
 
 onUnmounted(() => {
@@ -195,10 +178,7 @@ onUnmounted(() => {
 
 body {
   font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  background: #09090b;
-  color: #fafafa;
   overflow: hidden;
-  user-select: none;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -273,127 +253,72 @@ body {
   flex: 1;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 48px;
+  overflow: hidden;
 }
 
-.hero {
-  text-align: center;
-}
-
-.logo-ring {
-  width: 80px;
-  height: 80px;
-  border-radius: 20px;
-  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a78bfa 100%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin: 0 auto 24px;
-  box-shadow: 0 0 40px rgba(99, 102, 241, 0.15);
-  animation: logo-pulse 3s ease-in-out infinite;
-}
-
-.logo-core {
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
+.loading-page {
+  flex: 1;
   background: #09090b;
 }
 
-@keyframes logo-pulse {
-  0%, 100% { box-shadow: 0 0 40px rgba(99, 102, 241, 0.15); }
-  50% { box-shadow: 0 0 60px rgba(99, 102, 241, 0.25); }
-}
-
-.hero-title {
-  font-size: 28px;
-  font-weight: 700;
-  letter-spacing: 4px;
-  color: #fafafa;
-  margin-bottom: 8px;
-}
-
-.hero-subtitle {
-  font-size: 13px;
-  color: #52525b;
-  letter-spacing: 1px;
-}
-
-.status-panel {
-  width: 380px;
-  background: #111113;
-  border: 1px solid #1e1e23;
-  border-radius: 12px;
-  padding: 20px 24px;
+/* Splash page - light background, pulsing text */
+.splash-page {
+  flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  align-items: center;
+  justify-content: center;
+  background: #f5f7fa;
 }
 
-.status-row {
+.logo-ring {
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  background: rgba(255,255,255,0.2);
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
+  margin: 0 auto 20px;
+  animation: splash-pulse 2s ease-in-out infinite;
 }
 
-.status-label {
-  font-size: 13px;
-  color: #71717a;
-  font-weight: 500;
+.logo-core {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: rgba(99, 102, 241, 0.9);
 }
 
-.status-value {
-  font-size: 13px;
-  color: #d4d4d8;
-  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+@keyframes splash-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.7; box-shadow: 0 0 20px rgba(99,102,241,0.1); }
+  50% { transform: scale(1.08); opacity: 1; box-shadow: 0 0 40px rgba(99,102,241,0.3); }
 }
 
-.status-waiting {
-  color: #52525b;
-  font-style: italic;
-  font-family: inherit;
+.splash-title {
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: 6px;
+  color: #409eff;
+  animation: text-pulse 1.5s ease-in-out infinite;
 }
 
-.status-badge {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 10px;
-  border-radius: 20px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.badge-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-}
-
-.badge-online {
-  background: rgba(34, 197, 94, 0.1);
-  color: #22c55e;
-}
-
-.badge-online .badge-dot {
-  background: #22c55e;
-  box-shadow: 0 0 8px rgba(34, 197, 94, 0.5);
-  animation: dot-pulse 2s ease-in-out infinite;
-}
-
-.badge-offline {
-  background: rgba(113, 113, 122, 0.1);
-  color: #71717a;
-}
-
-.badge-offline .badge-dot {
-  background: #52525b;
-}
-
-@keyframes dot-pulse {
+@keyframes text-pulse {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+  50% { opacity: 0.3; }
+}
+
+/* Dashboard - light background for Element Plus */
+.dashboard {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: #f5f7fa;
+}
+
+.dash-body {
+  flex: 1;
+  overflow: auto;
+  padding: 20px;
 }
 </style>

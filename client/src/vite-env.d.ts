@@ -16,6 +16,9 @@ interface AgentHealthResult {
 
 interface AiOSApi {
   agentHealth: () => Promise<AgentHealthResult>
+  agentRequest: (action: string, params: Record<string, unknown>) => Promise<any>
+  checkSetupNeeded: () => Promise<boolean>
+  runSetup: (onProgress: (info: any) => void) => Promise<void>
   windowMinimize: () => Promise<void>
   windowMaximize: () => Promise<void>
   windowClose: () => Promise<void>

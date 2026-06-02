@@ -97,6 +97,46 @@ function registerIpcHandlers() {
   })
   ipcMain.handle('window:close', () => mainWindow?.close())
 
+  ipcMain.handle('agent:request', async (_event, action: string, payload: any) => {
+    // Route to different endpoints based on action prefix
+    let apiPath = '/api/voice'
+    if (action === 'voice_download_model') apiPath = '/api/voice/download-model'
+    else if (action === 'voice_model_status') apiPath = '/api/voice/model-status'
+    else if (!action.startsWith('voice_')) apiPath = '/api'
+
+    const method = (action === 'voice_model_status') ? 'GET' : 'POST'
+
+    if (method === 'GET') {
+      return new Promise((resolve) => {
+        const req = http.get(`http://127.0.0.1:18731${apiPath}`, { timeout: 5000 }, (res) => {
+          let data = ''
+          res.on('data', (chunk: string) => { data += chunk })
+          res.on('end', () => { try { resolve(JSON.parse(data)) } catch { resolve({ ok: false, error: 'Parse error' }) } })
+        })
+        req.on('error', () => resolve({ ok: false, error: 'Agent not available' }))
+      })
+    }
+
+    const isEmptyPost = action === 'voice_download_model'
+    const body = isEmptyPost ? '' : JSON.stringify({ action, payload: payload || {} })
+    const headers: Record<string, string> = isEmptyPost
+      ? { 'Content-Length': '0' }
+      : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+    return new Promise((resolve) => {
+      const req = http.request(
+        { hostname: '127.0.0.1', port: 18731, path: apiPath, method: 'POST', headers },
+        (res) => {
+          let data = ''
+          res.on('data', (chunk: string) => { data += chunk })
+          res.on('end', () => { try { resolve(JSON.parse(data)) } catch { resolve({ ok: false, error: 'Parse error' }) } })
+        },
+      )
+      req.on('error', () => resolve({ ok: false, error: 'Agent not available' }))
+      if (!isEmptyPost) req.write(body)
+      req.end()
+    })
+  })
+
   ipcMain.handle('agent:health', async () => {
     try {
       return await new Promise((resolve) => {
@@ -135,6 +175,16 @@ function registerIpcHandlers() {
     if (healthOk) return false
 
     // Service not running but Python exists — try to start service
+    // Only if the service is already registered (not first install)
+    const { execSync } = require('child_process')
+    let serviceExists = false
+    try {
+      execSync('sc query AI-OS-Agent', { windowsHide: true, timeout: 3000 })
+      serviceExists = true
+    } catch { serviceExists = false }
+
+    if (!serviceExists) return true
+
     const winswExe = path.join(appDir, 'resources', 'winsw', 'ai-os-agent.exe')
     if (fs.existsSync(winswExe)) {
       try {

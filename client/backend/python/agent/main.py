@@ -9,10 +9,15 @@ from datetime import datetime
 
 import uvicorn
 from fastapi import FastAPI
+from pydantic import BaseModel
+from typing import Optional, Any
 
 START_TIME = time.time()
 VERSION = "0.1.0"
 SHUTDOWN_DELAY = 5
+
+# Voice module (lazy import to avoid crash if vosk not installed)
+voice = None
 
 
 def load_build_info():
@@ -74,8 +79,104 @@ async def shutdown():
 
 @app.on_event("startup")
 async def on_startup():
+    global voice
     build_time = BUILD_INFO.get("build_time", "unknown")
     logger.info(f"AI-OS Agent v{VERSION} started (pid={os.getpid()}, build_time={build_time})")
+    try:
+        from voice import init_voice
+        voice = init_voice()
+        if voice:
+            logger.info("Voice module initialized")
+    except Exception as e:
+        logger.warning(f"Voice module not available: {e}")
+
+
+# --- Voice API ---
+
+class VoiceActionRequest(BaseModel):
+    action: str
+    payload: dict = {}
+
+@app.post("/api/voice")
+async def voice_api(req: VoiceActionRequest):
+    if voice is None:
+        return {"ok": False, "error": "Voice module not available"}
+
+    action = req.action
+    payload = req.payload
+
+    try:
+        if action == "voice_status":
+            status = voice.get_status()
+            return {"ok": True, **status}
+        elif action == "voice_set_enabled":
+            voice.set_enabled(payload.get("enabled", False))
+            return {"ok": True}
+        elif action == "voice_start":
+            voice.start_voice()
+            return {"ok": True}
+        elif action == "voice_stop":
+            voice.stop_voice()
+            return {"ok": True}
+        elif action == "voice_add_command":
+            voice.add_command(payload.get("phrase", ""))
+            return {"ok": True}
+        elif action == "voice_update_command":
+            voice.update_command(
+                payload.get("index", 0),
+                phrase=payload.get("phrase"),
+                position=payload.get("position"),
+                enabled=payload.get("enabled"),
+            )
+            return {"ok": True}
+        elif action == "voice_remove_command":
+            voice.remove_command(payload.get("index", 0))
+            return {"ok": True}
+        elif action == "voice_start_calibration":
+            voice.start_calibration(payload.get("index", 0))
+            return {"ok": True}
+        elif action == "voice_cancel_calibration":
+            voice.cancel_calibration()
+            return {"ok": True}
+        else:
+            return {"ok": False, "error": f"Unknown action: {action}"}
+    except Exception as e:
+        logger.error(f"Voice API error: {e}")
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/voice/download-model")
+async def voice_download_model():
+    """下载 Vosk 模型（在后台线程中执行）"""
+    import threading
+
+    def do_download():
+        try:
+            from voice.config import download_vosk_model
+            path = download_vosk_model()
+            logger.info(f"Vosk model downloaded to {path}")
+            # Re-init voice with new model
+            global voice
+            if voice is None:
+                from voice import init_voice
+                voice = init_voice()
+        except Exception as e:
+            logger.error(f"Vosk model download failed: {e}")
+
+    thread = threading.Thread(target=do_download, daemon=True)
+    thread.start()
+    return {"ok": True, "message": "Download started"}
+
+
+@app.get("/api/voice/model-status")
+async def voice_model_status():
+    """检查 Vosk 模型是否已下载"""
+    try:
+        from voice.config import find_vosk_model
+        path = find_vosk_model()
+        return {"ok": True, "installed": path is not None, "path": path}
+    except Exception as e:
+        return {"ok": True, "installed": False, "error": str(e)}
 
 
 def handle_shutdown(signum, frame):
