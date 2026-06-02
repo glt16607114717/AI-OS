@@ -1,11 +1,17 @@
 !macro customInit
-  StrCpy $INSTDIR "C:\AI-OS"
+  ReadRegStr $INSTDIR HKLM "Software\AI-OS" "InstallDir"
+  StrCmp $INSTDIR "" 0 has_path
+    StrCpy $INSTDIR "C:\AI-OS"
+    Goto done_init
+  has_path:
+    ExecWait 'net stop AI-OS-Agent' $0
+    Sleep 1000
+    ExecWait 'taskkill /F /IM pythonw.exe' $0
+    ExecWait 'taskkill /F /IM AI-OS.exe' $0
+    Sleep 1000
+  done_init:
 !macroend
 
 !macro customInstall
-  IfFileExists "$TEMP\ai-os-runtime" 0 done_install
-  IfFileExists "$INSTDIR\runtime" done_install 0
-  Rename "$TEMP\ai-os-runtime" "$INSTDIR\runtime"
-
-  done_install:
+  WriteRegStr HKLM "Software\AI-OS" "InstallDir" "$INSTDIR"
 !macroend

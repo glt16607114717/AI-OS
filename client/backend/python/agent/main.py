@@ -49,6 +49,7 @@ async def health():
         "version": VERSION,
         "pid": os.getpid(),
         "started_at": datetime.fromtimestamp(START_TIME).isoformat(),
+        "build_time": BUILD_INFO.get("build_time", "unknown"),
     }
 
 

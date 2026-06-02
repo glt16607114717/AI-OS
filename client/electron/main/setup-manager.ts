@@ -22,6 +22,7 @@ const NUGET_URL = 'https://registry.npmmirror.com/-/binary/python/3.12.10/python
 const GET_PIP_URL = 'https://bootstrap.pypa.io/get-pip.py'
 const PIP_INDEX = 'https://mirrors.aliyun.com/pypi/simple'
 const AGENT_PORT = 18731
+const DATA_DIR = path.join(process.env.ProgramData || 'C:\\ProgramData', 'AI-OS')
 
 export class SetupManager {
   private appDir: string
@@ -33,7 +34,7 @@ export class SetupManager {
 
   constructor(appDir: string, onProgress: ProgressCallback) {
     this.appDir = appDir
-    this.pythonDir = path.join(appDir, 'runtime', 'python')
+    this.pythonDir = path.join(DATA_DIR, 'runtime', 'python')
     this.onProgress = onProgress
     this.logFile = path.join(appDir, 'setup-debug.log')
   }
@@ -270,7 +271,8 @@ export class SetupManager {
 
     this.emit({ stepIndex: this.currentStepIndex, totalSteps: this.totalVisibleSteps, percent: 8, detail: '正在升级 pip...' })
     await this.execAsync(this.getPythonExe(),
-      ['-m', 'pip', 'install', '--upgrade', 'pip', '-i', PIP_INDEX, '--no-warn-script-location'])
+      ['-m', 'pip', 'install', '--upgrade', 'pip', '-i', PIP_INDEX, '--no-warn-script-location',
+       '--target', path.join(this.pythonDir, 'Lib', 'site-packages')])
 
     const reqFile = path.join(this.appDir, 'resources', 'backend', 'python', 'requirements.txt')
     if (!fs.existsSync(reqFile)) {
@@ -313,7 +315,8 @@ export class SetupManager {
       })
 
       await this.execAsync(this.getPythonExe(),
-        ['-m', 'pip', 'install', req, '-i', PIP_INDEX, '--no-warn-script-location'])
+        ['-m', 'pip', 'install', req, '-i', PIP_INDEX, '--no-warn-script-location',
+         '--target', path.join(this.pythonDir, 'Lib', 'site-packages')])
     }
 
     this.emit({
@@ -354,6 +357,7 @@ export class SetupManager {
       `  <description>AI-OS Background Agent Service</description>`,
       `  <executable>${pythonwExe}</executable>`,
       `  <arguments>"${agentScript}"</arguments>`,
+      `  <workingdirectory>${this.pythonDir}</workingdirectory>`,
       `  <startmode>Automatic</startmode>`,
       `  <onfailure action="restart" delay="10 sec"/>`,
       `  <onfailure action="restart" delay="30 sec"/>`,
@@ -377,25 +381,28 @@ export class SetupManager {
 
     await this.killPort(AGENT_PORT)
 
-    const elevateExe = path.join(this.appDir, 'resources', 'elevate.exe')
     const scriptPath = path.join(this.appDir, '.temp-svc-setup.ps1')
     const scriptContent = [
       `$ErrorActionPreference = 'Continue'`,
       `& '${winswExe}' stop 2>$null`,
       `& '${winswExe}' uninstall 2>$null`,
       `& '${winswExe}' install`,
+      `if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`,
+      `& '${winswExe}' start`,
     ].join('\r\n')
 
     fs.writeFileSync(scriptPath, scriptContent, 'utf-8')
-    this.debug('Elevate ps1 (install only): ' + scriptPath)
+    this.debug('Svc script: ' + scriptPath)
 
     try {
-      await this.execAsync(elevateExe, [
-        'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptPath,
+      await this.execAsync('powershell.exe', [
+        '-NoProfile', '-Command',
+        `Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File','${scriptPath}'`,
       ])
-      this.debug('Elevate ps1 install done')
+      this.debug('Svc script done')
     } catch (e: any) {
-      this.debug('Elevate ps1 install error: ' + e.message)
+      this.debug('Svc script error: ' + e.message)
+      throw new Error('服务注册/启动失败: ' + e.message)
     } finally {
       try { fs.unlinkSync(scriptPath) } catch {}
     }
@@ -415,41 +422,10 @@ export class SetupManager {
       stepIndex: this.currentStepIndex,
       totalSteps: this.totalVisibleSteps,
       percent: 0,
-      detail: '正在启动服务...',
-    })
-
-    const winswExe = path.join(this.appDir, 'resources', 'winsw', 'ai-os-agent.exe')
-    const elevateExe = path.join(this.appDir, 'resources', 'elevate.exe')
-
-    await this.killPort(AGENT_PORT)
-
-    const scriptPath = path.join(this.appDir, '.temp-svc-start.ps1')
-    const scriptContent = [
-      `$ErrorActionPreference = 'Continue'`,
-      `& '${winswExe}' start`,
-    ].join('\r\n')
-
-    fs.writeFileSync(scriptPath, scriptContent, 'utf-8')
-    this.debug('Elevate ps1 (start only): ' + scriptPath)
-
-    try {
-      await this.execAsync(elevateExe, [
-        'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptPath,
-      ])
-      this.debug('Elevate ps1 start done')
-    } catch (e: any) {
-      this.debug('Elevate ps1 start error: ' + e.message)
-    } finally {
-      try { fs.unlinkSync(scriptPath) } catch {}
-    }
-
-    this.emit({
-      step: '启动服务',
-      stepIndex: this.currentStepIndex,
-      totalSteps: this.totalVisibleSteps,
-      percent: 10,
       detail: '正在等待服务启动...',
     })
+
+    await this.killPort(AGENT_PORT)
 
     for (let i = 0; i < 100; i++) {
       await this.sleep(500)
@@ -645,10 +621,14 @@ export class SetupManager {
   }
 
   private async isPkgInstalled(pkgName: string): Promise<boolean> {
+    const sitePackages = path.join(this.pythonDir, 'Lib', 'site-packages')
+    const lowerName = pkgName.toLowerCase().replace(/[-_.]/g, '_')
     try {
-      const out = await this.execAsync(this.getPythonExe(),
-        ['-m', 'pip', 'show', pkgName], true)
-      return !!out && out.trim().length > 0
+      const entries = fs.readdirSync(sitePackages)
+      return entries.some(e => {
+        const lower = e.toLowerCase().replace(/[-_.]/g, '_')
+        return lower.startsWith(lowerName) || lower.startsWith(lowerName + '-')
+      })
     } catch { return false }
   }
 

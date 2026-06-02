@@ -17,3 +17,4 @@ pygetwindow>=0.0.9
 keyboard>=0.13
 vosk>=0.3.44
 sounddevice>=0.5
+requests>=2.31

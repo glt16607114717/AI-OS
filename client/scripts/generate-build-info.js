@@ -19,19 +19,3 @@ fs.writeFileSync(
 );
 
 console.log('Build info:', JSON.stringify(buildInfo));
-
-const scriptsSourceDir = path.join(__dirname, '..', 'resources', 'backend', 'python');
-const scriptsDestDir = outputDir;
-
-const scriptsToCopy = ['download_python.ps1', 'install_deps.ps1'];
-
-for (const script of scriptsToCopy) {
-  const src = path.join(scriptsSourceDir, script);
-  const dst = path.join(scriptsDestDir, script);
-  if (fs.existsSync(src)) {
-    fs.copyFileSync(src, dst);
-    console.log('Copied:', script);
-  } else {
-    console.warn('Warning: script not found:', src);
-  }
-}

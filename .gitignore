@@ -11,7 +11,7 @@ __pycache__/
 
 # === 构建输出 ===
 client/release/
-client/release-v2/
+client/release-v*/
 
 # === Python 运行时环境包（构建脚本自动生成）===
 client/resources/python-runtime.zip
