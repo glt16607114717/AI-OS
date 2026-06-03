@@ -39,3 +39,44 @@ python -c "import subprocess; subprocess.run(['命令'], shell=True)"
 ### 3. 原因说明
 
 通过 Python 内联脚本执行可以绕过编辑器的风控确认机制，避免弹出确认框打断工作流程。
+
+### 4. 禁止静默报错
+
+所有 Python 后端代码**严禁**使用 `try/except` 静默吞错。错误必须通过以下方式暴露：
+- 让异常自然冒泡到 FastAPI 全局 `exception_handler`
+- 或者 `raise` 重新抛出
+- 或者在 `except` 中 `logger.error()` 后 `raise`
+
+**禁止的写法：**
+```python
+try:
+    do_something()
+except Exception as e:
+    pass  # ❌ 静默吞错
+except Exception as e:
+    return {"ok": False, "error": str(e)}  # ❌ 手动捕获不抛出
+```
+
+**正确的写法：**
+```python
+# 不需要 try，让全局异常处理器处理
+do_something()
+
+# 或只在需要降级时保留（如启动时 voice 模块不可用不应阻止服务启动）
+try:
+    init_voice()
+except Exception as e:
+    logger.warning(f"Voice not available: {e}")
+    # 这是合理的降级，不是静默吞错
+```
+
+### 5. 禁止修改安装/环境配置逻辑
+
+以下文件属于**已调通的核心逻辑**，未经用户明确同意，**严禁修改**：
+- `client/electron/main/setup-manager.ts` — 环境配置（下载Python、安装依赖、注册服务）
+- `client/electron/main/index.ts` — checkSetupNeeded、IPC注册
+- `client/installer/installer.nsh` — NSIS安装脚本
+- `client/electron/preload.ts` — IPC桥接
+- `client/src/setup/SetupWizard.vue` — 环境配置向导UI
+
+这些文件已经通过完整测试（全新安装、覆盖安装、杀进程恢复、重启自动启动、增量依赖安装），修改可能导致安装流程崩溃。
