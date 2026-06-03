@@ -3,6 +3,7 @@ import sys
 import time
 import signal
 import logging
+import traceback
 import threading
 import json
 from datetime import datetime
@@ -12,13 +13,13 @@ from pathlib import Path
 BACKEND_DIR = Path(__file__).resolve().parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
-# Also add parent for 'voice' package
 VOICE_DIR = BACKEND_DIR.parent
 if str(VOICE_DIR) not in sys.path:
     sys.path.insert(0, str(VOICE_DIR))
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, Any
 
@@ -26,17 +27,17 @@ START_TIME = time.time()
 VERSION = "0.1.0"
 SHUTDOWN_DELAY = 5
 
+# Debug mode: True = show full error info, False = show generic error
+DEBUG = os.environ.get("AI_OS_DEBUG", "true").lower() == "true"
+
 # Voice module (lazy import to avoid crash if vosk not installed)
 voice = None
 
 
 def load_build_info():
     build_info_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'build_info.json')
-    try:
-        with open(build_info_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
+    with open(build_info_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
 
 
 BUILD_INFO = load_build_info()
@@ -47,7 +48,7 @@ if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w', encoding='utf-8')
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG if DEBUG else logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
@@ -55,6 +56,25 @@ logger = logging.getLogger("ai-os-agent")
 
 app = FastAPI(title="AI-OS Agent", version=VERSION)
 
+
+# --- Global Exception Handler ---
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception on {request.method} {request.url.path}: {exc}")
+    logger.debug(traceback.format_exc())
+    if DEBUG:
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": str(exc), "traceback": traceback.format_exc()},
+        )
+    return JSONResponse(
+        status_code=500,
+        content={"ok": False, "error": "Internal Server Error"},
+    )
+
+
+# --- Routes ---
 
 @app.get("/health")
 async def health():
@@ -92,11 +112,13 @@ async def on_startup():
     global voice
     build_time = BUILD_INFO.get("build_time", "unknown")
     logger.info(f"AI-OS Agent v{VERSION} started (pid={os.getpid()}, build_time={build_time})")
+    logger.info(f"Debug mode: {DEBUG}")
     try:
         from voice import init_voice
-        voice = init_voice()
-        if voice:
-            logger.info("Voice module initialized")
+        init_voice()
+        import voice as voice_mod
+        voice = voice_mod
+        logger.info("Voice module initialized")
     except Exception as e:
         logger.warning(f"Voice module not available: {e}")
 
@@ -107,28 +129,23 @@ class VoiceActionRequest(BaseModel):
     action: str
     payload: dict = {}
 
+
 def ensure_voice():
     """Lazy init voice module if model became available after startup."""
     global voice
     if voice is not None:
         return True
-    try:
-        from voice import init_voice
-        init_voice()
-        # init_voice returns None, check if module loaded by importing it
-        import voice as voice_mod
-        voice = voice_mod
-        logger.info("Voice module lazy-initialized")
-        return True
-    except Exception as e:
-        logger.warning(f"Voice lazy-init failed: {e}")
-    return False
+    from voice import init_voice
+    init_voice()
+    import voice as voice_mod
+    voice = voice_mod
+    logger.info("Voice module lazy-initialized")
+    return True
 
 
 @app.post("/api/voice")
 async def voice_api(req: VoiceActionRequest):
     if req.action == "voice_status":
-        # Always allow status check, auto-init if possible
         ensure_voice()
         if voice is None:
             from voice.config import find_vosk_model
@@ -138,66 +155,59 @@ async def voice_api(req: VoiceActionRequest):
         status = voice.get_status()
         return {"ok": True, **status}
 
-    if not ensure_voice():
-        return {"ok": False, "error": "Voice module not available"}
+    ensure_voice()
 
     action = req.action
     payload = req.payload
 
-    try:
-        if action == "voice_set_enabled":
-            voice.set_enabled(payload.get("enabled", False))
-            return {"ok": True}
-        elif action == "voice_start":
-            voice.start_voice()
-            return {"ok": True}
-        elif action == "voice_stop":
-            voice.stop_voice()
-            return {"ok": True}
-        elif action == "voice_add_command":
-            voice.add_command(payload.get("phrase", ""))
-            return {"ok": True}
-        elif action == "voice_update_command":
-            voice.update_command(
-                payload.get("index", 0),
-                phrase=payload.get("phrase"),
-                position=payload.get("position"),
-                enabled=payload.get("enabled"),
-            )
-            return {"ok": True}
-        elif action == "voice_remove_command":
-            voice.remove_command(payload.get("index", 0))
-            return {"ok": True}
-        elif action == "voice_start_calibration":
-            voice.start_calibration(payload.get("index", 0))
-            return {"ok": True}
-        elif action == "voice_cancel_calibration":
-            voice.cancel_calibration()
-            return {"ok": True}
-        else:
-            return {"ok": False, "error": f"Unknown action: {action}"}
-    except Exception as e:
-        logger.error(f"Voice API error: {e}")
-        return {"ok": False, "error": str(e)}
+    if action == "voice_set_enabled":
+        voice.set_enabled(payload.get("enabled", False))
+        return {"ok": True}
+    elif action == "voice_start":
+        voice.start_voice()
+        return {"ok": True}
+    elif action == "voice_stop":
+        voice.stop_voice()
+        return {"ok": True}
+    elif action == "voice_add_command":
+        voice.add_command(payload.get("phrase", ""))
+        return {"ok": True}
+    elif action == "voice_update_command":
+        voice.update_command(
+            payload.get("index", 0),
+            phrase=payload.get("phrase"),
+            position=payload.get("position"),
+            enabled=payload.get("enabled"),
+        )
+        return {"ok": True}
+    elif action == "voice_remove_command":
+        voice.remove_command(payload.get("index", 0))
+        return {"ok": True}
+    elif action == "voice_start_calibration":
+        voice.start_calibration(payload.get("index", 0))
+        return {"ok": True}
+    elif action == "voice_cancel_calibration":
+        voice.cancel_calibration()
+        return {"ok": True}
+    else:
+        return {"ok": False, "error": f"Unknown action: {action}"}
 
 
 @app.post("/api/voice/download-model")
 async def voice_download_model():
     """下载 Vosk 模型（在后台线程中执行）"""
-    import threading
 
     def do_download():
-        try:
-            from voice.config import download_vosk_model
-            path = download_vosk_model()
-            logger.info(f"Vosk model downloaded to {path}")
-            # Re-init voice with new model
-            global voice
-            if voice is None:
-                from voice import init_voice
-                voice = init_voice()
-        except Exception as e:
-            logger.error(f"Vosk model download failed: {e}")
+        from voice.config import download_vosk_model
+        path = download_vosk_model()
+        logger.info(f"Vosk model downloaded to {path}")
+        # Re-init voice with new model
+        global voice
+        if voice is None:
+            from voice import init_voice
+            init_voice()
+            import voice as voice_mod
+            voice = voice_mod
 
     thread = threading.Thread(target=do_download, daemon=True)
     thread.start()
@@ -207,12 +217,9 @@ async def voice_download_model():
 @app.get("/api/voice/model-status")
 async def voice_model_status():
     """检查 Vosk 模型是否已下载"""
-    try:
-        from voice.config import find_vosk_model
-        path = find_vosk_model()
-        return {"ok": True, "installed": path is not None, "path": path}
-    except Exception as e:
-        return {"ok": True, "installed": False, "error": str(e)}
+    from voice.config import find_vosk_model
+    path = find_vosk_model()
+    return {"ok": True, "installed": path is not None, "path": path}
 
 
 def handle_shutdown(signum, frame):
