@@ -145,11 +145,11 @@ function startCalibrationPoll() {
         calibratingIndex.value = null
         await fetchStatus()
         stopCalibrationPoll()
-      } else if (res && res.mouse_pos) {
+      } else if (res && res.mouse_pos && (res.mouse_pos[0] !== 0 || res.mouse_pos[1] !== 0)) {
         mousePos.value = { x: res.mouse_pos[0], y: res.mouse_pos[1] }
       }
     } catch {}
-  }, 500)
+  }, 200)
 }
 
 function stopCalibrationPoll() {

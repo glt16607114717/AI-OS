@@ -6,6 +6,16 @@ import logging
 import threading
 import json
 from datetime import datetime
+from pathlib import Path
+
+# Ensure voice module can be imported
+BACKEND_DIR = Path(__file__).resolve().parent
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+# Also add parent for 'voice' package
+VOICE_DIR = BACKEND_DIR.parent
+if str(VOICE_DIR) not in sys.path:
+    sys.path.insert(0, str(VOICE_DIR))
 
 import uvicorn
 from fastapi import FastAPI
@@ -97,19 +107,45 @@ class VoiceActionRequest(BaseModel):
     action: str
     payload: dict = {}
 
+def ensure_voice():
+    """Lazy init voice module if model became available after startup."""
+    global voice
+    if voice is not None:
+        return True
+    try:
+        from voice import init_voice
+        init_voice()
+        # init_voice returns None, check if module loaded by importing it
+        import voice as voice_mod
+        voice = voice_mod
+        logger.info("Voice module lazy-initialized")
+        return True
+    except Exception as e:
+        logger.warning(f"Voice lazy-init failed: {e}")
+    return False
+
+
 @app.post("/api/voice")
 async def voice_api(req: VoiceActionRequest):
-    if voice is None:
+    if req.action == "voice_status":
+        # Always allow status check, auto-init if possible
+        ensure_voice()
+        if voice is None:
+            from voice.config import find_vosk_model
+            return {"ok": True, "listening": False, "model_ready": find_vosk_model() is not None,
+                    "enabled": False, "commands": [], "calibrating": False, "calibration_index": None,
+                    "mouse_pos": [0, 0]}
+        status = voice.get_status()
+        return {"ok": True, **status}
+
+    if not ensure_voice():
         return {"ok": False, "error": "Voice module not available"}
 
     action = req.action
     payload = req.payload
 
     try:
-        if action == "voice_status":
-            status = voice.get_status()
-            return {"ok": True, **status}
-        elif action == "voice_set_enabled":
+        if action == "voice_set_enabled":
             voice.set_enabled(payload.get("enabled", False))
             return {"ok": True}
         elif action == "voice_start":

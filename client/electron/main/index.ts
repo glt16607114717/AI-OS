@@ -172,47 +172,7 @@ function registerIpcHandlers() {
       req.on('timeout', () => { req.destroy(); resolve(false) })
     })
 
-    if (healthOk) return false
-
-    // Service not running but Python exists — try to start service
-    // Only if the service is already registered (not first install)
-    const { execSync } = require('child_process')
-    let serviceExists = false
-    try {
-      execSync('sc query AI-OS-Agent', { windowsHide: true, timeout: 3000 })
-      serviceExists = true
-    } catch { serviceExists = false }
-
-    if (!serviceExists) return true
-
-    const winswExe = path.join(appDir, 'resources', 'winsw', 'ai-os-agent.exe')
-    if (fs.existsSync(winswExe)) {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const scriptPath = path.join(appDir, '.temp-svc-recover.ps1')
-          const script = `& '${winswExe}' start`
-          fs.writeFileSync(scriptPath, script, 'utf-8')
-          const child = require('child_process').exec(
-            `powershell.exe -NoProfile -Command "Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File','${scriptPath}'"`,
-            (err: any) => { try { fs.unlinkSync(scriptPath) } catch {} err ? reject(err) : resolve() }
-          )
-        })
-        // Wait and check health again
-        await new Promise(r => setTimeout(r, 8000))
-        const recheck = await new Promise<boolean>((resolve) => {
-          const req = http.get('http://127.0.0.1:18731/health', { timeout: 3000 }, (res) => {
-            let data = ''
-            res.on('data', (chunk: string) => { data += chunk })
-            res.on('end', () => { try { resolve(!!JSON.parse(data).ok) } catch { resolve(false) } })
-          })
-          req.on('error', () => resolve(false))
-          req.on('timeout', () => { req.destroy(); resolve(false) })
-        })
-        return !recheck
-      } catch {}
-    }
-
-    return true
+    return !healthOk
   })
 
   ipcMain.handle('setup:run', async (_event, channel: string) => {

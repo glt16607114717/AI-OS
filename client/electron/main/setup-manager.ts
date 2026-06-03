@@ -379,13 +379,9 @@ export class SetupManager {
       detail: '正在注册系统服务...',
     })
 
-    await this.killPort(AGENT_PORT)
-
     const scriptPath = path.join(this.appDir, '.temp-svc-setup.ps1')
     const scriptContent = [
       `$ErrorActionPreference = 'Continue'`,
-      `& '${winswExe}' stop 2>$null`,
-      `& '${winswExe}' uninstall 2>$null`,
       `& '${winswExe}' install`,
       `if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`,
       `& '${winswExe}' start`,
@@ -424,8 +420,6 @@ export class SetupManager {
       percent: 0,
       detail: '正在等待服务启动...',
     })
-
-    await this.killPort(AGENT_PORT)
 
     for (let i = 0; i < 100; i++) {
       await this.sleep(500)
@@ -475,26 +469,6 @@ export class SetupManager {
       req.on('error', () => resolve(false))
       req.on('timeout', () => { req.destroy(); resolve(false) })
     })
-  }
-
-  private async killPort(port: number): Promise<void> {
-    try {
-      const out = execSync(`netstat -ano | findstr ":${port}"`, {
-        encoding: 'utf-8',
-        windowsHide: true,
-        timeout: 5000,
-      })
-      const lines = out.trim().split('\n').filter(l => l.includes('LISTENING'))
-      for (const line of lines) {
-        const parts = line.trim().split(/\s+/)
-        const pid = parts[parts.length - 1]
-        if (pid && /^\d+$/.test(pid) && pid !== '0') {
-          try {
-            execSync(`taskkill /F /PID ${pid}`, { windowsHide: true, timeout: 5000 })
-          } catch {}
-        }
-      }
-    } catch {}
   }
 
   private downloadFile(url: string, destPath: string, label: string, pctStart: number, pctEnd: number): Promise<void> {

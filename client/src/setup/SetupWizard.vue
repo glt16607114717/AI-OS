@@ -42,8 +42,8 @@
           <div class="progress-bar-fill" :style="{ width: percent + '%' }"></div>
         </div>
         <div class="progress-info">
-          <span class="progress-pct">{{ percent }}%</span>
           <span class="progress-detail">{{ detail }}</span>
+          <span class="progress-pct">{{ percent }}%</span>
         </div>
       </div>
 
@@ -152,6 +152,8 @@ const activeIndex = computed(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  width: fit-content;
+  margin: 0 auto;
 }
 
 .step-item {
@@ -233,13 +235,6 @@ const activeIndex = computed(() => {
   align-items: center;
 }
 
-.progress-pct {
-  font-size: 12px;
-  font-weight: 600;
-  color: #a1a1aa;
-  font-family: 'Cascadia Code', 'Consolas', monospace;
-}
-
 .progress-detail {
   font-size: 12px;
   color: #71717a;
@@ -247,6 +242,14 @@ const activeIndex = computed(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 70%;
+}
+
+.progress-pct {
+  font-size: 12px;
+  font-weight: 600;
+  color: #a1a1aa;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  flex-shrink: 0;
 }
 
 .error-section {

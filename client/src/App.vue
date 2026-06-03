@@ -64,7 +64,7 @@ const online = ref(false)
 const uptime = ref(0)
 const version = ref('')
 const pid = ref(0)
-const setupMode = ref(true)
+const setupMode = ref(false)
 const showDashboard = ref(false)
 const splashCanvas = ref<HTMLCanvasElement | null>(null)
 
@@ -109,7 +109,7 @@ function startSplashAnimation() {
 
   // Lightning
   let bolts: any[] = []
-  let nextBolt = performance.now() + 2000
+  let nextBolt = performance.now() + 500
   let flashAlpha = 0
 
   function fractalBolt(x1: number, y1: number, x2: number, y2: number, depth: number, maxDepth: number, jitter: number): {x:number;y:number}[] {
@@ -210,7 +210,7 @@ function startSplashAnimation() {
     if (t > nextBolt) {
       bolts.push(makeBolt())
       flashAlpha = 0.05 + Math.random() * 0.05
-      nextBolt = t + 1500 + Math.random() * 3500
+      nextBolt = t + 300 + Math.random() * 700
       if (Math.random() > 0.5) {
         setTimeout(() => { bolts.push(makeBolt()); flashAlpha = 0.03 + Math.random() * 0.04 }, 100 + Math.random() * 200)
       }
@@ -313,25 +313,27 @@ function finishSetup() {
     setTimeout(() => {
       stopSplashAnimation()
       showDashboard.value = true
-    }, 5000)
+    }, 7000)
   })
 }
 
 onMounted(async () => {
   const needed = await windowAiOS.checkSetupNeeded()
   if (needed) {
+    setupMode.value = true
     startSetup()
   } else {
     setupMode.value = false
-    nextTick(() => {
-      startSplashAnimation()
-      checkHealth()
-      setTimeout(() => {
-        stopSplashAnimation()
-        showDashboard.value = true
-        timer = setInterval(checkHealth, 10000)
-      }, 5000)
-    })
+    showDashboard.value = false
+    // Start splash animation after DOM updates
+    await nextTick()
+    startSplashAnimation()
+    checkHealth()
+    setTimeout(() => {
+      stopSplashAnimation()
+      showDashboard.value = true
+      timer = setInterval(checkHealth, 10000)
+    }, 7000)
   }
 })
 
