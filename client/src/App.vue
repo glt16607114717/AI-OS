@@ -1,6 +1,6 @@
 <template>
   <div class="shell">
-    <div class="titlebar">
+    <div class="titlebar" :class="{ 'titlebar-dark': setupMode || (!setupMode && !showDashboard) }">
       <div class="titlebar-left">
         <div class="app-icon"></div>
         <span class="app-name">AI-OS</span>
@@ -37,11 +37,9 @@
       />
 
       <template v-else>
-        <!-- Splash: pulsing logo, shown for 2.5s -->
+        <!-- Splash: matrix rain + lightning, shown for 3s -->
         <div v-if="!showDashboard" class="splash-page">
-          <div class="logo-ring">
-            <div class="logo-core"></div>
-          </div>
+          <canvas ref="splashCanvas"></canvas>
           <h1 class="splash-title">AI-OS</h1>
         </div>
 
@@ -57,7 +55,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import SetupWizard from './setup/SetupWizard.vue'
 
 const windowAiOS = window.aiOS
@@ -68,6 +66,7 @@ const version = ref('')
 const pid = ref(0)
 const setupMode = ref(true)
 const showDashboard = ref(false)
+const splashCanvas = ref<HTMLCanvasElement | null>(null)
 
 const setupProgress = ref<{
   step: string
@@ -87,6 +86,161 @@ const setupProgress = ref<{
 
 let timer: ReturnType<typeof setInterval> | null = null
 let healthChecking = false
+let splashAnimId = 0
+
+function startSplashAnimation() {
+  const canvas = splashCanvas.value
+  if (!canvas) return
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+
+  const dpr = window.devicePixelRatio || 1
+  canvas.width = window.innerWidth * dpr
+  canvas.height = window.innerHeight * dpr
+  ctx.scale(dpr, dpr)
+  const w = window.innerWidth
+  const h = window.innerHeight
+
+  // Matrix rain
+  const fontSize = 16
+  const cols = Math.ceil(w / fontSize)
+  const drops = Array(cols).fill(0).map(() => Math.random() * -80)
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@#$%&*<>/\\|{}[]01'
+
+  // Lightning
+  let bolts: any[] = []
+  let nextBolt = performance.now() + 2000
+  let flashAlpha = 0
+
+  function fractalBolt(x1: number, y1: number, x2: number, y2: number, depth: number, maxDepth: number, jitter: number): {x:number;y:number}[] {
+    if (depth >= maxDepth) return [{ x: x1, y: y1 }, { x: x2, y: y2 }]
+    const mx = (x1 + x2) / 2 + (Math.random() - 0.5) * jitter
+    const my = (y1 + y2) / 2 + (Math.random() - 0.5) * jitter * 0.3
+    const left = fractalBolt(x1, y1, mx, my, depth + 1, maxDepth, jitter * 0.55)
+    const right = fractalBolt(mx, my, x2, y2, depth + 1, maxDepth, jitter * 0.55)
+    return [...left, ...right.slice(1)]
+  }
+
+  function makeBolt() {
+    const startX = w * 0.15 + Math.random() * w * 0.7
+    const endX = startX + (Math.random() - 0.5) * w * 0.3
+    const endY = h * (0.5 + Math.random() * 0.5)
+    const mainPath = fractalBolt(startX, -20, endX, endY, 0, 6, w * 0.25)
+    const branches: any[] = []
+    const branchCount = 4 + Math.floor(Math.random() * 6)
+    for (let b = 0; b < branchCount; b++) {
+      const idx = Math.floor(Math.random() * (mainPath.length - 2)) + 1
+      const origin = mainPath[idx]
+      const angle = (Math.random() - 0.5) * Math.PI * 0.8 + Math.PI * 0.15
+      const len = 60 + Math.random() * 180
+      const bx = origin.x + Math.cos(angle) * len * (Math.random() > 0.5 ? 1 : -1)
+      const by = origin.y + Math.abs(Math.sin(angle)) * len
+      const branchPath = fractalBolt(origin.x, origin.y, bx, by, 0, 4, 40)
+      const subs: any[] = []
+      const subCount = Math.floor(Math.random() * 3)
+      for (let s = 0; s < subCount; s++) {
+        if (branchPath.length < 3) continue
+        const si = Math.floor(Math.random() * (branchPath.length - 2)) + 1
+        const so = branchPath[si]
+        const sa = (Math.random() - 0.5) * Math.PI * 0.6
+        const sl = 20 + Math.random() * 60
+        const sx = so.x + Math.cos(sa) * sl * (Math.random() > 0.5 ? 1 : -1)
+        const sy = so.y + Math.abs(Math.sin(sa)) * sl
+        subs.push(fractalBolt(so.x, so.y, sx, sy, 0, 3, 15))
+      }
+      branches.push({ path: branchPath, subs })
+    }
+    const strokes: any[] = []
+    let strokeTime = 0
+    const strokeCount = 2 + Math.floor(Math.random() * 3)
+    for (let s = 0; s < strokeCount; s++) {
+      strokes.push({ delay: strokeTime, alpha: s === 0 ? 1 : 0.4 + Math.random() * 0.4 })
+      strokeTime += 30 + Math.random() * 80
+    }
+    return { mainPath, branches, strokes, born: performance.now() }
+  }
+
+  function drawPath(path: any[], alpha: number, width: number, glow: number) {
+    if (path.length < 2 || alpha <= 0) return
+    if (glow > 0) {
+      ctx!.save()
+      ctx!.shadowColor = `rgba(180,180,255,${alpha * 0.8})`
+      ctx!.shadowBlur = glow
+      ctx!.strokeStyle = `rgba(200,200,255,${alpha * 0.3})`
+      ctx!.lineWidth = width * 3
+      ctx!.beginPath()
+      path.forEach((p, i) => i === 0 ? ctx!.moveTo(p.x, p.y) : ctx!.lineTo(p.x, p.y))
+      ctx!.stroke()
+      ctx!.restore()
+    }
+    ctx!.strokeStyle = `rgba(255,255,255,${alpha})`
+    ctx!.lineWidth = width
+    ctx!.lineCap = 'round'
+    ctx!.lineJoin = 'round'
+    ctx!.beginPath()
+    path.forEach((p, i) => i === 0 ? ctx!.moveTo(p.x, p.y) : ctx!.lineTo(p.x, p.y))
+    ctx!.stroke()
+  }
+
+  function animate(t: number) {
+    ctx!.fillStyle = 'rgba(2,10,2,0.1)'
+    ctx!.fillRect(0, 0, w, h)
+
+    if (flashAlpha > 0) {
+      ctx!.fillStyle = `rgba(180,180,255,${flashAlpha})`
+      ctx!.fillRect(0, 0, w, h)
+      flashAlpha *= 0.82
+      if (flashAlpha < 0.003) flashAlpha = 0
+    }
+
+    // Matrix rain
+    ctx!.font = fontSize + 'px Consolas'
+    for (let i = 0; i < cols; i++) {
+      const ch = chars[Math.floor(Math.random() * chars.length)]
+      const x = i * fontSize
+      const y = drops[i] * fontSize
+      const bright = Math.random() > 0.95
+      ctx!.fillStyle = bright ? '#0f0' : `rgba(0,${150 + Math.random()*105},0,${0.4 + Math.random()*0.4})`
+      ctx!.fillText(ch, x, y)
+      if (y > h && Math.random() > 0.98) drops[i] = 0
+      drops[i] += 0.5 + Math.random() * 0.5
+    }
+
+    // Lightning
+    if (t > nextBolt) {
+      bolts.push(makeBolt())
+      flashAlpha = 0.05 + Math.random() * 0.05
+      nextBolt = t + 1500 + Math.random() * 3500
+      if (Math.random() > 0.5) {
+        setTimeout(() => { bolts.push(makeBolt()); flashAlpha = 0.03 + Math.random() * 0.04 }, 100 + Math.random() * 200)
+      }
+    }
+
+    bolts = bolts.filter(b => t - b.born < 500)
+    for (const b of bolts) {
+      const age = t - b.born
+      let a = 0
+      for (const stroke of b.strokes) {
+        const strokeAge = age - stroke.delay
+        if (strokeAge >= 0 && strokeAge < 200) a = Math.max(a, stroke.alpha * (1 - strokeAge / 200))
+      }
+      if (a <= 0) continue
+      drawPath(b.mainPath, a, 2.5, 40)
+      for (const br of b.branches) {
+        drawPath(br.path, a * 0.6, 1.2, 20)
+        for (const sub of br.subs) drawPath(sub, a * 0.35, 0.8, 10)
+      }
+    }
+
+    splashAnimId = requestAnimationFrame(animate)
+  }
+
+  splashAnimId = requestAnimationFrame(animate)
+}
+
+function stopSplashAnimation() {
+  if (splashAnimId) { cancelAnimationFrame(splashAnimId); splashAnimId = 0 }
+}
 
 function formatUptime(seconds: number): string {
   const h = Math.floor(seconds / 3600)
@@ -116,15 +270,24 @@ async function checkHealth() {
 }
 
 async function startSetup() {
+  let setupDone = false
+  const doFinish = () => {
+    if (setupDone) return
+    setupDone = true
+    setTimeout(() => {
+      finishSetup()
+    }, 1500)
+  }
+
   try {
     await windowAiOS.runSetup((info: any) => {
       setupProgress.value = { ...info }
       if (info.done) {
-        setTimeout(() => {
-          finishSetup()
-        }, 1500)
+        doFinish()
       }
     })
+    // Promise resolved — ensure we transition even if done event was missed
+    doFinish()
   } catch {}
 }
 
@@ -143,11 +306,15 @@ async function retrySetup() {
 
 function finishSetup() {
   setupMode.value = false
-  checkHealth()
-  // Show splash for 2.5s, then switch to dashboard
-  setTimeout(() => {
-    showDashboard.value = true
-  }, 2500)
+  nextTick(() => {
+    startSplashAnimation()
+    checkHealth()
+    timer = setInterval(checkHealth, 10000)
+    setTimeout(() => {
+      stopSplashAnimation()
+      showDashboard.value = true
+    }, 5000)
+  })
 }
 
 onMounted(async () => {
@@ -156,11 +323,15 @@ onMounted(async () => {
     startSetup()
   } else {
     setupMode.value = false
-    checkHealth()
-    setTimeout(() => {
-      showDashboard.value = true
-      timer = setInterval(checkHealth, 10000)
-    }, 2500)
+    nextTick(() => {
+      startSplashAnimation()
+      checkHealth()
+      setTimeout(() => {
+        stopSplashAnimation()
+        showDashboard.value = true
+        timer = setInterval(checkHealth, 10000)
+      }, 5000)
+    })
   }
 })
 
@@ -193,10 +364,15 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: #09090b;
-  border-bottom: 1px solid #1a1a1f;
+  background: #fff;
+  border-bottom: 1px solid #e4e7ed;
   -webkit-app-region: drag;
   flex-shrink: 0;
+}
+
+.titlebar-dark {
+  background: #09090b;
+  border-bottom: 1px solid #1a1a1f;
 }
 
 .titlebar-left {
@@ -216,9 +392,13 @@ body {
 .app-name {
   font-size: 12px;
   font-weight: 600;
-  color: #a1a1aa;
+  color: #606266;
   letter-spacing: 1.5px;
   text-transform: uppercase;
+}
+
+.titlebar-dark .app-name {
+  color: #a1a1aa;
 }
 
 .titlebar-actions {
@@ -231,7 +411,7 @@ body {
   height: 38px;
   border: none;
   background: transparent;
-  color: #71717a;
+  color: #909399;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -240,6 +420,15 @@ body {
 }
 
 .tb-btn:hover {
+  background: #f5f7fa;
+  color: #303133;
+}
+
+.titlebar-dark .tb-btn {
+  color: #71717a;
+}
+
+.titlebar-dark .tb-btn:hover {
   background: #18181b;
   color: #e4e4e7;
 }
@@ -261,61 +450,44 @@ body {
   background: #09090b;
 }
 
-/* Splash page - light background, pulsing text */
+/* Splash page - matrix rain + lightning */
 .splash-page {
   flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  background: #f5f7fa;
+  background: #020a02;
+  position: relative;
+  overflow: hidden;
 }
 
-.logo-ring {
-  width: 64px;
-  height: 64px;
-  border-radius: 16px;
-  background: rgba(255,255,255,0.2);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin: 0 auto 20px;
-  animation: splash-pulse 2s ease-in-out infinite;
-}
-
-.logo-core {
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
-  background: rgba(99, 102, 241, 0.9);
-}
-
-@keyframes splash-pulse {
-  0%, 100% { transform: scale(1); opacity: 0.7; box-shadow: 0 0 20px rgba(99,102,241,0.1); }
-  50% { transform: scale(1.08); opacity: 1; box-shadow: 0 0 40px rgba(99,102,241,0.3); }
+.splash-page canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
 }
 
 .splash-title {
-  font-size: 32px;
-  font-weight: 700;
-  letter-spacing: 6px;
-  color: #409eff;
-  animation: text-pulse 1.5s ease-in-out infinite;
+  font-size: 80px;
+  font-weight: 900;
+  letter-spacing: 24px;
+  color: #0f0;
+  position: relative;
+  z-index: 1;
+  font-family: 'Consolas', 'Courier New', monospace;
+  text-shadow: 0 0 20px rgba(0,255,0,0.6), 0 0 60px rgba(0,255,0,0.2);
 }
 
-@keyframes text-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
-}
-
-/* Dashboard - light background for Element Plus */
+/* Dashboard */
 .dashboard {
   flex: 1;
   display: flex;
   flex-direction: column;
   background: #f5f7fa;
 }
-
 .dash-body {
   flex: 1;
   overflow: auto;
