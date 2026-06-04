@@ -1,10 +1,10 @@
-"""
+﻿"""
 语音助手模块
 使用 Vosk 离线中文语音识别 + sounddevice 采集音频，实时匹配预配置指令并回放操作序列。
 
 支持两种指令模式：
-  1. 旧模式（position）：单点标定，语音唤醒后单击目标坐标
-  2. 新模式（actions）：键鼠录制序列，语音唤醒后回放完整操作链
+  1. 标定模式（position）：单点标定，语音唤醒后单击目标坐标
+  2. 录制模式（actions）：键鼠录制序列，语音唤醒后回放完整操作链
 
 对外接口：
     init_voice()                      初始化，若 enabled 则自动启动
@@ -18,8 +18,10 @@
     cancel_calibration()              取消标定
     start_recording(index)            开始键鼠录制（F9 停止）
     stop_recording()                  停止录制并返回 actions
+    get_recognize_log()               获取识别日志
+    clear_recognize_log()             清空识别日志
 
-作者：桂良涛，邮箱：桂良涛@nndrobot.com
+作者：桂杨涛，邮箱：guiyang@nndrobot.com
 """
 
 import json
@@ -45,8 +47,9 @@ _recording_actions: list[dict] = []
 _recording_start_time = 0.0
 _recording_lock = threading.Lock()
 
-# F9 虚拟键码
-VK_F9 = 0x78
+# 识别日志（内存，最多保留 100 条）
+_recognize_log: list[dict] = []
+_RECOGNIZE_LOG_MAX = 100
 
 # ── 日志 ──────────────────────────────────────────────────
 
@@ -57,7 +60,7 @@ def log(msg: str, tag: str = "VOICE") -> None:
         print(line)
     except Exception:
         pass
-    # 优先用 Python logging（在 worker 中会写入 voice_worker.log）
+    # 优先用 Python logging
     try:
         import logging
         logging.getLogger("voice-worker").info(line)
@@ -75,7 +78,7 @@ def log(msg: str, tag: str = "VOICE") -> None:
 # ── 操作回放 ──────────────────────────────────────────────
 
 def _click_point(x, y) -> None:
-    """单击指定坐标（旧模式兼容）。"""
+    """单击指定坐标（标定模式）。"""
     user32 = ctypes.windll.user32
     ix, iy = int(x), int(y)
     user32.SetCursorPos(ix, iy)
@@ -291,19 +294,26 @@ def _voice_loop() -> None:
                 continue
 
             if detected_text:
+                # 去掉空格后再匹配（Vosk 可能在词之间插入空格）
+                normalized_text = detected_text.replace(" ", "")
+                matched = False
                 for cmd in enabled_cmds:
-                    phrase = cmd.get("phrase", "")
-                    if phrase in detected_text:
-                        # 新模式：有 actions 则回放操作序列
+                    phrase = cmd.get("phrase", "").replace(" ", "")
+                    if phrase in normalized_text:
+                        _add_recognize_log(detected_text, cmd.get("phrase", ""), True)
+                        matched = True
+                        # 录制模式：有 actions 则回放操作序列
                         if cmd.get("actions"):
                             actions = cmd["actions"]
-                            log(f"语音指令 [{phrase}] -> 回放 {len(actions)} 步操作", "VOICE")
+                            log(f"语音指令 [{cmd.get('phrase', '')}] -> 回放 {len(actions)} 步操作", "VOICE")
                             _play_actions(actions)
-                        # 旧模式：有 position 则单击
+                        # 标定模式：有 position 则单击
                         elif cmd.get("position"):
                             pos = cmd["position"]
-                            log(f"语音指令 [{phrase}] -> 点击 ({pos[0]},{pos[1]})", "VOICE")
+                            log(f"语音指令 [{cmd.get('phrase', '')}] -> 点击 ({pos[0]},{pos[1]})", "VOICE")
                             _click_point(pos[0], pos[1])
+                if not matched:
+                    _add_recognize_log(detected_text, "", False)
     except Exception as e:
         log(f"语音线程异常退出: {e}", "ERROR")
     finally:
@@ -325,7 +335,7 @@ def _calibration_mouse_tracker() -> None:
     VK_SPACE = 0x20
     prev = False
     loop_count = 0
-    log("[DEBUG] 标定线程已启动", "VOICE")
+    log("标定线程已启动", "VOICE")
     while _calibrating and not _stop_event.is_set():
         try:
             pt = ctypes.wintypes.POINT()
@@ -335,7 +345,7 @@ def _calibration_mouse_tracker() -> None:
             cur = bool(result & 0x8000)
             loop_count += 1
             if cur and not prev:
-                log(f"[DEBUG] 空格按下! pos=({pt.x},{pt.y}), raw={result}", "VOICE")
+                log(f"空格按下! pos=({pt.x},{pt.y}), raw={result}", "VOICE")
                 cfg = load_config()
                 commands = cfg.get("commands", [])
                 if 0 <= _calibration_index < len(commands):
@@ -351,7 +361,7 @@ def _calibration_mouse_tracker() -> None:
                 return
             prev = cur
         except Exception as e:
-            log(f"[DEBUG] 标定异常: {e}", "ERROR")
+            log(f"标定异常: {e}", "ERROR")
         time.sleep(0.02)
 
 
@@ -360,9 +370,9 @@ def start_calibration(index: int) -> None:
     global _calibrating, _calibration_index
     _calibrating = True
     _calibration_index = index
-    log(f"[DEBUG] start_calibration called, index={index}, _calibrating={_calibrating}", "VOICE")
+    log(f"start_calibration called, index={index}, _calibrating={_calibrating}", "VOICE")
     threading.Thread(target=_calibration_mouse_tracker, daemon=True).start()
-    log(f"[DEBUG] calibration thread started", "VOICE")
+    log("calibration thread started", "VOICE")
 
 
 def cancel_calibration() -> None:
@@ -370,10 +380,8 @@ def cancel_calibration() -> None:
     global _calibrating
     _calibrating = False
 
-# ── 键鼠录制（ctypes 轮询模式）─────────────────────────────
-# WinSW 服务以 LocalSystem（Session 0）运行，pynput 的全局钩子
-# 在 Session 0 无法捕获用户桌面（Session 1+）的输入事件。
-# 因此改用 ctypes 轮询 GetAsyncKeyState + GetCursorPos，
+# ── 键鼠录制（ctypes 轮询模式）────────────────────────────
+# 使用 ctypes 轮询 GetAsyncKeyState + GetCursorPos，
 # 这两个 API 在任何 Session 都能读到当前活动桌面的输入状态。
 
 # 需要监听的虚拟键码范围（字母键 + 数字键 + 常用功能键）
@@ -416,7 +424,6 @@ def _vk_name(vk: int) -> str:
 def _recording_loop() -> None:
     """
     使用 ctypes 轮询录制键鼠操作。
-    不依赖 pynput，兼容 LocalSystem 服务环境。
     F9 停止录制且不记录 F9 事件。
     """
     global _recording, _recording_actions, _recording_start_time
@@ -625,7 +632,7 @@ def save_recorded_actions(index: int, actions: list[dict]) -> None:
     commands = cfg.get("commands", [])
     if 0 <= index < len(commands):
         commands[index]["actions"] = actions
-        # 清除旧的 position（切换到新模式）
+        # 清除旧的 position（切换到录制模式）
         commands[index].pop("position", None)
         cfg["commands"] = commands
         save_config(cfg)
@@ -641,6 +648,32 @@ def get_recording_status() -> dict:
         "action_count": count,
         "index": _recording_index,
     }
+
+# ── 识别日志 ──────────────────────────────────────────────
+
+def _add_recognize_log(text: str, matched_phrase: str, matched: bool) -> None:
+    """添加一条识别日志到内存。"""
+    global _recognize_log
+    entry = {
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "text": text,
+        "matched": matched,
+        "phrase": matched_phrase,
+    }
+    _recognize_log.append(entry)
+    if len(_recognize_log) > _RECOGNIZE_LOG_MAX:
+        _recognize_log = _recognize_log[-_RECOGNIZE_LOG_MAX:]
+
+
+def get_recognize_log() -> list[dict]:
+    """获取识别日志。"""
+    return list(_recognize_log)
+
+
+def clear_recognize_log() -> None:
+    """清空识别日志。"""
+    global _recognize_log
+    _recognize_log = []
 
 # ── 启动 / 停止 ──────────────────────────────────────────
 

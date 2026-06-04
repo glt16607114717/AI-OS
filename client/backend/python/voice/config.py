@@ -35,7 +35,7 @@ def save_config(cfg: dict) -> None:
     CONFIG_FILE.write_text(
         json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    # 确保普通用户可写（计划任务以用户身份运行，WinSW 以 SYSTEM 创建的文件可能没有用户写权限）
+    # 确保普通用户可写
     _ensure_writable(CONFIG_FILE)
     _ensure_writable(CONFIG_FILE.parent)
 
@@ -50,6 +50,7 @@ def _ensure_writable(path: Path) -> None:
         subprocess.run(
             ["icacls", target, "/grant", "Users:(M)", "/c"],
             capture_output=True, timeout=5,
+            creationflags=0x08000000,  # CREATE_NO_WINDOW，防止闪黑框
         )
     except Exception:
         pass
@@ -113,14 +114,14 @@ def download_vosk_model(on_progress=None) -> str:
     if last_error and not zip_path.exists():
         raise RuntimeError(f"所有下载源均失败: {last_error}")
 
-    # Extract
+    # 解压模型
     with zipfile.ZipFile(str(zip_path), "r") as zf:
         zf.extractall(str(MODEL_DIR))
 
-    # Cleanup zip
+    # 清理 zip 文件
     zip_path.unlink(missing_ok=True)
 
     result = find_vosk_model()
     if not result:
-        raise RuntimeError("Model extraction failed")
+        raise RuntimeError("模型解压失败")
     return result

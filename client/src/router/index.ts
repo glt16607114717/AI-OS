@@ -23,11 +23,7 @@ const router = createRouter({
           name: 'dev-timestamp',
           component: () => import('../views/dev/TimestampConverter.vue'),
         },
-        {
-          path: 'dev/ip',
-          name: 'dev-ip',
-          component: () => import('../views/dev/IpLookup.vue'),
-        },
+
       ],
     },
   ],

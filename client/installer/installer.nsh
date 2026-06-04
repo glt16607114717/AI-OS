@@ -4,12 +4,28 @@
     StrCpy $INSTDIR "C:\AI-OS"
     Goto done_init
   has_path:
-    ; Overwrite install: stop service and kill processes
-    nsExec::Exec '"$INSTDIR\resources\winsw\ai-os-agent.exe" stop'
-    nsExec::Exec '"$INSTDIR\resources\winsw\ai-os-agent.exe" uninstall'
-    Sleep 500
-    nsExec::Exec 'taskkill /F /IM AI-OS.exe'
-    Sleep 500
+    ; 覆盖安装：停服务、杀进程（在文件解压前执行）
+    ; 先停 watchdog 防止拉起
+    nsExec::ExecToStack 'schtasks /End /TN "AI-OS-Watchdog"'
+    Pop $0
+    Pop $1
+    nsExec::ExecToStack 'schtasks /Delete /TN "AI-OS-Watchdog" /F'
+    Pop $0
+    Pop $1
+    nsExec::ExecToStack 'schtasks /End /TN "AI-OS-Agent"'
+    Pop $0
+    Pop $1
+    nsExec::ExecToStack 'schtasks /Delete /TN "AI-OS-Agent" /F'
+    Pop $0
+    Pop $1
+    Sleep 1000
+    nsExec::ExecToStack 'taskkill /F /IM pythonw.exe'
+    Pop $0
+    Pop $1
+    nsExec::ExecToStack 'taskkill /F /IM AI-OS.exe'
+    Pop $0
+    Pop $1
+    Sleep 1000
   done_init:
 !macroend
 

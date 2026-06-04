@@ -1,6 +1,6 @@
 {
   "name": "ai-os-client",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "AI-OS Enterprise AI Asset Operating System",
   "author": "桂良涛 <桂良涛@nndrobot.com>",
   "main": "dist-electron/main/index.js",
@@ -50,14 +50,6 @@
       {
         "from": "backend/python",
         "to": "backend/python"
-      },
-      {
-        "from": "resources/winsw",
-        "to": "winsw"
-      },
-      {
-        "from": "resources/scripts",
-        "to": "scripts"
       }
     ],
     "win": {

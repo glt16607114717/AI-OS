@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as https from 'https'
 import * as http from 'http'
-import { spawn, execSync } from 'child_process'
+import { spawn } from 'child_process'
 
 type ProgressCallback = (info: SetupProgress) => void
 
@@ -334,57 +334,36 @@ export class SetupManager {
       stepIndex: this.currentStepIndex,
       totalSteps: this.totalVisibleSteps,
       percent: 0,
-      detail: '正在配置服务...',
+      detail: '正在配置计划任务...',
     })
 
-    const winswExe = path.join(this.appDir, 'resources', 'winsw', 'ai-os-agent.exe')
-    const winswXml = path.join(this.appDir, 'resources', 'winsw', 'ai-os-agent.xml')
     const pythonwExe = path.join(this.pythonDir, 'pythonw.exe')
+    const pythonExe = path.join(this.pythonDir, 'python.exe')
     const agentScript = path.join(this.appDir, 'resources', 'backend', 'python', 'agent', 'main.py')
+    const taskName = 'AI-OS-Agent'
 
     this.emit({
       step: '注册服务',
       stepIndex: this.currentStepIndex,
       totalSteps: this.totalVisibleSteps,
       percent: 20,
-      detail: '正在写入服务配置...',
+      detail: '正在注册计划任务...',
     })
 
-    const xmlContent = [
-      '<service>',
-      `  <id>AI-OS-Agent</id>`,
-      `  <name>AI-OS Agent</name>`,
-      `  <description>AI-OS Background Agent Service</description>`,
-      `  <executable>${pythonwExe}</executable>`,
-      `  <arguments>"${agentScript}"</arguments>`,
-      `  <workingdirectory>${this.pythonDir}</workingdirectory>`,
-      `  <startmode>Automatic</startmode>`,
-      `  <onfailure action="restart" delay="10 sec"/>`,
-      `  <onfailure action="restart" delay="30 sec"/>`,
-      `  <onfailure action="restart" delay="60 sec"/>`,
-      `  <resetfailure>1 hour</resetfailure>`,
-      `  <log mode="roll-by-size">`,
-      `    <sizeThreshold>10240</sizeThreshold>`,
-      `    <keepFiles>8</keepFiles>`,
-      `  </log>`,
-      '</service>',
-    ].join('\r\n')
-    fs.writeFileSync(winswXml, xmlContent, 'utf-8')
-
-    this.emit({
-      step: '注册服务',
-      stepIndex: this.currentStepIndex,
-      totalSteps: this.totalVisibleSteps,
-      percent: 40,
-      detail: '正在注册系统服务...',
-    })
-
+    // PowerShell 脚本：注销旧任务 → 注册新计划任务（AtLogOn 自启）
     const scriptPath = path.join(this.appDir, '.temp-svc-setup.ps1')
     const scriptContent = [
       `$ErrorActionPreference = 'Continue'`,
-      `& '${winswExe}' install`,
-      `if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`,
-      `& '${winswExe}' start`,
+      // Agent：登录时启动
+      `$taskName = '${taskName}'`,
+      `schtasks /Delete /TN $taskName /F 2>&1 | Out-Null`,
+      `schtasks /Create /SC ONLOGON /TN $taskName /TR "'${pythonwExe}' -X utf8 '${agentScript}'" /RL HIGHEST /F`,
+      // Watchdog：每 1 分钟检查 main.py 是否存活，不在就启动
+      `$wdName = 'AI-OS-Watchdog'`,
+      `$wdScript = '${agentScript.replace('main.py', 'watchdog.py')}'`,
+      `schtasks /Delete /TN $wdName /F 2>&1 | Out-Null`,
+      `schtasks /Create /SC MINUTE /MO 1 /TN $wdName /TR "'${pythonwExe}' -X utf8 '$wdScript'" /F`,
+      `schtasks /Run /TN $wdName`,
     ].join('\r\n')
 
     fs.writeFileSync(scriptPath, scriptContent, 'utf-8')
@@ -398,9 +377,24 @@ export class SetupManager {
       this.debug('Svc script done')
     } catch (e: any) {
       this.debug('Svc script error: ' + e.message)
-      throw new Error('服务注册/启动失败: ' + e.message)
+      throw new Error('服务注册失败: ' + e.message)
     } finally {
       try { fs.unlinkSync(scriptPath) } catch {}
+    }
+
+    // 从用户进程启动计划任务（不能在 UAC 管理员进程里启动，会跑在 Session 0）
+    this.emit({
+      step: '注册服务',
+      stepIndex: this.currentStepIndex,
+      totalSteps: this.totalVisibleSteps,
+      percent: 60,
+      detail: '正在启动后端...',
+    })
+    try {
+      await this.execAsync('schtasks.exe', ['/Run', '/TN', taskName], false)
+      this.debug('schtasks /Run done')
+    } catch (e: any) {
+      this.debug('schtasks /Run error: ' + e.message)
     }
 
     this.emit({

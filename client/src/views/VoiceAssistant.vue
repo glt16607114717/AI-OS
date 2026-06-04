@@ -31,7 +31,36 @@ const previewIndex = ref(-1)
 const calibratingIndex = ref<number | null>(null)
 const mousePos = ref({ x: 0, y: 0 })
 
+// 识别日志
+const logVisible = ref(false)
+const recognizeLogs = ref<{ time: string; text: string; matched: boolean; phrase: string }[]>([])
+let logTimer: ReturnType<typeof setInterval> | null = null
+
 let statusTimer: ReturnType<typeof setInterval> | null = null
+
+// 识别日志
+async function openLog() {
+  logVisible.value = true
+  await refreshLog()
+  logTimer = setInterval(refreshLog, 1000)
+}
+
+function closeLog() {
+  logVisible.value = false
+  if (logTimer) { clearInterval(logTimer); logTimer = null }
+}
+
+async function refreshLog() {
+  try {
+    const res = await agentRequest('voice_recognize_log', {})
+    if (res.ok) recognizeLogs.value = res.logs || []
+  } catch {}
+}
+
+async function clearLog() {
+  await agentRequest('voice_clear_recognize_log', {})
+  recognizeLogs.value = []
+}
 
 async function fetchStatus() {
   loading.value = true
@@ -141,6 +170,10 @@ async function removeCommand(index: number) {
 
 async function startCalibration(index: number) {
   try {
+    // 标定和录制互斥：清除旧录制数据
+    if (commands.value[index].actions) {
+      await updateCommand(index, { actions: null })
+    }
     await agentRequest('voice_start_calibration', { index })
     calibratingIndex.value = index
     startCalibrationPoll()
@@ -223,15 +256,20 @@ async function handleRecordingComplete() {
 
 async function saveRecording() {
   try {
-    await agentRequest('voice_save_recording', {
+    const res = await agentRequest('voice_save_recording', {
       index: previewIndex.value,
-      actions: previewActions.value,
+      actions: JSON.parse(JSON.stringify(previewActions.value)),
     })
-    previewVisible.value = false
-    ElMessage.success(`已保存 ${previewActions.value.length} 步操作`)
-    await fetchStatus()
-  } catch {
-    ElMessage.error('保存失败')
+    if (res.ok) {
+      previewVisible.value = false
+      ElMessage.success(`已保存 ${previewActions.value.length} 步操作`)
+      await fetchStatus()
+    } else {
+      ElMessage.error(res.error || '保存失败')
+    }
+  } catch (e: any) {
+    console.error('[VoiceAssistant] saveRecording error', e)
+    ElMessage.error('保存失败: ' + (e?.message || e))
   }
 }
 
@@ -278,7 +316,7 @@ function getCommandMode(cmd: VoiceCommand): string {
 function getCommandModeLabel(cmd: VoiceCommand): string {
   const mode = getCommandMode(cmd)
   if (mode === 'recording') return `${cmd.actions!.length} 步操作`
-  if (mode === 'calibration') return `(${cmd.position!.x}, ${cmd.position!.y})`
+  if (mode === 'calibration') return `(${cmd.position![0]}, ${cmd.position![1]})`
   return '未配置'
 }
 
@@ -332,6 +370,7 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown)
   stopCalibrationPoll()
   stopRecordingPoll()
+  closeLog()
   if (calibratingIndex.value !== null) {
     cancelCalibration()
   }
@@ -343,6 +382,7 @@ onUnmounted(() => {
     <!-- Header -->
     <div class="page-header">
       <h2 class="page-title">语音助手</h2>
+      <button class="btn-log" @click="openLog">识别日志</button>
     </div>
 
     <!-- Status Card -->
@@ -468,6 +508,28 @@ onUnmounted(() => {
         </div>
       </div>
     </el-card>
+
+    <!-- 识别日志弹窗 -->
+    <div v-if="logVisible" class="log-overlay" @click.self="closeLog">
+      <div class="log-dialog">
+        <div class="log-header">
+          <span>识别日志</span>
+          <div class="log-actions">
+            <button class="btn btn-sm" @click="clearLog">清空</button>
+            <button class="btn btn-sm" @click="closeLog">关闭</button>
+          </div>
+        </div>
+        <div class="log-body">
+          <div v-if="recognizeLogs.length === 0" class="log-empty">暂无识别记录</div>
+          <div v-for="(log, i) in recognizeLogs.slice().reverse()" :key="i" class="log-item" :class="{ matched: log.matched, unmatched: !log.matched }">
+            <span class="log-time">{{ log.time }}</span>
+            <span class="log-text">"{{ log.text }}"</span>
+            <span v-if="log.matched" class="log-match">-> {{ log.phrase }}</span>
+            <span v-else class="log-nomatch">未匹配</span>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -768,5 +830,121 @@ onUnmounted(() => {
 
 .mode-display {
   min-width: 80px;
+}
+
+/* 日志按钮 */
+.btn-log {
+  margin-left: auto;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+}
+
+.btn-log:hover {
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.4);
+}
+
+/* 日志弹窗 */
+.log-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.log-dialog {
+  width: 600px;
+  max-height: 70vh;
+  background: #1e1b4b;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #e0e7ff;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.log-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.log-actions .btn-sm {
+  background: rgba(255, 255, 255, 0.1);
+  color: #c4b5fd;
+  border: none;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.log-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.log-empty {
+  color: #64748b;
+  text-align: center;
+  padding: 40px;
+  font-size: 13px;
+}
+
+.log-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  margin-bottom: 4px;
+}
+
+.log-item.matched {
+  background: rgba(74, 222, 128, 0.1);
+}
+
+.log-item.unmatched {
+  background: rgba(248, 113, 113, 0.08);
+}
+
+.log-time {
+  color: #64748b;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.log-text {
+  color: #e0e7ff;
+}
+
+.log-match {
+  color: #4ade80;
+  font-weight: 600;
+}
+
+.log-nomatch {
+  color: #f87171;
+  font-size: 11px;
 }
 </style>

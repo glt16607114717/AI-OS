@@ -2,7 +2,6 @@ import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs'
 import * as http from 'http'
-import { execFile } from 'child_process'
 import { SetupManager } from './setup-manager'
 
 let mainWindow: BrowserWindow | null = null
@@ -58,8 +57,8 @@ function createTray() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 800,
-    height: 600,
+    width: 1100,
+    height: 700,
     frame: false,
     resizable: true,
     minWidth: 640,
@@ -185,57 +184,6 @@ function registerIpcHandlers() {
   })
 }
 
-/**
- * 检查并注册 Voice Worker 计划任务。
- * 计划任务让 voice_worker 跑在用户 Session 1，解决 WinSW（Session 0）无法读取键鼠输入的问题。
- * 首次注册会弹一次 UAC 确认框，之后不再弹。
- */
-function ensureVoiceWorkerTask() {
-  if (!app.isPackaged) return // 开发模式不注册
-
-  const taskName = 'AI-OS-Voice-Worker'
-
-  // 先检查计划任务是否已注册
-  execFile('schtasks', ['/Query', '/TN', taskName], (error) => {
-    if (!error) {
-      console.log(`[VoiceWorker] 计划任务 ${taskName} 已注册，跳过`)
-      return
-    }
-
-    // 任务未注册，需要用 elevate.exe 提权注册
-    const resourcesDir = process.resourcesPath
-    const elevateExe = path.join(resourcesDir, 'elevate.exe')
-    const ps1Script = path.join(resourcesDir, 'scripts', 'register-voice-task.ps1')
-
-    if (!fs.existsSync(elevateExe)) {
-      console.warn(`[VoiceWorker] elevate.exe 不存在: ${elevateExe}`)
-      return
-    }
-    if (!fs.existsSync(ps1Script)) {
-      console.warn(`[VoiceWorker] 注册脚本不存在: ${ps1Script}`)
-      return
-    }
-
-    console.log(`[VoiceWorker] 计划任务未注册，正在通过 UAC 提权注册...`)
-
-    // elevate.exe 弹 UAC 框，然后以管理员权限执行 PowerShell 脚本
-    execFile(elevateExe, [
-      'powershell.exe',
-      '-WindowStyle', 'Hidden',
-      '-ExecutionPolicy', 'Bypass',
-      '-NonInteractive',
-      '-NoProfile',
-      '-File', ps1Script,
-    ], (err, stdout, stderr) => {
-      if (err) {
-        console.warn(`[VoiceWorker] 注册失败（用户可能取消了 UAC）: ${err.message}`)
-      } else {
-        console.log(`[VoiceWorker] 注册完成: ${stdout}`)
-      }
-    })
-  })
-}
-
 const gotTheLock = app.requestSingleInstanceLock()
 
 if (!gotTheLock) {
@@ -251,7 +199,6 @@ if (!gotTheLock) {
     registerIpcHandlers()
     createTray()
     createWindow()
-    ensureVoiceWorkerTask()
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {

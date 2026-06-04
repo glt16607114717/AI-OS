@@ -103,10 +103,7 @@ onUnmounted(() => {
                 <span class="sub-dot"></span>
                 时间戳转换
               </router-link>
-              <router-link to="/dev/ip" class="nav-sub-item" active-class="active">
-                <span class="sub-dot"></span>
-                IP 展示
-              </router-link>
+
             </div>
           </transition>
         </div>
