@@ -32,11 +32,11 @@ VOICE_WORKER_PORT = 18732
 VOICE_WORKER_URL = f"http://127.0.0.1:{VOICE_WORKER_PORT}"
 WATCHDOG_INTERVAL = 10  # 秒
 
-# Debug mode: True = show full error info, False = show generic error
-DEBUG = os.environ.get("AI_OS_DEBUG", "true").lower() == "true"
+# Debug mode: 默认关闭，显式设置 AI_OS_DEBUG=true 开启
+DEBUG = os.environ.get("AI_OS_DEBUG", "false").lower() == "true"
 
 # Voice worker 进程状态
-_worker_pid = None  # 当前 voice_worker 的 PID（由 CreateProcessAsUser 返回）
+_task_registered = False
 _watchdog_stop = threading.Event()
 
 
@@ -91,7 +91,7 @@ async def health():
         "pid": os.getpid(),
         "started_at": datetime.fromtimestamp(START_TIME).isoformat(),
         "build_time": BUILD_INFO.get("build_time", "unknown"),
-        "voice_worker_pid": _worker_pid,
+        "voice_worker_task_registered": _task_registered,
     }
 
 
@@ -119,43 +119,55 @@ async def shutdown():
 def _find_python_executable() -> str:
     """
     查找 voice_worker 应使用的 Python 可执行文件。
-    优先使用环境变量 AI_OS_PYTHON 指定的路径，
-    其次用当前解释器（sys.executable）。
-    生产环境用 pythonw.exe（无控制台窗口），开发调试用 python.exe。
+    强制使用 python.exe（非 pythonw），以便输出日志到文件用于排查崩溃。
     """
     env_python = os.environ.get("AI_OS_PYTHON")
     if env_python and os.path.isfile(env_python):
         return env_python
 
     exe = sys.executable
-    # 生产环境：用 pythonw.exe 避免弹黑框
-    # 调试时：用 python.exe 以便看到错误输出
     exe_dir = os.path.dirname(exe)
-    exe_name = os.path.basename(exe)
-    if exe_name.lower() == "python.exe":
-        pythonw = os.path.join(exe_dir, "pythonw.exe")
-        if os.path.isfile(pythonw) and not DEBUG:
-            return pythonw
+    # 无论当前是 python.exe 还是 pythonw.exe，都强制用 python.exe
+    python_exe = os.path.join(exe_dir, "python.exe")
+    if os.path.isfile(python_exe):
+        return python_exe
     return exe
 
 
-def _spawn_voice_worker() -> int | None:
-    """在用户 Session 1 中创建 voice_worker 子进程，返回 PID。"""
-    from session_spawn import spawn_in_user_session, is_user_session_active
+def _ensure_voice_worker_task() -> bool:
+    """确保计划任务已注册并启动。"""
+    global _task_registered
+    from task_scheduler import (
+        register_voice_worker_task, start_voice_worker_task,
+        is_task_registered, is_user_session_active,
+    )
 
     if not is_user_session_active():
-        logger.debug("用户桌面未活跃（无 explorer.exe），跳过 spawn")
-        return None
+        logger.debug("用户桌面未活跃，跳过")
+        return False
 
     python_exe = _find_python_executable()
     worker_script = str(Path(__file__).resolve().parent / "voice_worker.py")
-    cmd_line = f'"{python_exe}" "{worker_script}"'
-    working_dir = str(Path(__file__).resolve().parent)
 
-    pid = spawn_in_user_session(cmd_line, working_dir=working_dir)
-    if pid:
-        logger.info(f"Voice Worker 已在用户会话启动, PID={pid}")
-    return pid
+    # 如果任务未注册，先注册
+    if not is_task_registered():
+        logger.info("Voice Worker 计划任务未注册，正在注册...")
+        if not register_voice_worker_task(python_exe, worker_script):
+            return False
+        _task_registered = True
+        # 注册后等 2 秒让任务启动
+        time.sleep(2)
+        return True
+
+    _task_registered = True
+
+    # 任务已注册但可能没在跑，尝试启动
+    if not _check_worker_alive():
+        logger.info("Voice Worker 无响应，通过计划任务启动...")
+        start_voice_worker_task()
+        time.sleep(2)
+
+    return True
 
 
 def _check_worker_alive() -> bool:
@@ -172,17 +184,14 @@ def _check_worker_alive() -> bool:
 def _watchdog_loop() -> None:
     """
     Watchdog 主循环：每 10 秒检查 voice_worker 存活状态。
-    - 不存活 → 检查用户桌面是否活跃 → 是则重新 spawn
+    - 不存活 → 通过计划任务重新启动
     - 用户未登录 → 跳过，等下次检查
     """
-    global _worker_pid
+    # 首次启动前等 3 秒，让主服务自身初始化完成
+    time.sleep(3)
 
-    # 首次 spawn 前等 2 秒，让主服务自身初始化完成
-    time.sleep(2)
-
-    # 首次 spawn
-    if not _check_worker_alive():
-        _worker_pid = _spawn_voice_worker()
+    # 首次确保任务已注册并启动
+    _ensure_voice_worker_task()
 
     while not _watchdog_stop.is_set():
         _watchdog_stop.wait(WATCHDOG_INTERVAL)
@@ -192,19 +201,19 @@ def _watchdog_loop() -> None:
         if _check_worker_alive():
             continue
 
-        # Worker 挂了，尝试重新 spawn
+        # Worker 挂了，尝试通过计划任务重启
         logger.warning("Voice Worker 无响应，尝试重新启动...")
-        _worker_pid = _spawn_voice_worker()
+        from task_scheduler import start_voice_worker_task
+        start_voice_worker_task()
 
 
 @app.on_event("startup")
 async def on_startup():
-    global _worker_pid
     build_time = BUILD_INFO.get("build_time", "unknown")
     logger.info(f"AI-OS Agent v{VERSION} started (pid={os.getpid()}, build_time={build_time})")
     logger.info(f"Debug mode: {DEBUG}")
 
-    # 启动 watchdog 线程（负责 spawn + 保活 voice_worker）
+    # 启动 watchdog 线程（注册计划任务 + 保活 voice_worker）
     watchdog_thread = threading.Thread(target=_watchdog_loop, daemon=True, name="VoiceWorkerWatchdog")
     watchdog_thread.start()
     logger.info("Voice Worker watchdog 已启动")

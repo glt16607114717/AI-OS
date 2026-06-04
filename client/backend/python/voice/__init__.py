@@ -53,7 +53,17 @@ VK_F9 = 0x78
 def log(msg: str, tag: str = "VOICE") -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{ts}] [{tag}] {msg}"
-    print(line)
+    try:
+        print(line)
+    except Exception:
+        pass
+    # 优先用 Python logging（在 worker 中会写入 voice_worker.log）
+    try:
+        import logging
+        logging.getLogger("voice-worker").info(line)
+    except Exception:
+        pass
+    # 兜底写文件
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         log_file = LOG_DIR / "voice.log"
@@ -314,13 +324,18 @@ def _calibration_mouse_tracker() -> None:
     user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
     VK_SPACE = 0x20
     prev = False
+    loop_count = 0
+    log("[DEBUG] 标定线程已启动", "VOICE")
     while _calibrating and not _stop_event.is_set():
         try:
             pt = ctypes.wintypes.POINT()
             user32.GetCursorPos(ctypes.byref(pt))
             _mouse_pos = (pt.x, pt.y)
-            cur = bool(user32.GetAsyncKeyState(VK_SPACE) & 0x8000)
+            result = user32.GetAsyncKeyState(VK_SPACE)
+            cur = bool(result & 0x8000)
+            loop_count += 1
             if cur and not prev:
+                log(f"[DEBUG] 空格按下! pos=({pt.x},{pt.y}), raw={result}", "VOICE")
                 cfg = load_config()
                 commands = cfg.get("commands", [])
                 if 0 <= _calibration_index < len(commands):
@@ -335,8 +350,8 @@ def _calibration_mouse_tracker() -> None:
                 _calibrating = False
                 return
             prev = cur
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"[DEBUG] 标定异常: {e}", "ERROR")
         time.sleep(0.02)
 
 
@@ -345,7 +360,9 @@ def start_calibration(index: int) -> None:
     global _calibrating, _calibration_index
     _calibrating = True
     _calibration_index = index
+    log(f"[DEBUG] start_calibration called, index={index}, _calibrating={_calibrating}", "VOICE")
     threading.Thread(target=_calibration_mouse_tracker, daemon=True).start()
+    log(f"[DEBUG] calibration thread started", "VOICE")
 
 
 def cancel_calibration() -> None:

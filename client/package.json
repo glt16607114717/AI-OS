@@ -54,6 +54,10 @@
       {
         "from": "resources/winsw",
         "to": "winsw"
+      },
+      {
+        "from": "resources/scripts",
+        "to": "scripts"
       }
     ],
     "win": {
@@ -64,17 +68,8 @@
           "arch": [
             "x64"
           ]
-        },
-        {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
         }
       ]
-    },
-    "portable": {
-      "artifactName": "AI-OS-Portable-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,

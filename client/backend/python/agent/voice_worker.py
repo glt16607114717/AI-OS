@@ -35,6 +35,9 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent  # python/
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+# 最早期的崩溃兜底：如果后续 import 阶段就崩了，至少有文件记录
+_CRASH_LOG = Path(os.environ.get("AI_OS_BASE_DIR", r"C:\ProgramData\AI-OS")) / "logs" / "voice_worker_crash.log"
+
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -45,10 +48,17 @@ START_TIME = time.time()
 WORKER_PORT = 18732
 
 # ── 日志 ─────────────────────────────────────────────────
+# 写到文件 + stdout，方便排查 Session 1 子进程崩溃
+_LOG_DIR = Path(os.environ.get("AI_OS_BASE_DIR", r"C:\ProgramData\AI-OS")) / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] [VOICE-WORKER] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(str(_LOG_DIR / "voice_worker.log"), encoding="utf-8"),
+    ],
 )
 logger = logging.getLogger("voice-worker")
 
@@ -150,6 +160,7 @@ async def voice_api(req: VoiceActionRequest):
         voice_module.remove_command(payload.get("index", 0))
         return {"ok": True}
     elif action == "voice_start_calibration":
+        logger.info(f"收到标定请求, index={payload.get('index', 0)}")
         voice_module.start_calibration(payload.get("index", 0))
         return {"ok": True}
     elif action == "voice_cancel_calibration":
@@ -213,5 +224,18 @@ async def on_startup():
 
 
 if __name__ == "__main__":
-    logger.info(f"Starting Voice Worker on port {WORKER_PORT}")
-    uvicorn.run(app, host="127.0.0.1", port=WORKER_PORT, log_level="info")
+    try:
+        logger.info(f"Starting Voice Worker on port {WORKER_PORT}")
+        uvicorn.run(app, host="127.0.0.1", port=WORKER_PORT, log_level="info")
+    except Exception as e:
+        # 兜底：确保异常信息写入日志文件，防止静默崩溃
+        logger.error(f"Voice Worker 启动失败: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    finally:
+        # 强制 flush 日志
+        for handler in logging.getLogger().handlers:
+            try:
+                handler.flush()
+            except Exception:
+                pass

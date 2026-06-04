@@ -22,13 +22,10 @@ import subprocess
 
 logger = logging.getLogger("ai-os-agent")
 
-DEBUG = os.environ.get("AI_OS_DEBUG", "true").lower() == "true"
-
 # ── Windows API 常量 ─────────────────────────────────────
 TOKEN_ALL_ACCESS = 0x000F01FF
 MAXIMUM_ALLOWED = 0x02000000
 CREATE_NO_WINDOW = 0x08000000
-CREATE_NEW_CONSOLE = 0x00000010
 DUPLICATE_SAME_ACCESS = 0x00000002
 TokenPrimary = 1
 PROCESS_QUERY_INFORMATION = 0x0400
@@ -184,9 +181,6 @@ def spawn_in_user_session(cmd_line: str, working_dir: str | None = None) -> int 
                 cmd_buf = ctypes.create_unicode_buffer(cmd_line)
                 cwd_ptr = working_dir if working_dir else None
 
-                # DEBUG 模式下创建可见控制台窗口以便排查错误
-                creation_flags = CREATE_NEW_CONSOLE if DEBUG else CREATE_NO_WINDOW
-
                 success = advapi32.CreateProcessAsUserW(
                     h_dup_token,
                     None,          # lpApplicationName
@@ -194,7 +188,7 @@ def spawn_in_user_session(cmd_line: str, working_dir: str | None = None) -> int 
                     None,          # lpProcessAttributes
                     None,          # lpThreadAttributes
                     False,         # bInheritHandles
-                    creation_flags,
+                    CREATE_NO_WINDOW,  # 绝不弹黑框
                     None,          # lpEnvironment (inherit)
                     cwd_ptr,       # lpCurrentDirectory
                     ctypes.byref(startup),

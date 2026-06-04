@@ -35,6 +35,24 @@ def save_config(cfg: dict) -> None:
     CONFIG_FILE.write_text(
         json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    # 确保普通用户可写（计划任务以用户身份运行，WinSW 以 SYSTEM 创建的文件可能没有用户写权限）
+    _ensure_writable(CONFIG_FILE)
+    _ensure_writable(CONFIG_FILE.parent)
+
+
+def _ensure_writable(path: Path) -> None:
+    """确保文件/目录对 Users 组可写（Windows only）。"""
+    if os.name != "nt":
+        return
+    try:
+        import subprocess
+        target = str(path)
+        subprocess.run(
+            ["icacls", target, "/grant", "Users:(M)", "/c"],
+            capture_output=True, timeout=5,
+        )
+    except Exception:
+        pass
 
 
 def find_vosk_model() -> str | None:
