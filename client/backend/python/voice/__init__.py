@@ -1,6 +1,10 @@
 """
 语音助手模块
-使用 Vosk 离线中文语音识别 + sounddevice 采集音频，实时匹配预配置指令并模拟鼠标点击。
+使用 Vosk 离线中文语音识别 + sounddevice 采集音频，实时匹配预配置指令并回放操作序列。
+
+支持两种指令模式：
+  1. 旧模式（position）：单点标定，语音唤醒后单击目标坐标
+  2. 新模式（actions）：键鼠录制序列，语音唤醒后回放完整操作链
 
 对外接口：
     init_voice()                      初始化，若 enabled 则自动启动
@@ -12,6 +16,8 @@
     remove_command(index)             删除指令
     start_calibration(index)          开始标定（空格确认位置）
     cancel_calibration()              取消标定
+    start_recording(index)            开始键鼠录制（F9 停止）
+    stop_recording()                  停止录制并返回 actions
 
 作者：桂良涛，邮箱：桂良涛@nndrobot.com
 """
@@ -32,6 +38,16 @@ _calibrating = False
 _calibration_index = -1
 _mouse_pos = (0, 0)
 
+# 录制状态
+_recording = False
+_recording_index = -1
+_recording_actions: list[dict] = []
+_recording_start_time = 0.0
+_recording_lock = threading.Lock()
+
+# F9 虚拟键码
+VK_F9 = 0x78
+
 # ── 日志 ──────────────────────────────────────────────────
 
 def log(msg: str, tag: str = "VOICE") -> None:
@@ -46,9 +62,10 @@ def log(msg: str, tag: str = "VOICE") -> None:
     except Exception:
         pass
 
-# ── 鼠标点击 ──────────────────────────────────────────────
+# ── 操作回放 ──────────────────────────────────────────────
 
 def _click_point(x, y) -> None:
+    """单击指定坐标（旧模式兼容）。"""
     user32 = ctypes.windll.user32
     ix, iy = int(x), int(y)
     user32.SetCursorPos(ix, iy)
@@ -59,6 +76,105 @@ def _click_point(x, y) -> None:
     time.sleep(0.03)
     user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
     time.sleep(0.2)
+
+
+def _play_actions(actions: list[dict]) -> None:
+    """回放操作序列。"""
+    user32 = ctypes.windll.user32
+    MOUSEEVENTF_MOVE = 0x0001
+    MOUSEEVENTF_LEFTDOWN = 0x0002
+    MOUSEEVENTF_LEFTUP = 0x0004
+    MOUSEEVENTF_RIGHTDOWN = 0x0008
+    MOUSEEVENTF_RIGHTUP = 0x0010
+    MOUSEEVENTF_MIDDLEDOWN = 0x0020
+    MOUSEEVENTF_MIDDLEUP = 0x0040
+
+    KEYEVENTF_KEYDOWN = 0x0000
+    KEYEVENTF_KEYUP = 0x0002
+
+    for action in actions:
+        atype = action.get("type", "")
+
+        # 先执行本步骤的延时（相对于上一步的时间差）
+        delay_ms = action.get("ms", 0)
+        if delay_ms > 0:
+            # 上限 2 秒，防止异常长延时卡住
+            time.sleep(min(delay_ms, 2000) / 1000.0)
+
+        if atype == "mouse_move":
+            x, y = int(action["x"]), int(action["y"])
+            user32.SetCursorPos(x, y)
+            time.sleep(0.02)
+        elif atype == "click":
+            x, y = int(action["x"]), int(action["y"])
+            user32.SetCursorPos(x, y)
+            time.sleep(0.02)
+            button = action.get("button", "left")
+            if button == "left":
+                user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                time.sleep(0.03)
+                user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            elif button == "right":
+                user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+                time.sleep(0.03)
+                user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+            elif button == "middle":
+                user32.mouse_event(MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, 0)
+                time.sleep(0.03)
+                user32.mouse_event(MOUSEEVENTF_MIDDLEUP, 0, 0, 0, 0)
+            time.sleep(0.05)
+        elif atype == "scroll":
+            delta = int(action.get("delta", 0))
+            user32.mouse_event(0x0800, 0, 0, delta, 0)
+            time.sleep(0.05)
+        elif atype == "key_press":
+            vk = action.get("vk", 0)
+            user32.keybd_event(vk, 0, KEYEVENTF_KEYDOWN, 0)
+            time.sleep(0.02)
+            user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+            time.sleep(0.02)
+        elif atype == "key_down":
+            vk = action.get("vk", 0)
+            user32.keybd_event(vk, 0, KEYEVENTF_KEYDOWN, 0)
+        elif atype == "key_up":
+            vk = action.get("vk", 0)
+            user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+            time.sleep(0.01)
+        elif atype == "type_text":
+            text = action.get("text", "")
+            for ch in text:
+                vk = _char_to_vk(ch)
+                if vk:
+                    shift = _needs_shift(ch)
+                    if shift:
+                        user32.keybd_event(0x10, 0, KEYEVENTF_KEYDOWN, 0)
+                    user32.keybd_event(vk, 0, KEYEVENTF_KEYDOWN, 0)
+                    time.sleep(0.01)
+                    user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+                    if shift:
+                        user32.keybd_event(0x10, 0, KEYEVENTF_KEYUP, 0)
+                    time.sleep(0.01)
+        elif atype == "delay":
+            ms = action.get("ms", 100)
+            time.sleep(ms / 1000.0)
+
+    log(f"操作回放完成: {len(actions)} 步", "VOICE")
+
+
+def _char_to_vk(ch: str) -> int:
+    """将单个 ASCII 字符映射到 Windows 虚拟键码。"""
+    code = ord(ch.upper())
+    if 0x41 <= code <= 0x5A:  # A-Z
+        return code
+    if 0x30 <= code <= 0x39:  # 0-9
+        return code
+    return 0
+
+
+def _needs_shift(ch: str) -> bool:
+    """判断输入该字符是否需要按 Shift。"""
+    return ch.isupper() or ch in '~!@#$%^&*()_+{}|:"<>?'
+
 
 # ── 语音监听主循环（sounddevice 回调模式）──────────────────
 
@@ -90,12 +206,10 @@ def _voice_loop() -> None:
         log(f"Vosk 模型加载失败: {e}", "ERROR")
         return
 
-    # 使用队列在线程间传递音频数据
     import queue
     audio_queue: queue.Queue[bytes | None] = queue.Queue()
 
     def _audio_callback(indata, frames, time_info, status):
-        """sounddevice 输入流回调，将音频数据送入队列。"""
         if status:
             log(f"音频状态: {status}", "VOICE")
         audio_queue.put(bytes(indata))
@@ -123,7 +237,6 @@ def _voice_loop() -> None:
             try:
                 data = audio_queue.get(timeout=0.5)
             except Exception:
-                # queue.get 超时，继续循环检查 _stop_event
                 continue
 
             if data is None:
@@ -133,17 +246,24 @@ def _voice_loop() -> None:
             if read_count % 50 == 1:
                 log(f"语音监听中... 已读取{read_count}帧, 识别{recognize_count}次", "VOICE")
 
-            # 每次循环热加载配置
             try:
                 cfg = load_config()
             except Exception:
                 cfg = {"enabled": True, "commands": []}
 
             commands = cfg.get("commands", [])
-            enabled_cmds = [
-                c for c in commands
-                if c.get("enabled", True) and c.get("phrase") and c.get("position")
-            ]
+            # 过滤出有效指令：必须有 phrase，且至少有 position 或 actions
+            enabled_cmds = []
+            for c in commands:
+                if not c.get("enabled", True):
+                    continue
+                if not c.get("phrase"):
+                    continue
+                has_pos = c.get("position") and len(c.get("position")) == 2
+                has_actions = bool(c.get("actions"))
+                if has_pos or has_actions:
+                    enabled_cmds.append(c)
+
             if not enabled_cmds:
                 continue
 
@@ -161,16 +281,19 @@ def _voice_loop() -> None:
                 continue
 
             if detected_text:
-                for cmd in commands:
-                    if not cmd.get("enabled", True):
-                        continue
+                for cmd in enabled_cmds:
                     phrase = cmd.get("phrase", "")
-                    pos = cmd.get("position")
-                    if not phrase or not pos or len(pos) != 2:
-                        continue
                     if phrase in detected_text:
-                        log(f"语音指令 [{phrase}] -> 点击 ({pos[0]},{pos[1]})", "VOICE")
-                        _click_point(pos[0], pos[1])
+                        # 新模式：有 actions 则回放操作序列
+                        if cmd.get("actions"):
+                            actions = cmd["actions"]
+                            log(f"语音指令 [{phrase}] -> 回放 {len(actions)} 步操作", "VOICE")
+                            _play_actions(actions)
+                        # 旧模式：有 position 则单击
+                        elif cmd.get("position"):
+                            pos = cmd["position"]
+                            log(f"语音指令 [{phrase}] -> 点击 ({pos[0]},{pos[1]})", "VOICE")
+                            _click_point(pos[0], pos[1])
     except Exception as e:
         log(f"语音线程异常退出: {e}", "ERROR")
     finally:
@@ -182,11 +305,13 @@ def _voice_loop() -> None:
         _running = False
         log("语音指令监听已停止", "VOICE")
 
-# ── 标定 ──────────────────────────────────────────────────
+# ── 标定（旧模式，保留兼容）──────────────────────────────
 
 def _calibration_mouse_tracker() -> None:
     global _mouse_pos, _calibrating
     user32 = ctypes.windll.user32
+    user32.GetAsyncKeyState.restype = ctypes.c_short
+    user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
     VK_SPACE = 0x20
     prev = False
     while _calibrating and not _stop_event.is_set():
@@ -228,6 +353,278 @@ def cancel_calibration() -> None:
     global _calibrating
     _calibrating = False
 
+# ── 键鼠录制（ctypes 轮询模式）─────────────────────────────
+# WinSW 服务以 LocalSystem（Session 0）运行，pynput 的全局钩子
+# 在 Session 0 无法捕获用户桌面（Session 1+）的输入事件。
+# 因此改用 ctypes 轮询 GetAsyncKeyState + GetCursorPos，
+# 这两个 API 在任何 Session 都能读到当前活动桌面的输入状态。
+
+# 需要监听的虚拟键码范围（字母键 + 数字键 + 常用功能键）
+_MONITORED_VKS = list(range(0x08, 0x10))  # Backspace..Tab, Clear, Enter
+_MONITORED_VKS += [0x10, 0x11, 0x12]       # Shift, Ctrl, Alt
+_MONITORED_VKS += list(range(0x20, 0x2F))  # Space..Help
+_MONITORED_VKS += list(range(0x30, 0x3A))  # 0-9
+_MONITORED_VKS += list(range(0x41, 0x5B))  # A-Z
+_MONITORED_VKS += list(range(0x60, 0x70))  # Numpad 0-9, *, +, Enter, -
+_MONITORED_VKS += list(range(0x70, 0x78))  # F1-F8（F9 不记录）
+_MONITORED_VKS += [0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF]  # ; = , - . /
+_MONITORED_VKS += [0xC0, 0xDB, 0xDC, 0xDD, 0xDE]          # ` [ \ ] '
+
+# VK 名称映射（用于前端展示）
+_VK_NAMES = {
+    0x08: "Backspace", 0x09: "Tab", 0x0D: "Enter", 0x10: "Shift",
+    0x11: "Ctrl", 0x12: "Alt", 0x13: "Pause", 0x14: "CapsLock",
+    0x1B: "Esc", 0x20: "Space", 0x21: "PageUp", 0x22: "PageDown",
+    0x23: "End", 0x24: "Home", 0x25: "Left", 0x26: "Up",
+    0x27: "Right", 0x28: "Down", 0x2D: "Insert", 0x2E: "Delete",
+    0x70: "F1", 0x71: "F2", 0x72: "F3", 0x73: "F4",
+    0x74: "F5", 0x75: "F6", 0x76: "F7", 0x77: "F8",
+    0x90: "NumLock",
+}
+
+
+def _vk_name(vk: int) -> str:
+    """获取虚拟键码的可读名称。"""
+    if vk in _VK_NAMES:
+        return _VK_NAMES[vk]
+    if 0x41 <= vk <= 0x5A:
+        return chr(vk)
+    if 0x30 <= vk <= 0x39:
+        return chr(vk)
+    if 0x60 <= vk <= 0x69:
+        return f"Num{vk - 0x60}"
+    return f"VK({vk})"
+
+
+def _recording_loop() -> None:
+    """
+    使用 ctypes 轮询录制键鼠操作。
+    不依赖 pynput，兼容 LocalSystem 服务环境。
+    F9 停止录制且不记录 F9 事件。
+    """
+    global _recording, _recording_actions, _recording_start_time
+
+    user32 = ctypes.windll.user32
+    user32.GetAsyncKeyState.restype = ctypes.c_short
+    user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+    VK_F9 = 0x78
+    VK_LBUTTON = 0x01
+    VK_RBUTTON = 0x02
+    VK_MBUTTON = 0x04
+
+    _recording_start_time = time.time()
+    last_mouse = (0, 0)
+    last_kb_state = {}
+    last_mouse_state = {VK_LBUTTON: False, VK_RBUTTON: False, VK_MBUTTON: False}
+
+    log("录制开始（F9 停止）", "VOICE")
+
+    try:
+        while _recording and not _stop_event.is_set():
+            elapsed = int((time.time() - _recording_start_time) * 1000)
+
+            # ── 检测 F9 停止（上升沿）──
+            f9_cur = bool(user32.GetAsyncKeyState(VK_F9) & 0x8000)
+            f9_prev = last_kb_state.get(VK_F9, False)
+            if f9_cur and not f9_prev:
+                log("F9 停止录制", "VOICE")
+                _recording = False
+                break
+            last_kb_state[VK_F9] = f9_cur
+
+            # ── 检测鼠标位置变化 ──
+            pt = ctypes.wintypes.POINT()
+            user32.GetCursorPos(ctypes.byref(pt))
+            cur_mouse = (pt.x, pt.y)
+            if cur_mouse != last_mouse:
+                with _recording_lock:
+                    _recording_actions.append({
+                        "type": "mouse_move", "x": cur_mouse[0], "y": cur_mouse[1], "t": elapsed
+                    })
+                last_mouse = cur_mouse
+
+            # ── 检测鼠标按键（上升沿 = 按下，下降沿 = 释放）──
+            for vk_btn, btn_name in [(VK_LBUTTON, "left"), (VK_RBUTTON, "right"), (VK_MBUTTON, "middle")]:
+                cur = bool(user32.GetAsyncKeyState(vk_btn) & 0x8000)
+                prev = last_mouse_state[vk_btn]
+                if cur and not prev:
+                    # 按下
+                    with _recording_lock:
+                        _recording_actions.append({
+                            "type": "click", "x": last_mouse[0], "y": last_mouse[1],
+                            "button": btn_name, "pressed": True, "t": elapsed
+                        })
+                elif not cur and prev:
+                    # 释放
+                    with _recording_lock:
+                        _recording_actions.append({
+                            "type": "click_release", "x": last_mouse[0], "y": last_mouse[1],
+                            "button": btn_name, "pressed": False, "t": elapsed
+                        })
+                last_mouse_state[vk_btn] = cur
+
+            # ── 检测键盘按键（上升沿/下降沿）──
+            for vk in _MONITORED_VKS:
+                cur = bool(user32.GetAsyncKeyState(vk) & 0x8000)
+                prev = last_kb_state.get(vk, False)
+                if cur and not prev:
+                    name = _vk_name(vk)
+                    with _recording_lock:
+                        _recording_actions.append({
+                            "type": "key_down", "vk": vk,
+                            "key_name": name, "t": elapsed
+                        })
+                elif not cur and prev:
+                    name = _vk_name(vk)
+                    with _recording_lock:
+                        _recording_actions.append({
+                            "type": "key_up", "vk": vk,
+                            "key_name": name, "t": elapsed
+                        })
+                last_kb_state[vk] = cur
+
+            time.sleep(0.015)  # ~60Hz 轮询
+
+    except Exception as e:
+        log(f"录制异常: {e}", "ERROR")
+    finally:
+        _recording = False
+        log(f"录制结束，共 {_get_action_count()} 个事件", "VOICE")
+
+
+def _get_action_count() -> int:
+    with _recording_lock:
+        return len(_recording_actions)
+
+
+def _simplify_actions(raw_actions: list[dict]) -> list[dict]:
+    """
+    精简原始录制数据：
+    1. 去掉过于密集的 mouse_move 事件（采样间隔 < 30ms 的只保留最后一个）
+    2. 将 click + click_release 合并为一个 click 事件
+    3. 计算步骤间的相对延时
+    """
+    if not raw_actions:
+        return []
+
+    result = []
+    last_move_time = -1000
+    last_time = raw_actions[0].get("t", 0) if raw_actions else 0
+
+    i = 0
+    while i < len(raw_actions):
+        a = raw_actions[i]
+        atype = a.get("type", "")
+        t = a.get("t", 0)
+        delay = t - last_time if result else 0
+
+        if atype == "mouse_move":
+            # 降采样：间隔 < 30ms 的 move 跳过
+            if t - last_move_time < 30:
+                i += 1
+                continue
+            last_move_time = t
+            result.append({"type": "mouse_move", "x": a["x"], "y": a["y"], "ms": delay})
+            last_time = t
+
+        elif atype == "click":
+            # 找对应的 click_release，合并为单个 click
+            press_x, press_y, btn = a["x"], a["y"], a.get("button", "left")
+            found_release = False
+            for j in range(i + 1, min(i + 20, len(raw_actions))):
+                ra = raw_actions[j]
+                if ra.get("type") == "click_release" and ra.get("button") == btn:
+                    found_release = True
+                    break
+            result.append({"type": "click", "x": press_x, "y": press_y, "button": btn, "ms": delay})
+            last_time = t
+
+        elif atype == "click_release":
+            # 已被 click 处理，跳过
+            pass
+
+        elif atype in ("key_down", "key_up"):
+            result.append({
+                "type": atype, "vk": a.get("vk", 0),
+                "key_name": a.get("key_name", ""), "ms": delay
+            })
+            last_time = t
+
+        elif atype == "scroll":
+            result.append({"type": "scroll", "x": a["x"], "y": a["y"], "delta": a.get("delta", 0), "ms": delay})
+            last_time = t
+
+        i += 1
+
+    return result
+
+
+def start_recording(index: int) -> dict:
+    """
+    开始键鼠录制。返回初始状态。
+    录制过程中用户按 F9 停止。
+    """
+    global _recording, _recording_index, _recording_actions, _recording_start_time
+
+    if _recording:
+        return {"ok": False, "error": "已有录制正在进行"}
+
+    _recording = True
+    _recording_index = index
+    _recording_actions = []
+
+    threading.Thread(target=_recording_loop, daemon=True, name="RecordingThread").start()
+    return {"ok": True, "message": "录制已开始，按 F9 停止"}
+
+
+def stop_recording() -> dict:
+    """
+    停止录制并返回精简后的操作序列。
+    无论 _recording 当前状态如何（可能已被 F9 提前停止），都返回已录制的 actions。
+    """
+    global _recording
+
+    was_recording = _recording
+    _recording = False
+
+    if was_recording:
+        time.sleep(0.3)  # 等待录制线程处理完最后一个事件
+
+    with _recording_lock:
+        raw = list(_recording_actions)
+
+    if not raw:
+        return {"ok": False, "error": "录制结果为空"}
+
+    simplified = _simplify_actions(raw)
+    log(f"录制完成: 原始 {len(raw)} 事件 -> 精简 {len(simplified)} 步", "VOICE")
+
+    return {"ok": True, "actions": simplified, "raw_count": len(raw)}
+
+
+def save_recorded_actions(index: int, actions: list[dict]) -> None:
+    """将录制的操作序列保存到指定指令。"""
+    cfg = load_config()
+    commands = cfg.get("commands", [])
+    if 0 <= index < len(commands):
+        commands[index]["actions"] = actions
+        # 清除旧的 position（切换到新模式）
+        commands[index].pop("position", None)
+        cfg["commands"] = commands
+        save_config(cfg)
+        log(f"指令 [{commands[index].get('phrase', '')}] 已保存 {len(actions)} 步操作", "VOICE")
+
+
+def get_recording_status() -> dict:
+    """获取当前录制状态。"""
+    with _recording_lock:
+        count = len(_recording_actions)
+    return {
+        "recording": _recording,
+        "action_count": count,
+        "index": _recording_index,
+    }
+
 # ── 启动 / 停止 ──────────────────────────────────────────
 
 def start_voice() -> bool:
@@ -255,6 +652,8 @@ def stop_voice() -> None:
 def get_status() -> dict:
     """返回语音模块当前状态。"""
     cfg = load_config()
+    with _recording_lock:
+        rec_count = len(_recording_actions)
     return {
         "listening": _running,
         "model_ready": find_vosk_model() is not None,
@@ -263,6 +662,9 @@ def get_status() -> dict:
         "calibrating": _calibrating,
         "calibration_index": _calibration_index,
         "mouse_pos": list(_mouse_pos),
+        "recording": _recording,
+        "recording_action_count": rec_count,
+        "recording_index": _recording_index,
     }
 
 # ── 开关 ──────────────────────────────────────────────────
@@ -284,7 +686,7 @@ def add_command(phrase: str) -> int:
     """添加一条语音指令，返回索引。"""
     cfg = load_config()
     commands = cfg.get("commands", [])
-    commands.append({"phrase": phrase, "position": None, "enabled": True})
+    commands.append({"phrase": phrase, "position": None, "actions": None, "enabled": True})
     cfg["commands"] = commands
     save_config(cfg)
     return len(commands) - 1

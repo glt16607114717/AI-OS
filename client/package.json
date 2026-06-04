@@ -64,8 +64,17 @@
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
         }
       ]
+    },
+    "portable": {
+      "artifactName": "AI-OS-Portable-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,

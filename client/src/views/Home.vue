@@ -1,30 +1,25 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { useRoute } from 'vue-router'
 
-const router = useRouter()
+const route = useRoute()
 
-const voiceOnline = ref(false)
-const voiceCommands = ref(0)
-const voiceLoading = ref(true)
 const agentOnline = ref(false)
+const devExpanded = ref(false)
 
-let voiceTimer: ReturnType<typeof setInterval> | null = null
+const isDevActive = computed(() => route.path.startsWith('/dev'))
 
-async function fetchVoiceStatus() {
-  try {
-    const res = await window.aiOS.agentRequest('voice_status', {})
-    voiceOnline.value = res?.online ?? false
-    voiceCommands.value = res?.commands ?? 0
-  } catch {
-    voiceOnline.value = false
-    voiceCommands.value = 0
-  } finally {
-    voiceLoading.value = false
-  }
+watch(isDevActive, (val) => {
+  if (val) devExpanded.value = true
+}, { immediate: true })
+
+function toggleDevMenu() {
+  devExpanded.value = !devExpanded.value
 }
 
-async function checkAgent() {
+let healthTimer: ReturnType<typeof setInterval> | null = null
+
+async function checkHealth() {
   try {
     const res = await window.aiOS.agentHealth()
     agentOnline.value = res?.ok ?? false
@@ -33,344 +28,380 @@ async function checkAgent() {
   }
 }
 
-function goToVoice() {
-  router.push('/voice')
-}
-
 onMounted(() => {
-  fetchVoiceStatus()
-  checkAgent()
-  voiceTimer = setInterval(() => { fetchVoiceStatus(); checkAgent() }, 10000)
+  checkHealth()
+  healthTimer = setInterval(checkHealth, 10000)
 })
 
 onUnmounted(() => {
-  if (voiceTimer) clearInterval(voiceTimer)
+  if (healthTimer) clearInterval(healthTimer)
 })
 </script>
 
 <template>
-  <div class="dashboard">
-    <!-- Header -->
-    <div class="dash-header">
-      <div class="dash-header-left">
-        <h1 class="dash-title">AI-OS</h1>
-        <span class="dash-subtitle">企业 AI 资产操作系统</span>
+  <div class="home-layout">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <!-- Ambient glow effects -->
+      <div class="sidebar-glow-top"></div>
+      <div class="sidebar-glow-bottom"></div>
+
+      <!-- Logo -->
+      <div class="sidebar-brand">
+        <div class="brand-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" fill="url(#bolt-grad)" />
+            <defs>
+              <linearGradient id="bolt-grad" x1="3" y1="2" x2="21" y2="22" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#06b6d4" />
+                <stop offset="100%" stop-color="#a78bfa" />
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <span class="brand-text">AI-OS</span>
       </div>
-      <div class="dash-header-right">
-        <div class="status-badge" :class="agentOnline ? 'status-online' : 'status-offline'">
+
+      <!-- Navigation -->
+      <nav class="sidebar-nav">
+        <div class="nav-label">功能</div>
+
+        <!-- Voice Assistant -->
+        <router-link to="/voice" class="nav-item" active-class="active">
+          <div class="nav-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="23" />
+              <line x1="8" y1="23" x2="16" y2="23" />
+            </svg>
+          </div>
+          <span class="nav-text">语音助手</span>
+        </router-link>
+
+        <!-- Dev Assistant (expandable) -->
+        <div class="nav-group">
+          <div class="nav-item" :class="{ active: isDevActive }" @click="toggleDevMenu">
+            <div class="nav-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="16 18 22 12 16 6" />
+                <polyline points="8 6 2 12 8 18" />
+              </svg>
+            </div>
+            <span class="nav-text">开发助手</span>
+            <svg class="nav-arrow" :class="{ expanded: devExpanded }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </div>
+          <transition name="sub-slide">
+            <div v-show="devExpanded" class="nav-sub">
+              <router-link to="/dev/json" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                JSON 格式化
+              </router-link>
+              <router-link to="/dev/timestamp" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                时间戳转换
+              </router-link>
+              <router-link to="/dev/ip" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                IP 展示
+              </router-link>
+            </div>
+          </transition>
+        </div>
+      </nav>
+
+      <!-- Bottom status -->
+      <div class="sidebar-footer">
+        <div class="status-indicator" :class="agentOnline ? 'online' : 'offline'">
           <span class="status-dot"></span>
-          {{ agentOnline ? '服务运行中' : '服务离线' }}
+          <span class="status-text">{{ agentOnline ? '服务运行中' : '服务离线' }}</span>
         </div>
       </div>
-    </div>
+    </aside>
 
-    <!-- Feature Grid -->
-    <div class="feature-grid">
-      <!-- Voice Assistant - Hero Card -->
-      <div class="feature-card hero-card" @click="goToVoice">
-        <div class="hero-bg">
-          <div class="hero-ring ring-1"></div>
-          <div class="hero-ring ring-2"></div>
-          <div class="hero-ring ring-3"></div>
-        </div>
-        <div class="hero-content">
-          <div class="hero-icon">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-              <line x1="12" y1="19" x2="12" y2="23"/>
-              <line x1="8" y1="23" x2="16" y2="23"/>
-            </svg>
-          </div>
-          <h2 class="hero-name">语音助手</h2>
-          <p class="hero-desc">本地语音识别与指令执行引擎，支持自然语言控制桌面应用</p>
-          <div class="hero-status">
-            <span v-if="voiceLoading" class="tag tag-loading">检测中</span>
-            <span v-else :class="voiceOnline ? 'tag tag-online' : 'tag tag-offline'">
-              {{ voiceOnline ? '运行中' : '未启动' }}
-            </span>
-            <span v-if="voiceOnline" class="cmd-count">{{ voiceCommands }} 条指令</span>
-          </div>
-          <div class="hero-action">
-            <span>进入 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg></span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Side Cards -->
-      <div class="side-cards">
-        <div class="feature-card mini-card disabled-card">
-          <div class="mini-icon">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-            </svg>
-          </div>
-          <div class="mini-body">
-            <h3>大模型配置</h3>
-            <p>多模型路由与网关管理</p>
-          </div>
-          <span class="coming-badge">即将推出</span>
-        </div>
-
-        <div class="feature-card mini-card disabled-card">
-          <div class="mini-icon">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
-            </svg>
-          </div>
-          <div class="mini-body">
-            <h3>提示词引擎</h3>
-            <p>模板管理与版本控制</p>
-          </div>
-          <span class="coming-badge">即将推出</span>
-        </div>
-
-        <div class="feature-card mini-card disabled-card">
-          <div class="mini-icon">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-            </svg>
-          </div>
-          <div class="mini-body">
-            <h3>知识库</h3>
-            <p>向量化存储与语义检索</p>
-          </div>
-          <span class="coming-badge">即将推出</span>
-        </div>
-      </div>
-    </div>
+    <!-- Content Area -->
+    <main class="content-area">
+      <router-view />
+    </main>
   </div>
 </template>
 
 <style scoped>
-.dashboard {
-  padding: 24px 32px;
-  max-width: 1100px;
-  margin: 0 auto;
-  height: 100%;
+.home-layout {
+  display: flex;
+  height: calc(100% + 40px);
+  margin: -20px;
+  overflow: hidden;
+}
+
+/* ====== Sidebar ====== */
+.sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  background: linear-gradient(180deg, #0f172a 0%, #161033 50%, #1e1b4b 100%);
   display: flex;
   flex-direction: column;
-}
-
-/* Header */
-.dash-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 28px;
-}
-.dash-title {
-  font-size: 22px;
-  font-weight: 700;
-  color: #1d1d1f;
-  margin: 0;
-  letter-spacing: 2px;
-}
-.dash-subtitle {
-  font-size: 12px;
-  color: #86868b;
-  margin-left: 12px;
-}
-.dash-header-left {
-  display: flex;
-  align-items: baseline;
-}
-.status-badge {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  padding: 4px 12px;
-  border-radius: 20px;
-}
-.status-online {
-  background: #e8f9ee;
-  color: #1a7f37;
-}
-.status-offline {
-  background: #fef0f0;
-  color: #c45656;
-}
-.status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-}
-.status-online .status-dot {
-  background: #1a7f37;
-  box-shadow: 0 0 6px rgba(26,127,55,0.4);
-}
-.status-offline .status-dot {
-  background: #c45656;
-}
-
-/* Feature Grid */
-.feature-grid {
-  display: grid;
-  grid-template-columns: 1fr 320px;
-  gap: 20px;
-  flex: 1;
-}
-
-/* Hero Card */
-.hero-card {
   position: relative;
-  border-radius: 16px;
-  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
   overflow: hidden;
-  cursor: pointer;
-  transition: transform 0.2s, box-shadow 0.2s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 300px;
-}
-.hero-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 8px 30px rgba(15, 52, 96, 0.3);
-}
-.hero-bg {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-}
-.hero-ring {
-  position: absolute;
-  border-radius: 50%;
-  border: 1px solid rgba(99, 102, 241, 0.15);
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  animation: ring-expand 3s ease-out infinite;
-}
-.ring-1 { width: 100px; height: 100px; animation-delay: 0s; }
-.ring-2 { width: 200px; height: 200px; animation-delay: 0.8s; }
-.ring-3 { width: 320px; height: 320px; animation-delay: 1.6s; }
-@keyframes ring-expand {
-  0% { opacity: 1; transform: translate(-50%, -50%) scale(0.8); }
-  100% { opacity: 0; transform: translate(-50%, -50%) scale(1.5); }
-}
-.hero-content {
-  position: relative;
   z-index: 1;
-  text-align: center;
-  color: #fff;
-  padding: 32px;
-}
-.hero-icon {
-  width: 56px;
-  height: 56px;
-  border-radius: 16px;
-  background: rgba(99, 102, 241, 0.2);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin: 0 auto 16px;
-  color: #a5b4fc;
-}
-.hero-name {
-  font-size: 24px;
-  font-weight: 700;
-  margin: 0 0 8px;
-  letter-spacing: 2px;
-}
-.hero-desc {
-  font-size: 13px;
-  color: rgba(255,255,255,0.5);
-  margin: 0 0 16px;
-  line-height: 1.5;
-}
-.hero-status {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  margin-bottom: 16px;
-}
-.tag {
-  font-size: 11px;
-  padding: 2px 10px;
-  border-radius: 10px;
-  font-weight: 500;
-}
-.tag-online { background: rgba(34,197,94,0.15); color: #4ade80; }
-.tag-offline { background: rgba(239,68,68,0.15); color: #f87171; }
-.tag-loading { background: rgba(99,102,241,0.15); color: #a5b4fc; }
-.cmd-count { font-size: 11px; color: rgba(255,255,255,0.4); }
-.hero-action {
-  font-size: 13px;
-  color: #a5b4fc;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  opacity: 0;
-  transition: opacity 0.2s;
-}
-.hero-card:hover .hero-action {
-  opacity: 1;
 }
 
-/* Side Cards */
-.side-cards {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+.sidebar-glow-top {
+  position: absolute;
+  top: -80px;
+  left: -40px;
+  width: 200px;
+  height: 160px;
+  background: radial-gradient(ellipse, rgba(6, 182, 212, 0.07) 0%, transparent 70%);
+  pointer-events: none;
 }
-.mini-card {
-  border-radius: 12px;
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  padding: 16px 18px;
+
+.sidebar-glow-bottom {
+  position: absolute;
+  bottom: -60px;
+  right: -60px;
+  width: 200px;
+  height: 180px;
+  background: radial-gradient(ellipse, rgba(139, 92, 246, 0.06) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+/* Brand */
+.sidebar-brand {
   display: flex;
   align-items: center;
-  gap: 14px;
-  transition: box-shadow 0.2s;
+  gap: 10px;
+  padding: 20px 20px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  position: relative;
 }
-.mini-card:hover {
-  box-shadow: 0 2px 12px rgba(0,0,0,0.06);
-}
-.mini-icon {
-  width: 40px;
-  height: 40px;
+
+.brand-icon {
+  width: 36px;
+  height: 36px;
   border-radius: 10px;
-  background: #f3f4f6;
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.12), rgba(139, 92, 246, 0.12));
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #9ca3af;
+}
+
+.brand-text {
+  font-size: 16px;
+  font-weight: 700;
+  color: #e2e8f0;
+  letter-spacing: 3px;
+}
+
+/* Navigation */
+.sidebar-nav {
+  flex: 1;
+  padding: 16px 12px;
+  overflow-y: auto;
+}
+
+.sidebar-nav::-webkit-scrollbar {
+  width: 4px;
+}
+
+.sidebar-nav::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sidebar-nav::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+}
+
+.nav-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  padding: 0 8px 10px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: #8892a8;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-decoration: none;
+  position: relative;
+  margin-bottom: 2px;
+  user-select: none;
+}
+
+.nav-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: #c8cee0;
+}
+
+.nav-item.active {
+  background: linear-gradient(90deg, rgba(99, 102, 241, 0.1) 0%, rgba(139, 92, 246, 0.04) 100%);
+  color: #e0e7ff;
+}
+
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: linear-gradient(180deg, #6366f1, #8b5cf6);
+}
+
+.nav-icon {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
 }
-.mini-body h3 {
-  font-size: 14px;
-  font-weight: 600;
-  color: #1d1d1f;
-  margin: 0 0 2px;
-}
-.mini-body p {
-  font-size: 12px;
-  color: #86868b;
-  margin: 0;
-}
-.coming-badge {
-  font-size: 10px;
-  color: #9ca3af;
-  background: #f3f4f6;
-  padding: 2px 8px;
-  border-radius: 6px;
-  white-space: nowrap;
-  margin-left: auto;
-}
-.disabled-card {
-  opacity: 0.65;
+
+.nav-text {
+  font-size: 13px;
+  font-weight: 500;
 }
 
-/* Responsive */
-@media (max-width: 768px) {
-  .feature-grid {
-    grid-template-columns: 1fr;
-  }
-  .hero-card { min-height: 220px; }
+.nav-arrow {
+  margin-left: auto;
+  transition: transform 0.25s ease;
+  opacity: 0.4;
+}
+
+.nav-arrow.expanded {
+  transform: rotate(180deg);
+}
+
+/* Sub menu */
+.nav-sub {
+  padding: 4px 0 4px 22px;
+}
+
+.nav-sub-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-radius: 6px;
+  color: #6b7394;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-decoration: none;
+}
+
+.nav-sub-item:hover {
+  color: #a5b4fc;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.nav-sub-item.active {
+  color: #c4b5fd;
+  background: rgba(139, 92, 246, 0.08);
+}
+
+.sub-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.4;
+  transition: all 0.2s;
+}
+
+.nav-sub-item.active .sub-dot {
+  opacity: 1;
+  background: #a78bfa;
+  box-shadow: 0 0 6px rgba(167, 139, 250, 0.4);
+}
+
+/* Sub menu transition */
+.sub-slide-enter-active {
+  transition: all 0.25s ease-out;
+}
+.sub-slide-leave-active {
+  transition: all 0.2s ease-in;
+}
+.sub-slide-enter-from {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+.sub-slide-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+/* Footer */
+.sidebar-footer {
+  padding: 16px 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  position: relative;
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.status-indicator.online {
+  color: #4ade80;
+}
+
+.status-indicator.offline {
+  color: #f87171;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status-indicator.online .status-dot {
+  box-shadow: 0 0 8px rgba(74, 222, 128, 0.5);
+  animation: glow-pulse 2s ease-in-out infinite;
+}
+
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 6px rgba(74, 222, 128, 0.4); }
+  50% { box-shadow: 0 0 14px rgba(74, 222, 128, 0.7); }
+}
+
+/* ====== Content Area ====== */
+.content-area {
+  flex: 1;
+  background: linear-gradient(160deg, #f8fafc 0%, #f1f5f9 50%, #eef2ff 100%);
+  overflow: auto;
+  padding: 28px 32px;
+  position: relative;
+}
+
+/* Left edge shadow for depth */
+.content-area::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 12px;
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.03), transparent);
+  pointer-events: none;
+  z-index: 1;
 }
 </style>
