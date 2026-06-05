@@ -1,4 +1,4 @@
-﻿"""
+"""
 语音助手模块
 使用 Vosk 离线中文语音识别 + sounddevice 采集音频，实时匹配预配置指令并回放操作序列。
 
@@ -75,83 +75,127 @@ def log(msg: str, tag: str = "VOICE") -> None:
     except Exception:
         pass
 
+# ── SendInput 基础设施（替代已弃用的 mouse_event / keybd_event）──────
+
+INPUT_MOUSE = 0
+INPUT_KEYBOARD = 1
+
+MOUSEEVENTF_MOVE = 0x0001
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
+MOUSEEVENTF_MIDDLEDOWN = 0x0020
+MOUSEEVENTF_MIDDLEUP = 0x0040
+MOUSEEVENTF_WHEEL = 0x0800
+
+KEYEVENTF_KEYUP = 0x0002
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", ctypes.c_long),
+        ("dy", ctypes.c_long),
+        ("mouseData", ctypes.c_ulong),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    ]
+
+
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", ctypes.c_ushort),
+        ("wScan", ctypes.c_ushort),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    ]
+
+
+class _INPUT_UNION(ctypes.Union):
+    _fields_ = [("ki", _KEYBDINPUT), ("mi", _MOUSEINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_ulong), ("union", _INPUT_UNION)]
+
+
+_user32 = ctypes.windll.user32
+_user32.SendInput.argtypes = [ctypes.c_uint, ctypes.POINTER(_INPUT), ctypes.c_int]
+_user32.SendInput.restype = ctypes.c_uint
+
+_extra_info = ctypes.pointer(ctypes.c_ulong(0))
+
+
+def _send_mouse(flags: int, delta: int = 0) -> None:
+    inp = _INPUT()
+    inp.type = INPUT_MOUSE
+    inp.union.mi = _MOUSEINPUT(0, 0, delta, flags, 0, _extra_info)
+    _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+
+
+def _send_key(vk: int, flags: int = 0) -> None:
+    inp = _INPUT()
+    inp.type = INPUT_KEYBOARD
+    inp.union.ki = _KEYBDINPUT(vk, 0, flags, 0, _extra_info)
+    _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+
+
 # ── 操作回放 ──────────────────────────────────────────────
 
 def _click_point(x, y) -> None:
     """单击指定坐标（标定模式）。"""
-    user32 = ctypes.windll.user32
-    ix, iy = int(x), int(y)
-    user32.SetCursorPos(ix, iy)
+    _user32.SetCursorPos(int(x), int(y))
     time.sleep(0.1)
-    MOUSEEVENTF_LEFTDOWN = 0x0002
-    MOUSEEVENTF_LEFTUP = 0x0004
-    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    _send_mouse(MOUSEEVENTF_LEFTDOWN)
     time.sleep(0.03)
-    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    _send_mouse(MOUSEEVENTF_LEFTUP)
     time.sleep(0.2)
 
 
 def _play_actions(actions: list[dict]) -> None:
     """回放操作序列。"""
-    user32 = ctypes.windll.user32
-    MOUSEEVENTF_MOVE = 0x0001
-    MOUSEEVENTF_LEFTDOWN = 0x0002
-    MOUSEEVENTF_LEFTUP = 0x0004
-    MOUSEEVENTF_RIGHTDOWN = 0x0008
-    MOUSEEVENTF_RIGHTUP = 0x0010
-    MOUSEEVENTF_MIDDLEDOWN = 0x0020
-    MOUSEEVENTF_MIDDLEUP = 0x0040
-
-    KEYEVENTF_KEYDOWN = 0x0000
-    KEYEVENTF_KEYUP = 0x0002
-
     for action in actions:
         atype = action.get("type", "")
 
-        # 先执行本步骤的延时（相对于上一步的时间差）
         delay_ms = action.get("ms", 0)
         if delay_ms > 0:
-            # 上限 2 秒，防止异常长延时卡住
             time.sleep(min(delay_ms, 2000) / 1000.0)
 
         if atype == "mouse_move":
-            x, y = int(action["x"]), int(action["y"])
-            user32.SetCursorPos(x, y)
+            _user32.SetCursorPos(int(action["x"]), int(action["y"]))
             time.sleep(0.02)
         elif atype == "click":
-            x, y = int(action["x"]), int(action["y"])
-            user32.SetCursorPos(x, y)
+            _user32.SetCursorPos(int(action["x"]), int(action["y"]))
             time.sleep(0.02)
             button = action.get("button", "left")
             if button == "left":
-                user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                _send_mouse(MOUSEEVENTF_LEFTDOWN)
                 time.sleep(0.03)
-                user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                _send_mouse(MOUSEEVENTF_LEFTUP)
             elif button == "right":
-                user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+                _send_mouse(MOUSEEVENTF_RIGHTDOWN)
                 time.sleep(0.03)
-                user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+                _send_mouse(MOUSEEVENTF_RIGHTUP)
             elif button == "middle":
-                user32.mouse_event(MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, 0)
+                _send_mouse(MOUSEEVENTF_MIDDLEDOWN)
                 time.sleep(0.03)
-                user32.mouse_event(MOUSEEVENTF_MIDDLEUP, 0, 0, 0, 0)
+                _send_mouse(MOUSEEVENTF_MIDDLEUP)
             time.sleep(0.05)
         elif atype == "scroll":
-            delta = int(action.get("delta", 0))
-            user32.mouse_event(0x0800, 0, 0, delta, 0)
+            _send_mouse(MOUSEEVENTF_WHEEL, delta=int(action.get("delta", 0)))
             time.sleep(0.05)
         elif atype == "key_press":
             vk = action.get("vk", 0)
-            user32.keybd_event(vk, 0, KEYEVENTF_KEYDOWN, 0)
+            _send_key(vk)
             time.sleep(0.02)
-            user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+            _send_key(vk, KEYEVENTF_KEYUP)
             time.sleep(0.02)
         elif atype == "key_down":
-            vk = action.get("vk", 0)
-            user32.keybd_event(vk, 0, KEYEVENTF_KEYDOWN, 0)
+            _send_key(action.get("vk", 0))
         elif atype == "key_up":
-            vk = action.get("vk", 0)
-            user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+            _send_key(action.get("vk", 0), KEYEVENTF_KEYUP)
             time.sleep(0.01)
         elif atype == "type_text":
             text = action.get("text", "")
@@ -160,16 +204,15 @@ def _play_actions(actions: list[dict]) -> None:
                 if vk:
                     shift = _needs_shift(ch)
                     if shift:
-                        user32.keybd_event(0x10, 0, KEYEVENTF_KEYDOWN, 0)
-                    user32.keybd_event(vk, 0, KEYEVENTF_KEYDOWN, 0)
+                        _send_key(0x10)
+                    _send_key(vk)
                     time.sleep(0.01)
-                    user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+                    _send_key(vk, KEYEVENTF_KEYUP)
                     if shift:
-                        user32.keybd_event(0x10, 0, KEYEVENTF_KEYUP, 0)
+                        _send_key(0x10, KEYEVENTF_KEYUP)
                     time.sleep(0.01)
         elif atype == "delay":
-            ms = action.get("ms", 100)
-            time.sleep(ms / 1000.0)
+            time.sleep(action.get("ms", 100) / 1000.0)
 
     log(f"操作回放完成: {len(actions)} 步", "VOICE")
 
