@@ -8,13 +8,24 @@ const agentOnline = ref(false)
 const devExpanded = ref(false)
 
 const isDevActive = computed(() => route.path.startsWith('/dev'))
+const isLlmActive = computed(() => route.path.startsWith('/llm'))
 
 watch(isDevActive, (val) => {
   if (val) devExpanded.value = true
 }, { immediate: true })
 
+watch(isLlmActive, (val) => {
+  if (val) llmExpanded.value = true
+}, { immediate: true })
+
+const llmExpanded = ref(false)
+
 function toggleDevMenu() {
   devExpanded.value = !devExpanded.value
+}
+
+function toggleLlmMenu() {
+  llmExpanded.value = !llmExpanded.value
 }
 
 let healthTimer: ReturnType<typeof setInterval> | null = null
@@ -78,6 +89,34 @@ onUnmounted(() => {
           </div>
           <span class="nav-text">语音助手</span>
         </router-link>
+
+        <!-- LLM (expandable) -->
+        <div class="nav-group">
+          <div class="nav-item" :class="{ active: isLlmActive }" @click="toggleLlmMenu">
+            <div class="nav-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2a4 4 0 0 1 4 4v2a4 4 0 0 1-8 0V6a4 4 0 0 1 4-4z" />
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+              </svg>
+            </div>
+            <span class="nav-text">大模型</span>
+            <svg class="nav-arrow" :class="{ expanded: llmExpanded }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </div>
+          <transition name="sub-slide">
+            <div v-show="llmExpanded" class="nav-sub">
+              <router-link to="/llm/config" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                基础配置
+              </router-link>
+              <router-link to="/llm/strategy" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                策略编辑
+              </router-link>
+            </div>
+          </transition>
+        </div>
 
         <!-- Dev Assistant (expandable) -->
         <div class="nav-group">

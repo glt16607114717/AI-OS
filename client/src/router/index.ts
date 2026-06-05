@@ -23,6 +23,16 @@ const router = createRouter({
           name: 'dev-timestamp',
           component: () => import('../views/dev/TimestampConverter.vue'),
         },
+        {
+          path: 'llm/config',
+          name: 'llm-config',
+          component: () => import('../views/llm/VendorConfig.vue'),
+        },
+        {
+          path: 'llm/strategy',
+          name: 'LLMStrategy',
+          component: () => import('../views/llm/StrategyEditor.vue'),
+        },
 
       ],
     },

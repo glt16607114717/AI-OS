@@ -129,6 +129,14 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"Voice module not available: {e}")
 
+    # 挂载 LLM 路由
+    try:
+        from llm_api import router as llm_router
+        app.include_router(llm_router)
+        logger.info("LLM module initialized")
+    except Exception as e:
+        logger.warning(f"LLM module not available: {e}")
+
 
 # --- Voice API ---
 
