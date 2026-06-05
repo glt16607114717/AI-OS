@@ -101,11 +101,14 @@ async function toggleEnabled(val: boolean) {
     voiceEnabled.value = false
     ElMessageBox.alert(
       `<div style="line-height:1.8">
-        <p><b>1.</b> 下载模型（约 50MB）：</p>
-        <p style="margin-left:16px"><a href="https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip" target="_blank" style="color:#409eff">https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip</a></p>
+        <p><b>1.</b> 下载语音识别模型：</p>
+        <p style="margin-left:16px"><b>标准模型</b>（推荐，识别更准确，约 1.3GB）：</p>
+        <p style="margin-left:32px"><a href="https://alphacephei.com/vosk/models/vosk-model-cn-0.22.zip" target="_blank" style="color:#409eff">vosk-model-cn-0.22.zip</a></p>
+        <p style="margin-left:16px"><b>轻量模型</b>（备选，约 50MB）：</p>
+        <p style="margin-left:32px"><a href="https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip" target="_blank" style="color:#409eff">vosk-model-small-cn-0.22.zip</a></p>
         <p style="margin-top:8px"><b>2.</b> 解压 zip 文件</p>
-        <p style="margin-top:8px"><b>3.</b> 将 <code>vosk-model-small-cn-0.22</code> 文件夹放到：</p>
-        <p style="margin-left:16px"><code>C:\\ProgramData\\AI-OS\\models\\vosk\\vosk-model-small-cn-0.22\\</code></p>
+        <p style="margin-top:8px"><b>3.</b> 将解压出的文件夹放到：</p>
+        <p style="margin-left:16px"><code>C:\\ProgramData\\AI-OS\\models\\vosk\\</code></p>
         <p style="margin-top:8px"><b>4.</b> 放好后重新打开此页面即可</p>
       </div>`,
       '请先安装语音识别模型',

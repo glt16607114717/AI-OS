@@ -59,16 +59,21 @@ def _ensure_writable(path: Path) -> None:
 def find_vosk_model() -> str | None:
     """
     搜索 Vosk 中文模型目录。
-    在 MODEL_SEARCH_DIRS 中寻找以 vosk-model-small-cn 开头的目录，
-    并验证其包含 am/final.mdl。
+    优先匹配标准模型（vosk-model-cn），其次小模型（vosk-model-small-cn）。
+    验证目录包含 am/final.mdl。
     """
+    # 优先匹配的前缀列表（标准模型 > 小模型）
+    prefixes = ["vosk-model-cn-0.2", "vosk-model-cn-kaldi", "vosk-model-small-cn"]
     for base in MODEL_SEARCH_DIRS:
         if not base.exists():
             continue
         for entry in sorted(base.iterdir()):
-            if entry.is_dir() and entry.name.startswith("vosk-model-small-cn"):
-                if (entry / "am" / "final.mdl").exists():
-                    return str(entry)
+            if not entry.is_dir():
+                continue
+            for prefix in prefixes:
+                if entry.name.startswith(prefix):
+                    if (entry / "am" / "final.mdl").exists():
+                        return str(entry)
     return None
 
 
