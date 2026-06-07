@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } from 'electron'
+import { spawn } from 'child_process'
 import * as path from 'path'
 import * as fs from 'fs'
 import * as http from 'http'
@@ -153,6 +154,69 @@ function registerIpcHandlers() {
       })
     } catch {
       return { ok: false }
+    }
+  })
+
+  ipcMain.handle('agent:restart', async () => {
+    try {
+      // 1. 找到并杀掉当前 agent 进程
+      const health: any = await new Promise((resolve) => {
+        const req = http.get('http://127.0.0.1:18731/health', { timeout: 3000 }, (res) => {
+          let data = ''
+          res.on('data', (chunk: string) => { data += chunk })
+          res.on('end', () => { try { resolve(JSON.parse(data)) } catch { resolve(null) } })
+        })
+        req.on('error', () => resolve(null))
+        req.on('timeout', () => { req.destroy(); resolve(null) })
+      })
+
+      if (health?.pid) {
+        try {
+          process.kill(health.pid)
+        } catch (e: any) {
+          if (e.code !== 'ESRCH') {
+            return { ok: false, error: '无法停止进程（权限不足），请以管理员身份运行' }
+          }
+        }
+      }
+
+      // 2. 等待端口释放
+      await new Promise(r => setTimeout(r, 1500))
+
+      // 3. 启动新进程
+      const appDir = getAppDir()
+      const pythonDir = path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'AI-OS', 'runtime', 'python')
+      const pythonwExe = path.join(pythonDir, 'pythonw.exe')
+      const mainScript = path.join(appDir, 'resources', 'backend', 'python', 'agent', 'main.py')
+
+      if (!fs.existsSync(pythonwExe)) {
+        return { ok: false, error: `pythonw.exe 不存在: ${pythonwExe}` }
+      }
+
+      spawn(pythonwExe, ['-X', 'utf8', mainScript], {
+        cwd: pythonDir,
+        detached: true,
+        stdio: 'ignore',
+      }).unref()
+
+      // 4. 等待新进程启动（最多 15 秒）
+      for (let i = 0; i < 15; i++) {
+        await new Promise(r => setTimeout(r, 1000))
+        const ok = await new Promise<boolean>((resolve) => {
+          const req = http.get('http://127.0.0.1:18731/health', { timeout: 2000 }, (res) => {
+            let data = ''
+            res.on('data', (chunk: string) => { data += chunk })
+            res.on('end', () => { try { resolve(!!JSON.parse(data).ok) } catch { resolve(false) } })
+          })
+          req.on('error', () => resolve(false))
+          req.on('timeout', () => { req.destroy(); resolve(false) })
+        })
+        if (ok) return { ok: true }
+      }
+
+      return { ok: false, error: '重启超时' }
+    } catch (e: any) {
+      return { ok: false, error: e.message }
     }
   })
 

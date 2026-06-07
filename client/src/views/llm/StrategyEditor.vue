@@ -66,7 +66,15 @@ async function fetchStrategies() {
   try {
     const res = await agentRequest('llm_get_strategies', {})
     if (res.ok) {
-      strategies.value = res.strategies || []
+      strategies.value = (res.strategies || []).map((s: any) => ({
+        id: s.id,
+        name: s.name,
+        type: s.type,
+        options: (s.options || []).map((o: any) =>
+          typeof o === 'string' ? o : `${o.vendor_id}|${o.key_id || ''}|${o.model_id}`
+        ),
+        active: s.active,
+      }))
     }
   } catch (e) {
     console.error('[StrategyEditor] fetchStrategies error:', e)
@@ -107,6 +115,11 @@ function addOption(val: string) {
   showAddOption.value = false
 }
 
+function parseOptionValue(val: string) {
+  const parts = val.split('|')
+  return { vendor_id: parts[0] || '', key_id: parts[1] || '', model_id: parts[2] || '' }
+}
+
 async function saveStrategy() {
   const s = selectedStrategy()
   if (!s) return
@@ -124,7 +137,7 @@ async function saveStrategy() {
       id: s.id,
       name: editForm.value.name.trim(),
       type: editForm.value.type,
-      options: editForm.value.options,
+      options: editForm.value.options.map(parseOptionValue),
     })
     if (res.ok) {
       ElMessage.success('保存成功')

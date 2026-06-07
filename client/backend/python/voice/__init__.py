@@ -53,27 +53,11 @@ _RECOGNIZE_LOG_MAX = 100
 
 # ── 日志 ──────────────────────────────────────────────────
 
+import logging
+_logger = logging.getLogger("voice")
+
 def log(msg: str, tag: str = "VOICE") -> None:
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{ts}] [{tag}] {msg}"
-    try:
-        print(line)
-    except Exception:
-        pass
-    # 优先用 Python logging
-    try:
-        import logging
-        logging.getLogger("voice-worker").info(line)
-    except Exception:
-        pass
-    # 兜底写文件
-    try:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        log_file = LOG_DIR / "voice.log"
-        with open(str(log_file), "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except Exception:
-        pass
+    _logger.info(f"[{tag}] {msg}")
 
 # ── SendInput 基础设施（替代已弃用的 mouse_event / keybd_event）──────
 

@@ -3,19 +3,26 @@
 
 挂载到 /api/llm，提供目录查询、密钥保存、厂商启停接口。
 转发路由挂载到 /v1/chat/completions，兼容 OpenAI 格式。
+轮询模式下支持智能故障转移。
 
 作者：桂良涛，邮箱：桂良涛@nndrobot.com
 """
 
 import logging
+import os
+import time
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 import httpx
 
 import llm_config
+import llm_stats
+import god_rules
+import request_dump
+import llm_log
 
-logger = logging.getLogger("ai-os-agent")
+logger = logging.getLogger("llm")
 
 router = APIRouter(tags=["llm"])
 
@@ -39,9 +46,9 @@ async def llm_action(req: LlmActionRequest):
     elif action == "llm_save_keys":
         vendor_id = payload.get("vendor_id", "")
         keys = payload.get("keys", [])
-        ok = llm_config.save_vendor_keys(vendor_id, keys)
-        if not ok:
-            return {"ok": False, "error": "无效的 vendor_id"}
+        result = llm_config.save_vendor_keys(vendor_id, keys)
+        if not result.get("ok"):
+            return {"ok": False, "error": result.get("error", "保存密钥失败")}
         return {"ok": True}
 
     elif action == "llm_toggle_vendor":
@@ -78,8 +85,90 @@ async def llm_action(req: LlmActionRequest):
             return {"ok": False, "error": "策略不存在"}
         return {"ok": True}
 
+    elif action == "llm_get_stats":
+        days = payload.get("days", 30)
+        summary = llm_stats.get_summary(days)
+        return {"ok": True, "stats": summary}
+
+    elif action == "llm_get_errors":
+        limit = payload.get("limit", 20)
+        errors = llm_stats.get_recent_errors(limit)
+        return {"ok": True, "errors": errors}
+
+    elif action == "llm_cleanup_stats":
+        removed = llm_stats.cleanup()
+        return {"ok": True, "removed": removed}
+
+    elif action == "llm_get_god_rules":
+        data = god_rules.get_rules()
+        return {"ok": True, "enabled": data["enabled"], "rules": data["rules"], "prompt_optimize": data.get("prompt_optimize", True)}
+
+    elif action == "llm_save_god_rules":
+        enabled = payload.get("enabled", True)
+        rules = payload.get("rules", "")
+        prompt_optimize = payload.get("prompt_optimize", True)
+        god_rules.save_rules(enabled, rules, prompt_optimize)
+        return {"ok": True}
+
+    elif action == "llm_get_quota_status":
+        from quota_monitor import get_status, get_all_keys_status
+        result = get_status()
+        all_keys = get_all_keys_status()
+        return {"ok": True, **result, "all_keys": all_keys}
+
+    elif action == "llm_set_quota_enabled":
+        from quota_monitor import set_enabled
+        set_enabled(payload.get("enabled", True))
+        return {"ok": True}
+
+    elif action == "llm_force_quota_check":
+        from quota_monitor import force_check
+        force_check()
+        return {"ok": True}
+
+    elif action == "llm_get_logs":
+        limit = payload.get("limit", 200)
+        category = payload.get("category", "")
+        after_id = payload.get("after_id", 0)
+        logs = llm_log.get_logs(limit=limit, category=category, after_id=after_id)
+        max_id = llm_log.get_max_id()
+        return {"ok": True, "logs": logs, "max_id": max_id}
+
+    elif action == "llm_clear_logs":
+        llm_log.clear_logs()
+        return {"ok": True}
+
     else:
         return {"ok": False, "error": f"Unknown action: {action}"}
+
+
+# ── 内部转发函数 ──
+
+async def _do_forward(body: dict, vendor_info: dict) -> tuple:
+    """
+    执行一次实际的转发请求。
+    返回 (status_code, response_data_or_error_text, latency_ms)
+    """
+    base_url = vendor_info["base_url"].rstrip("/")
+    target_url = f"{base_url}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {vendor_info['api_key']}",
+        "Content-Type": "application/json",
+    }
+
+    is_stream = body.get("stream", False)
+    t0 = time.monotonic()
+
+    if is_stream:
+        return 200, {"_stream": True, "target_url": target_url, "headers": headers, "body": body, "vendor_info": vendor_info}, 0
+
+    # 非流式
+    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+        resp = await client.post(target_url, json=body, headers=headers)
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        if resp.status_code != 200:
+            return resp.status_code, resp.text, latency_ms
+        return 200, resp.json(), latency_ms
 
 
 # ── 转发代理接口（/v1/chat/completions） ──
@@ -88,8 +177,8 @@ async def llm_action(req: LlmActionRequest):
 async def proxy_chat_completions(request: Request):
     """
     OpenAI 兼容格式的转发代理。
-    根据请求体中的 model 字段查找对应厂商，转发请求。
-    支持流式（stream=true）和非流式。
+    轮询模式下支持智能故障转移：某厂商报错自动尝试下一个。
+    每次请求完整转储到 C:\ProgramData\AI-OS\logs\requests\
     """
     try:
         body = await request.json()
@@ -100,75 +189,218 @@ async def proxy_chat_completions(request: Request):
     if not model:
         return JSONResponse({"error": {"message": "model is required"}}, status_code=400)
 
-    # 优先使用策略路由，无策略时 fallback 到按 model 查找厂商
+    # ── 上帝指令注入 ──
+    body["messages"] = god_rules.inject_into_messages(body.get("messages", []))
+
+    # ── 工具描述压缩（受提示词优化开关控制） ──
+    if "tools" in body and god_rules.is_optimize_enabled():
+        body["tools"] = god_rules.compress_tool_descriptions(body["tools"])
+
+    # ── 请求转储（只保留最近 20 个文件） ──
+    request_dump.dump_request(body)
+    _cleanup_dump_files(20)
+
+    # 获取策略路由
     vendor_info = llm_config.get_route_by_strategy()
+    strategy_type = "fixed" if not vendor_info else "round_robin"  # 简化判断
     if vendor_info:
-        # 策略路由：用策略指定的 model_id 覆盖请求体中的 model
+        strategy_type = "策略路由"
         body["model"] = vendor_info.get("model_id", model)
+        llm_log.write_log("route", f"策略路由选中 {vendor_info['vendor_name']}（{vendor_info.get('key_id', '')[:8]}）→ {body['model']}", detail=f"vendor={vendor_info['vendor_id']}")
     else:
         vendor_info = llm_config.get_vendor_for_model(model)
+        if vendor_info:
+            strategy_type = "模型匹配"
+            llm_log.write_log("route", f"模型匹配到 {vendor_info['vendor_name']} → {model}", detail=f"vendor={vendor_info['vendor_id']}")
 
     if not vendor_info:
+        llm_log.write_log("error", f"无可用厂商: {model}", level="error")
         return JSONResponse(
             {"error": {"message": f"No available vendor for model: {model}"}},
             status_code=404,
         )
 
-    base_url = vendor_info["base_url"].rstrip("/")
-    target_url = f"{base_url}/chat/completions"
-    api_key = vendor_info["api_key"]
+    # ── 智谱用量分级 ──
+    # exhausted (>90%): 固定策略直接报错（轮询已在路由层跳过）
+    # degraded (70%-90%): 降级 glm-5.1 → glm-4.7
+    if vendor_info.get("vendor_id") == "zhipu":
+        from quota_monitor import should_downgrade_model
+        key_id = vendor_info.get("key_id", "")
 
-    # 构建转发请求头
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+        if vendor_info.get("_quota_exhausted"):
+            logger.warning("[LLM Proxy] key %s exhausted, rejecting request", key_id[:8])
+            llm_log.write_log("quota", f"Key {key_id[:8]} 用量超过 90%，请求被拒绝", level="error", detail=f"model={model}")
+            return JSONResponse(
+                {"error": {"message": f"智谱 API key ({key_id[:8]}) 用量已超过 90%，请稍后再试或切换策略"}},
+                status_code=429,
+            )
+
+        original_model = body.get("model", model)
+        downgraded_model = should_downgrade_model(key_id, original_model)
+        if downgraded_model != original_model:
+            logger.info("[LLM Proxy] quota downgrade: %s → %s (key: %s)",
+                         original_model, downgraded_model, key_id[:8])
+            llm_log.write_log("downgrade", f"{original_model} → {downgraded_model}（Key {key_id[:8]} 用量偏高）", detail=f"key_id={key_id}")
+            body["model"] = downgraded_model
 
     is_stream = body.get("stream", False)
+    logger.info(f"[LLM Proxy] model={model} -> {vendor_info['vendor_name']} stream={is_stream}")
+    llm_log.write_log("request", f"{body.get('model', model)} → {vendor_info['vendor_name']}（{vendor_info.get('key_id', '')[:8]}）{'流式' if is_stream else '非流式'}", detail=f"model={body.get('model', model)},stream={is_stream}")
 
-    logger.info(f"[LLM Proxy] {model} -> {vendor_info['vendor_name']} ({target_url}) stream={is_stream}")
+    # ── 非流式：支持故障转移 ──
+    if not is_stream:
+        failed_vendors = set()
+        attempts = [(vendor_info, "策略路由")]
 
-    if is_stream:
-        # 流式转发：用 aiter_lines 逐行转发 SSE 事件，更可靠
-        async def stream_generator():
-            try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
-                    async with client.stream(
-                        "POST",
-                        target_url,
-                        json=body,
-                        headers=headers,
-                    ) as resp:
-                        if resp.status_code != 200:
-                            error_body = await resp.aread()
-                            logger.error(f"[LLM Proxy] upstream error: {resp.status_code} {error_body.decode()}")
-                            yield f"data: {error_body.decode()}\n\n"
-                            yield "data: [DONE]\n\n"
-                            return
-                        async for line in resp.aiter_lines():
-                            yield line + "\n"
-            except Exception as e:
-                logger.error(f"[LLM Proxy] stream error: {e}")
-                yield f"data: {{\"error\": \"stream interrupted: {str(e)}\"}}\n\n"
-                yield "data: [DONE]\n\n"
+        failover_routes = llm_config.get_all_routes_for_failover()
+        for r in failover_routes:
+            if r["vendor_id"] != vendor_info.get("vendor_id", ""):
+                attempts.append((r, "故障转移"))
 
-        return StreamingResponse(
-            stream_generator(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-    else:
-        # 非流式转发
-        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
-            resp = await client.post(target_url, json=body, headers=headers)
-            if resp.status_code != 200:
-                logger.error(f"[LLM Proxy] upstream error: {resp.status_code} {resp.text}")
-                return JSONResponse(
-                    {"error": {"message": f"Upstream error: {resp.status_code}", "detail": resp.text}},
-                    status_code=resp.status_code,
+        last_error = ""
+        for vi, source in attempts:
+            if vi["vendor_id"] in failed_vendors:
+                continue
+
+            fwd_body = dict(body)
+            fwd_body["model"] = vi.get("model_id", model)
+
+            status, data, latency = await _do_forward(fwd_body, vi)
+
+            if status == 200:
+                usage = data.get("usage", {})
+                logger.info(f"[LLM Proxy] response: model={data.get('model','')}, "
+                            f"usage={usage}, latency={latency}ms, source={source}")
+                token_detail = f"输入 {usage.get('prompt_tokens', 0)} / 输出 {usage.get('completion_tokens', 0)} / 耗时 {latency}ms"
+                llm_log.write_log("request", f"响应成功: {vi.get('model_id', '')}（{source}）", detail=token_detail)
+                llm_stats.record(
+                    vendor_id=vi["vendor_id"],
+                    vendor_name=vi["vendor_name"],
+                    model_id=vi.get("model_id", ""),
+                    prompt_tokens=usage.get("prompt_tokens", 0),
+                    completion_tokens=usage.get("completion_tokens", 0),
+                    total_tokens=usage.get("total_tokens", 0),
+                    latency_ms=latency,
+                    success=True,
                 )
-            return JSONResponse(resp.json(), status_code=200)
+                return JSONResponse(data, status_code=200)
+            else:
+                failed_vendors.add(vi["vendor_id"])
+                error_msg = str(data)[:500] if isinstance(data, str) else str(data)
+                logger.warning(f"[LLM Proxy] {vi['vendor_name']} failed ({status}), "
+                               f"source={source}, error={error_msg}")
+                llm_log.write_log("failover", f"{vi['vendor_name']} 请求失败（HTTP {status}）", level="error", detail=f"error={error_msg[:200]}")
+                llm_stats.record(
+                    vendor_id=vi["vendor_id"],
+                    vendor_name=vi["vendor_name"],
+                    model_id=vi.get("model_id", ""),
+                    latency_ms=latency,
+                    success=False,
+                    error=error_msg,
+                )
+                last_error = error_msg
+
+        logger.error(f"[LLM Proxy] all vendors failed, last error: {last_error}")
+        llm_log.write_log("failover", f"所有厂商均失败", level="error", detail=f"last_error={last_error[:200]}")
+        return JSONResponse(
+            {"error": {"message": "All vendors failed", "detail": last_error}},
+            status_code=502,
+        )
+
+    # ── 流式：直接转发 ──
+    base_url = vendor_info["base_url"].rstrip("/")
+    target_url = f"{base_url}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {vendor_info['api_key']}",
+        "Content-Type": "application/json",
+    }
+    t0 = time.monotonic()
+
+    async def stream_generator():
+        success = False
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+                async with client.stream("POST", target_url, json=body, headers=headers) as resp:
+                    if resp.status_code != 200:
+                        error_body = await resp.aread()
+                        error_msg = error_body.decode()[:500]
+                        logger.error(f"[LLM Proxy] stream upstream error: {resp.status_code} {error_msg}")
+                        llm_stats.record(
+                            vendor_id=vendor_info["vendor_id"],
+                            vendor_name=vendor_info["vendor_name"],
+                            model_id=vendor_info.get("model_id", ""),
+                            latency_ms=int((time.monotonic() - t0) * 1000),
+                            success=False,
+                            error=error_msg,
+                        )
+                        yield f"data: {error_body.decode()}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+
+                    collected_content = b""
+                    async for line in resp.aiter_lines():
+                        yield line + "\n"
+                        if line.startswith("data: ") and line != "data: [DONE]":
+                            try:
+                                chunk = line[6:]
+                                import json
+                                obj = json.loads(chunk)
+                                if obj.get("usage"):
+                                    latency_ms = int((time.monotonic() - t0) * 1000)
+                                    usage = obj["usage"]
+                                    llm_stats.record(
+                                        vendor_id=vendor_info["vendor_id"],
+                                        vendor_name=vendor_info["vendor_name"],
+                                        model_id=vendor_info.get("model_id", ""),
+                                        prompt_tokens=usage.get("prompt_tokens", 0),
+                                        completion_tokens=usage.get("completion_tokens", 0),
+                                        total_tokens=usage.get("total_tokens", 0),
+                                        latency_ms=latency_ms,
+                                        success=True,
+                                    )
+                                    success = True
+                            except Exception:
+                                pass
+
+                    if not success:
+                        latency_ms = int((time.monotonic() - t0) * 1000)
+                        llm_stats.record(
+                            vendor_id=vendor_info["vendor_id"],
+                            vendor_name=vendor_info["vendor_name"],
+                            model_id=vendor_info.get("model_id", ""),
+                            latency_ms=latency_ms,
+                            success=True,
+                        )
+        except Exception as e:
+            logger.error(f"[LLM Proxy] stream error: {e}")
+            llm_stats.record(
+                vendor_id=vendor_info["vendor_id"],
+                vendor_name=vendor_info["vendor_name"],
+                model_id=vendor_info.get("model_id", ""),
+                latency_ms=int((time.monotonic() - t0) * 1000),
+                success=False,
+                error=str(e),
+            )
+            yield f"data: {{\"error\": \"stream interrupted: {str(e)}\"}}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        stream_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _cleanup_dump_files(keep: int = 20):
+    """只保留最近的 N 个转储文件。"""
+    try:
+        dump_dir = request_dump.DUMP_DIR
+        files = sorted(dump_dir.glob("*.json"), key=lambda f: f.name, reverse=True)
+        for f in files[keep:]:
+            f.unlink()
+    except Exception:
+        pass

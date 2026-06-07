@@ -1,11 +1,13 @@
 """
 AI-OS 看门狗脚本
-检查 main.py 进程是否在运行，如果不在就启动它。
+检查 agent 进程是否在运行，如果不在就启动它。
 由计划任务 AI-OS-Watchdog 每 2 分钟调用一次。
 """
 import subprocess
 import os
 import sys
+import urllib.request
+import urllib.error
 
 NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW
 
@@ -31,23 +33,11 @@ def find_python_dir():
     return ""
 
 def is_agent_running():
-    """检查 main.py 进程是否在运行（排除 watchdog 自己）"""
+    """通过 HTTP 健康检查判断 agent 是否在运行"""
     try:
-        # 用 WMIC 检查 pythonw.exe 的命令行参数是否包含 main.py
-        result = subprocess.run(
-            ["wmic", "process", "where", "name='pythonw.exe'", "get",
-             "CommandLine", "/VALUE"],
-            capture_output=True, timeout=10,
-            creationflags=NO_WINDOW,
-            stdin=subprocess.DEVNULL,
-        )
-        output = result.stdout.decode("latin-1", errors="replace")
-        # 检查是否有命令行包含 main.py 的 pythonw 进程
-        for line in output.split("\n"):
-            line = line.strip()
-            if "main.py" in line.lower():
-                return True
-        return False
+        req = urllib.request.Request("http://127.0.0.1:18731/health")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
     except Exception:
         return False
 

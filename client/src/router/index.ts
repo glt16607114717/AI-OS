@@ -33,6 +33,26 @@ const router = createRouter({
           name: 'LLMStrategy',
           component: () => import('../views/llm/StrategyEditor.vue'),
         },
+        {
+          path: 'llm/stats',
+          name: 'LlmStats',
+          component: () => import('../views/llm/StatsDashboard.vue'),
+        },
+        {
+          path: 'llm/god-rules',
+          name: 'LlmGodRules',
+          component: () => import('../views/llm/GodRules.vue'),
+        },
+        {
+          path: 'llm/log',
+          name: 'LlmLog',
+          component: () => import('../views/llm/LlmLog.vue'),
+        },
+        {
+          path: 'llm/quota',
+          name: 'LlmQuota',
+          component: () => import('../views/llm/QuotaMonitor.vue'),
+        },
 
       ],
     },

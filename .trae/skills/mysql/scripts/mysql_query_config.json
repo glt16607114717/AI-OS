@@ -1,0 +1,62 @@
+{
+    "main": {
+        "dev": {
+            "host": "172.16.90.62",
+            "port": 3306,
+            "database": "dev_nndrobot_20251027",
+            "username": "root",
+            "password": "admin",
+            "read_only": false
+        },
+        "test": {
+            "host": "gz-cdb-morch28x.sql.tencentcdb.com",
+            "port": 28833,
+            "database": "nnd_robot_test",
+            "username": "robot_test",
+            "password": "nnd@1234TEST",
+            "read_only": false
+        },
+        "gray": {
+            "host": "gz-cynosdbmysql-grp-irwd9b99.sql.tencentcdb.com",
+            "port": 23022,
+            "database": "nnd_robot_gray",
+            "username": "nnd_gray",
+            "password": "KOcjAr8NFl&!e$Sg",
+            "read_only": true
+        },
+        "prod": {
+            "host": "gz-cynosdbmysql-grp-4xvs5cz5.sql.tencentcdb.com",
+            "port": 28961,
+            "database": "nnd_robot",
+            "username": "robot_read",
+            "password": "b&G#C4_#|+xjMwwZ",
+            "read_only": true
+        }
+    },
+    "bi": {
+        "test": {
+            "host": "gz-cdb-morch28x.sql.tencentcdb.com",
+            "port": 28833,
+            "database": "nnd_adm_test",
+            "username": "bi_read",
+            "password": "nnd@1234",
+            "read_only": true
+        },
+        "gray": {
+            "host": "gz-cdb-morch28x.sql.tencentcdb.com",
+            "port": 28833,
+            "database": "nnd_adm_gray",
+            "username": "bi_read",
+            "password": "nnd@1234",
+            "read_only": true
+        },
+        "prod": {
+            "host": "gz-cdb-morch28x.sql.tencentcdb.com",
+            "port": 28833,
+            "database": "nnd_adm",
+            "username": "bi_read",
+            "password": "nnd@1234",
+            "read_only": true
+        }
+    }
+}

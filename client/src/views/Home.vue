@@ -6,6 +6,7 @@ const route = useRoute()
 
 const agentOnline = ref(false)
 const devExpanded = ref(false)
+const restarting = ref(false)
 
 const isDevActive = computed(() => route.path.startsWith('/dev'))
 const isLlmActive = computed(() => route.path.startsWith('/llm'))
@@ -47,6 +48,22 @@ onMounted(() => {
 onUnmounted(() => {
   if (healthTimer) clearInterval(healthTimer)
 })
+
+async function restartAgent() {
+  if (restarting.value) return
+  restarting.value = true
+  try {
+    const res = await window.aiOS.agentRestart()
+    if (res?.ok) {
+      agentOnline.value = true
+    } else {
+      alert(res?.error || '重启失败')
+    }
+  } catch (e: any) {
+    alert(e.message || '重启失败')
+  }
+  restarting.value = false
+}
 </script>
 
 <template>
@@ -114,6 +131,22 @@ onUnmounted(() => {
                 <span class="sub-dot"></span>
                 策略编辑
               </router-link>
+              <router-link to="/llm/stats" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                统计仪表
+              </router-link>
+              <router-link to="/llm/god-rules" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                上帝指令
+              </router-link>
+              <router-link to="/llm/log" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                操作日志
+              </router-link>
+              <router-link to="/llm/quota" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                用量统计
+              </router-link>
             </div>
           </transition>
         </div>
@@ -154,6 +187,14 @@ onUnmounted(() => {
           <span class="status-dot"></span>
           <span class="status-text">{{ agentOnline ? '服务运行中' : '服务离线' }}</span>
         </div>
+        <button class="restart-btn" @click="restartAgent" :disabled="restarting" :title="restarting ? '重启中...' : '重启后端服务'">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10" />
+            <polyline points="1 20 1 14 7 14" />
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+          </svg>
+          <span v-if="restarting" class="restart-spin">&#x21bb;</span>
+        </button>
       </div>
     </aside>
 
@@ -180,7 +221,6 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   position: relative;
-  overflow: hidden;
   z-index: 1;
 }
 
@@ -384,6 +424,40 @@ onUnmounted(() => {
   padding: 16px 20px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.restart-btn {
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  color: #8892a8;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+.restart-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+  color: #c8cee0;
+}
+.restart-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.restart-spin {
+  animation: spin 1s linear infinite;
+  font-size: 16px;
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .status-indicator {
@@ -422,8 +496,9 @@ onUnmounted(() => {
 /* ====== Content Area ====== */
 .content-area {
   flex: 1;
+  min-height: 0;
   background: linear-gradient(160deg, #f8fafc 0%, #f1f5f9 50%, #eef2ff 100%);
-  overflow: auto;
+  overflow-y: auto;
   padding: 28px 32px;
   position: relative;
 }

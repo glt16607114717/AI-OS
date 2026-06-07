@@ -40,7 +40,7 @@ VENDOR_CATALOG = [
     {
         "id": "xiaomi",
         "name": "小米 MiMo",
-        "base_url": "https://api.xiaomimimo.com/v1",
+        "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
         "sort_order": 2,
         "models": [
             {"model_id": "mimo-v2.5-pro", "display_name": "MiMo-V2.5-Pro", "description": "旗舰 Agent/Coding，1.02T 参数 42B 激活，1M 上下文，128K 输出"},
@@ -162,6 +162,12 @@ def _load_keys_data() -> dict:
     return {"keys": {}, "vendor_enabled": {}}
 
 
+def get_keys_data() -> dict:
+    """读取密钥文件的公开接口（线程安全）。"""
+    with _file_lock:
+        return _load_keys_data()
+
+
 def _save_keys_data(data: dict) -> None:
     """写入密钥文件（调用方需持锁）"""
     _ensure_dir()
@@ -194,16 +200,17 @@ def get_catalog() -> list[dict]:
     return result
 
 
-def save_vendor_keys(vendor_id: str, keys: list[dict]) -> bool:
+def save_vendor_keys(vendor_id: str, keys: list[dict]) -> dict:
     """
     保存某个厂商的密钥列表。
     keys 格式: [{"name": "xxx", "api_key": "xxx", "enabled": true}]
     自动为新密钥补充 id 字段。
+    返回 {"ok": True} 或 {"ok": False, "error": "..."}。
     """
     # 校验 vendor_id 合法性
     valid_ids = {v["id"] for v in VENDOR_CATALOG}
     if vendor_id not in valid_ids:
-        return False
+        return {"ok": False, "error": "无效的 vendor_id"}
 
     # 为缺少 id 的密钥自动生成
     processed = []
@@ -216,12 +223,30 @@ def save_vendor_keys(vendor_id: str, keys: list[dict]) -> bool:
         }
         processed.append(item)
 
+    # 检查被删除的 key 是否被策略引用
+    new_key_ids = {k["id"] for k in processed}
+    with _file_lock:
+        data = _load_keys_data()
+        old_keys = data.get("keys", {}).get(vendor_id, [])
+        removed_ids = [k["id"] for k in old_keys if k["id"] not in new_key_ids]
+
+        if removed_ids:
+            strategies = data.get("strategies", [])
+            conflicts = []
+            for s in strategies:
+                for o in s.get("options", []):
+                    if o.get("vendor_id") == vendor_id and o.get("key_id") in removed_ids:
+                        conflicts.append(s.get("name", s.get("id", "")))
+                        break
+            if conflicts:
+                return {"ok": False, "error": f"密钥被策略 [{', '.join(conflicts)}] 引用，请先修改策略"}
+
     with _file_lock:
         data = _load_keys_data()
         data.setdefault("keys", {})[vendor_id] = processed
         _save_keys_data(data)
 
-    return True
+    return {"ok": True}
 
 
 def toggle_vendor(vendor_id: str, enabled: bool) -> bool:
@@ -453,12 +478,17 @@ def set_active_strategy(strategy_id: str) -> bool:
 def get_route_by_strategy() -> dict | None:
     """
     核心路由函数：根据激活策略返回路由信息。
-    - fixed: 返回第一个 option
-    - round_robin: 轮询返回 option
+    - fixed: 返回第一个 option（如果 key 已耗尽则返回特殊标记）
+    - round_robin: 轮询返回 option，跳过已耗尽的 key
     - 无策略时返回 None
 
+    智谱用量分级（由 quota_monitor 模块提供）：
+    - normal (<70%): 正常使用
+    - degraded (70%-90%): 需降级，返回后由 llm_api 处理
+    - exhausted (>90%): 轮询跳过；固定策略标记
+
     @author 桂良涛
-    @return dict | None 路由信息 {vendor_id, vendor_name, base_url, api_key, model_id}
+    @return dict | None 路由信息，可能包含 _quota_status 字段
     """
     global _rr_counter
 
@@ -481,13 +511,34 @@ def get_route_by_strategy() -> dict | None:
     if not options:
         return None
 
+    # 尝试导入 quota_monitor（可能未加载）
+    try:
+        from quota_monitor import is_key_exhausted
+    except ImportError:
+        is_key_exhausted = lambda kid: False
+
     # 根据策略类型选择 option
     if active.get("type", "fixed") == "round_robin":
-        idx = _rr_counter % len(options)
-        _rr_counter += 1
-        selected = options[idx]
+        # 轮询：跳过 exhausted 的 key
+        total = len(options)
+        for _ in range(total):
+            idx = _rr_counter % total
+            _rr_counter += 1
+            selected = options[idx]
+            sid = selected.get("key_id", "")
+            if not is_key_exhausted(sid):
+                break
+        else:
+            # 所有 key 都耗尽
+            logger.warning("[LLM Config] round_robin: all keys exhausted")
+            return None
     else:
         selected = options[0]
+        sid = selected.get("key_id", "")
+        if is_key_exhausted(sid):
+            logger.warning("[LLM Config] fixed strategy: key %s exhausted", sid[:8])
+            # 返回路由信息但标记 exhausted，由 llm_api 返回错误
+            pass  # 继续走下面的流程，llm_api 会检查
 
     # 补充完整的厂商/密钥信息
     vendor_map = {v["id"]: v for v in VENDOR_CATALOG}
@@ -499,18 +550,89 @@ def get_route_by_strategy() -> dict | None:
         return None
 
     api_key = ""
+    key_id = ""
     for k in vendor_keys.get(vid, []):
         if k.get("id") == selected.get("key_id"):
             api_key = k.get("api_key", "")
+            key_id = k.get("id", "")
             break
 
     if not api_key:
         return None
 
-    return {
+    result = {
         "vendor_id": vid,
         "vendor_name": vendor["name"],
         "base_url": vendor["base_url"],
         "api_key": api_key,
+        "key_id": key_id,
         "model_id": selected.get("model_id", ""),
     }
+
+    # 标记 exhausted，让 llm_api 返回错误
+    if is_key_exhausted(key_id):
+        result["_quota_exhausted"] = True
+
+    return result
+
+
+def get_all_routes_for_failover(exclude_vendor_ids: set = None) -> list[dict]:
+    """
+    获取轮询策略中所有可用的路由（用于故障转移）。
+    排除已失败的 vendor_id。
+    固定策略或无策略返回空列表。
+    """
+    exclude_vendor_ids = exclude_vendor_ids or set()
+
+    with _file_lock:
+        keys_data = _load_keys_data()
+
+    strategies = keys_data.get("strategies", [])
+    active = None
+    for s in strategies:
+        if s.get("active", False):
+            active = s
+            break
+    if not active or active.get("type") != "round_robin":
+        return []
+
+    options = active.get("options", [])
+    if not options:
+        return []
+
+    vendor_map = {v["id"]: v for v in VENDOR_CATALOG}
+    vendor_keys = keys_data.get("keys", {})
+
+    routes = []
+    try:
+        from quota_monitor import is_key_exhausted
+    except ImportError:
+        is_key_exhausted = lambda kid: False
+    for opt in options:
+        vid = opt.get("vendor_id", "")
+        if vid in exclude_vendor_ids:
+            continue
+        # 跳过耗尽的 key
+        if is_key_exhausted(opt.get("key_id", "")):
+            continue
+        vendor = vendor_map.get(vid)
+        if not vendor:
+            continue
+        api_key = ""
+        key_id = ""
+        for k in vendor_keys.get(vid, []):
+            if k.get("id") == opt.get("key_id"):
+                api_key = k.get("api_key", "")
+                key_id = k.get("id", "")
+                break
+        if not api_key:
+            continue
+        routes.append({
+            "vendor_id": vid,
+            "vendor_name": vendor["name"],
+            "base_url": vendor["base_url"],
+            "api_key": api_key,
+            "key_id": key_id,
+            "model_id": opt.get("model_id", ""),
+        })
+    return routes

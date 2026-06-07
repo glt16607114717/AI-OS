@@ -30,7 +30,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 START_TIME = time.time()
-VERSION = "0.1.2"
+VERSION = "1.0.0"
 SHUTDOWN_DELAY = 5
 
 # Debug mode: True = show full error info, False = show generic error
@@ -53,12 +53,40 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w', encoding='utf-8')
 
-logging.basicConfig(
-    level=logging.DEBUG if DEBUG else logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
-logger = logging.getLogger("ai-os-agent")
+_LOG_DIR = Path(os.environ.get("AIOS_DATA_DIR", "C:/ProgramData/AI-OS")) / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+_LOG_LEVEL = logging.DEBUG if DEBUG else logging.INFO
+_LOG_FMT = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+
+def _make_logger(name: str, prefix: str) -> logging.Logger:
+    """创建独立 logger：按天切割文件（保留30天）+ stdout"""
+    from logging.handlers import TimedRotatingFileHandler
+    lg = logging.getLogger(name)
+    lg.setLevel(_LOG_LEVEL)
+    lg.propagate = False
+    fh = TimedRotatingFileHandler(
+        _LOG_DIR / f"{prefix}.log",
+        when="midnight",
+        interval=1,
+        backupCount=30,
+        encoding="utf-8",
+    )
+    fh.suffix = "%Y-%m-%d.log"
+    fh.extMatch = r"^\d{4}-\d{2}-\d{2}\.log$"
+    fh.setFormatter(_LOG_FMT)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(_LOG_FMT)
+    lg.addHandler(fh)
+    lg.addHandler(sh)
+    return lg
+
+logger = _make_logger("agent", "agent")
+voice_logger = _make_logger("voice", "voice")
+llm_logger = _make_logger("llm", "llm")
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 app = FastAPI(title="AI-OS Agent", version=VERSION)
 
@@ -101,7 +129,7 @@ async def shutdown():
     def delayed_exit():
         time.sleep(SHUTDOWN_DELAY)
         logger.info("Executing shutdown...")
-        sys.exit(0)
+        os._exit(0)
 
     import threading
     thread = threading.Thread(target=delayed_exit, daemon=True)
@@ -112,6 +140,32 @@ async def shutdown():
         "message": "Graceful shutdown initiated",
         "delay_seconds": SHUTDOWN_DELAY
     }
+
+
+def _start_daily_cleanup():
+    """启动后台线程，每天 12:00 清理 90 天前的统计数据"""
+    import threading
+    from datetime import datetime
+
+    def _cleanup_loop():
+        import time
+        while True:
+            now = datetime.now()
+            target = now.replace(hour=12, minute=0, second=0, microsecond=0)
+            if now >= target:
+                from datetime import timedelta
+                target = (target + timedelta(days=1))
+            wait_seconds = (target - now).total_seconds()
+            time.sleep(wait_seconds)
+            try:
+                import llm_stats
+                removed = llm_stats.cleanup()
+                logger.info(f"Daily cleanup: removed {removed} old stats records")
+            except Exception as e:
+                logger.error(f"Daily cleanup failed: {e}")
+
+    t = threading.Thread(target=_cleanup_loop, daemon=True)
+    t.start()
 
 
 @app.on_event("startup")
@@ -136,6 +190,17 @@ async def on_startup():
         logger.info("LLM module initialized")
     except Exception as e:
         logger.warning(f"LLM module not available: {e}")
+
+    # 启动定时清理任务（每天 12:00 清理 90 天前的统计数据）
+    _start_daily_cleanup()
+
+    # 启动智谱用量监控（每 10 分钟检查，超阈值自动降级）
+    try:
+        from quota_monitor import start as start_quota_monitor
+        start_quota_monitor()
+        logger.info("Quota monitor initialized")
+    except Exception as e:
+        logger.warning(f"Quota monitor not available: {e}")
 
 
 # --- Voice API ---

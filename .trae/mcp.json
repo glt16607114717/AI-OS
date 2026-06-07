@@ -1,0 +1,24 @@
+{
+  "globalSettings": {
+    "timeout": 30000,
+    "retryAttempts": 3,
+    "logLevel": "info"
+  },
+  "securitySettings": {
+    "allowedCommands": [
+      "read",
+      "write",
+      "execute"
+    ],
+    "restrictedPaths": [
+      "/etc",
+      "/root"
+    ],
+    "authentication": {
+      "enabled": true,
+      "method": "token"
+    }
+  },
+  "mcpServers": {
+  }
+}
