@@ -183,13 +183,21 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"Voice module not available: {e}")
 
-    # 挂载 LLM 路由
+    # 挂载 LLM 路由（代理接口）
     try:
         from llm_api import router as llm_router
         app.include_router(llm_router)
         logger.info("LLM module initialized")
     except Exception as e:
         logger.warning(f"LLM module not available: {e}")
+
+    # 挂载工作台路由（独立于代理）
+    try:
+        from workspace_chat import router as ws_router
+        app.include_router(ws_router)
+        logger.info("Workspace chat module initialized")
+    except Exception as e:
+        logger.warning(f"Workspace chat module not available: {e}")
 
     # 启动定时清理任务（每天 12:00 清理 90 天前的统计数据）
     _start_daily_cleanup()

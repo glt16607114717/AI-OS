@@ -107,6 +107,16 @@ async function restartAgent() {
           <span class="nav-text">语音助手</span>
         </router-link>
 
+        <!-- Chat Workspace -->
+        <router-link to="/workspace" class="nav-item" active-class="active">
+          <div class="nav-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </svg>
+          </div>
+          <span class="nav-text">工作台</span>
+        </router-link>
+
         <!-- LLM (expandable) -->
         <div class="nav-group">
           <div class="nav-item" :class="{ active: isLlmActive }" @click="toggleLlmMenu">

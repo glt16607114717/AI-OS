@@ -85,6 +85,9 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null
   })
+
+  // 默认打开 DevTools 用于调试
+  mainWindow.webContents.openDevTools({ mode: 'bottom' })
 }
 
 function registerIpcHandlers() {
@@ -103,7 +106,7 @@ function registerIpcHandlers() {
     let apiPath = '/api/voice'
     if (action === 'voice_download_model') apiPath = '/api/voice/download-model'
     else if (action === 'voice_model_status') apiPath = '/api/voice/model-status'
-    else if (action.startsWith('llm_')) apiPath = '/api/llm'
+    else if (action.startsWith('llm_') || action.startsWith('chat_')) apiPath = '/api/llm'
     else if (!action.startsWith('voice_')) apiPath = '/api'
 
     const method = (action === 'voice_model_status') ? 'GET' : 'POST'

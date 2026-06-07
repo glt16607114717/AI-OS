@@ -53,6 +53,11 @@ const router = createRouter({
           name: 'LlmQuota',
           component: () => import('../views/llm/QuotaMonitor.vue'),
         },
+        {
+          path: 'workspace',
+          name: 'Workspace',
+          component: () => import('../views/ChatWorkspace.vue'),
+        },
 
       ],
     },
