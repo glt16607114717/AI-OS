@@ -143,8 +143,9 @@ async function sendMessage() {
   saveToCache()
   saveMessage('user', text)
 
-  const aiMsg: Message = { role: 'assistant', content: '', done: false, toolCalls: [] }
-  messages.value.push(aiMsg)
+  // push 后通过 messages.value[idx] 访问响应式 Proxy，才能触发 Vue 重渲染
+  messages.value.push({ role: 'assistant', content: '', done: false, toolCalls: [] })
+  const aiIdx = messages.value.length - 1
   scrollToBottom()
 
   abortController = new AbortController()
@@ -156,7 +157,7 @@ async function sendMessage() {
       headers: { 'Content-Type': 'application/json' },
       signal: abortController.signal,
       body: JSON.stringify({
-        messages: messages.value.slice(0, -1).map(m => ({
+        messages: messages.value.slice(0, aiIdx).map(m => ({
           role: m.role,
           content: m.content
         })),
@@ -165,9 +166,13 @@ async function sendMessage() {
     })
 
     if (!response.ok) {
-      const errText = await response.text()
-      aiMsg.content = `请求失败: ${response.status} ${errText}`
-      aiMsg.done = true
+      let errMsg = `HTTP ${response.status}`
+      try {
+        const errJson = JSON.parse(await response.text())
+        if (errJson.error) errMsg = errJson.error
+      } catch {}
+      messages.value[aiIdx].content = errMsg
+      messages.value[aiIdx].done = true
       loading.value = false
       return
     }
@@ -175,16 +180,17 @@ async function sendMessage() {
     const reader = response.body!.getReader()
     const decoder = new TextDecoder()
     let sseBuffer = ''
-    let contentBuffer = ''
 
-    // 100ms 节流渲染
-    const flushTimer = setInterval(() => {
-      if (contentBuffer) {
-        aiMsg.content += contentBuffer
-        contentBuffer = ''
+    // 渲染节流：用 requestAnimationFrame 合并同一帧内的多次内容更新
+    let renderScheduled = false
+    function scheduleScroll() {
+      if (renderScheduled) return
+      renderScheduled = true
+      requestAnimationFrame(() => {
+        renderScheduled = false
         scrollToBottom()
-      }
-    }, 100)
+      })
+    }
 
     while (true) {
       const { done: streamDone, value } = await reader.read()
@@ -202,39 +208,42 @@ async function sendMessage() {
 
         try {
           const json = JSON.parse(data)
+          const msg = messages.value[aiIdx] // 通过响应式 Proxy 访问
 
           // 错误
           if (json.error) {
             console.error('[Chat] Server error:', json.error)
-            contentBuffer += `\n\n[错误] ${json.error}`
+            msg.content += `\n\n[错误] ${json.error}`
+            scheduleScroll()
             continue
           }
 
-          // 工具调用开始
+          // 工具调用开始（隐藏底层工具名，只计数）
           if (json.tool_call) {
             console.log('[Chat] Tool call:', json.tool_call.name)
-            aiMsg.toolCalls!.push({
+            msg.toolCalls!.push({
               name: json.tool_call.name,
               arguments: json.tool_call.arguments,
             })
-            scrollToBottom()
+            scheduleScroll()
             continue
           }
 
           // 工具调用完成
           if (json.tool_result) {
-            const lastTool = aiMsg.toolCalls![aiMsg.toolCalls!.length - 1]
+            const lastTool = msg.toolCalls![msg.toolCalls!.length - 1]
             if (lastTool && lastTool.name === json.tool_result.name) {
               lastTool.result = json.tool_result.result_preview
             }
-            scrollToBottom()
+            scheduleScroll()
             continue
           }
 
-          // 正常内容
+          // 正常内容 — 直接写入响应式对象，触发 Vue 重渲染
           const content = json.choices?.[0]?.delta?.content
           if (content) {
-            contentBuffer += content
+            msg.content += content
+            scheduleScroll()
           }
         } catch (e) {
           console.error('[Chat] Parse error:', e, 'data:', data)
@@ -242,30 +251,26 @@ async function sendMessage() {
       }
     }
 
-    // 刷出剩余内容
-    clearInterval(flushTimer)
-    if (contentBuffer) {
-      aiMsg.content += contentBuffer
+    // 流结束
+    const finalMsg = messages.value[aiIdx]
+    finalMsg.done = true
+    if (finalMsg.toolCalls?.length === 0) {
+      delete finalMsg.toolCalls
     }
-    aiMsg.done = true
-    if (aiMsg.toolCalls?.length === 0) {
-      delete aiMsg.toolCalls
-    }
-    console.log('[Chat] AI response done, length:', aiMsg.content.length)
+    console.log('[Chat] AI response done, length:', finalMsg.content.length)
     saveToCache()
-    saveMessage('assistant', aiMsg.content)
+    saveMessage('assistant', finalMsg.content)
     scrollToBottom()
   } catch (e: any) {
+    const msg = messages.value[aiIdx]
     if (e.name === 'AbortError') {
-      aiMsg.content += '\n\n[已中断]'
+      msg.content += '\n\n[已中断]'
     } else {
-      // 保留已有内容，只在末尾追加错误信息
-      const errInfo = `\n\n[错误] ${e.message || '连接失败'}`
-      aiMsg.content += errInfo
+      msg.content += `\n\n[错误] ${e.message || '连接失败'}`
     }
-    aiMsg.done = true
+    msg.done = true
     saveToCache()
-    saveMessage('assistant', aiMsg.content)
+    saveMessage('assistant', msg.content)
   }
 
   abortController = null
@@ -332,18 +337,17 @@ onMounted(async () => {
       <div v-for="(msg, i) in messages" :key="i" class="message" :class="msg.role">
         <div class="message-role">{{ msg.role === 'user' ? '你' : 'AI' }}</div>
         <div class="message-content">
-          <!-- 工具调用过程 -->
-          <div v-if="msg.toolCalls && msg.toolCalls.length" class="tool-calls">
-            <div v-for="(tc, ti) in msg.toolCalls" :key="ti" class="tool-call-item">
-              <div class="tool-call-header">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
-                </svg>
-                <span class="tool-name">{{ getToolDisplayName(tc.name) }}</span>
-                <span v-if="!tc.result" class="tool-running">执行中...</span>
-                <span v-else class="tool-done">完成</span>
-              </div>
+          <!-- 工具调用过程：只显示简洁状态，不暴露底层工具 -->
+          <div v-if="msg.toolCalls && msg.toolCalls.length && !msg.done" class="tool-status">
+            <div class="thinking-indicator">
+              <span class="thinking-dot"></span>
+              <span class="thinking-dot"></span>
+              <span class="thinking-dot"></span>
             </div>
+            <span>思考中...</span>
+          </div>
+          <div v-else-if="msg.toolCalls && msg.toolCalls.length && msg.done" class="tool-status done">
+            已完成 {{ msg.toolCalls.length }} 次数据查询
           </div>
           <!-- AI 回复内容 -->
           <div v-if="msg.content" class="ai-text" v-html="renderMarkdown(msg.content, msg.done, i)"></div>
@@ -674,39 +678,43 @@ onMounted(async () => {
   51%, 100% { opacity: 0; }
 }
 
-/* 工具调用 */
-.tool-calls {
-  margin-bottom: 6px;
-}
-
-.tool-call-item {
-  background: #fffbeb;
-  border: 1px solid #fde68a;
-  border-radius: 4px;
-  padding: 4px 8px;
-  margin-bottom: 3px;
-  font-size: 12px;
-}
-
-.tool-call-header {
+/* 工具调用状态 */
+.tool-status {
   display: flex;
   align-items: center;
-  gap: 4px;
-  color: #92400e;
+  gap: 6px;
+  padding: 4px 10px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: #6366f1;
+  background: #eef2ff;
+  border-radius: 4px;
 }
 
-.tool-name {
-  font-weight: 600;
-}
-
-.tool-running {
-  color: #f59e0b;
+.tool-status.done {
+  color: #6b7280;
+  background: #f3f4f6;
   font-size: 11px;
 }
 
-.tool-done {
-  color: #10b981;
-  font-size: 11px;
-  font-weight: 500;
+.thinking-indicator {
+  display: flex;
+  gap: 3px;
+}
+
+.thinking-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #6366f1;
+  animation: thinking 1.4s infinite;
+}
+
+.thinking-dot:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes thinking {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1.1); }
 }
 </style>

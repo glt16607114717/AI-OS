@@ -17,7 +17,7 @@ import traceback
 
 import httpx
 from fastapi import APIRouter, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 
 import llm_config
 from tools.registry import TOOL_DEFINITIONS, execute as tool_execute
@@ -319,12 +319,13 @@ async def workspace_chat(request: Request):
     user_messages = body.get("messages", [])
 
     if not user_messages:
-        return {"ok": False, "error": "消息不能为空"}
+        return JSONResponse({"ok": False, "error": "消息不能为空"}, status_code=400)
 
     # 获取路由
     route = _get_route()
     if not route:
-        return {"ok": False, "error": "模型未加载，请先配置策略"}
+        logger.warning("[Workspace] 无可用路由（所有 key 耗尽或策略未配置）")
+        return JSONResponse({"ok": False, "error": "无可用模型，所有 API Key 已耗尽，请稍后重试或检查策略配置"}, status_code=503)
 
     # 构建完整消息列表：系统提示词 + 用户消息
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + user_messages

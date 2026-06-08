@@ -9,8 +9,11 @@
 import json
 import copy
 import uuid
+import logging
 import threading
 from pathlib import Path
+
+logger = logging.getLogger("agent")
 
 # ── 存储路径 ──
 
