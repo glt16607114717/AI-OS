@@ -1,11 +1,52 @@
 <script setup lang="ts">
 import { ref, nextTick, onMounted } from 'vue'
 import { marked } from 'marked'
+import * as echarts from 'echarts'
 
 const agentRequest = window.aiOS.agentRequest
 
 // 配置 marked
 marked.use({ breaks: true, gfm: true })
+
+// ECharts 实例管理（防止重复初始化）
+const chartInstances = new Map<HTMLElement, echarts.ECharts>()
+
+// 流式渲染状态：控制是否渲染 ECharts（仅在消息完成后渲染）
+let _renderingDone = true
+
+// 自定义 renderer：检测 ECharts 配置并渲染
+const renderer = new marked.Renderer()
+const originalCode = renderer.code.bind(renderer)
+
+renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
+  // 流式过程中不渲染 ECharts，只显示代码块
+  if (!_renderingDone) {
+    return originalCode({ text, lang })
+  }
+
+  // 仅在消息完成后检测 ECharts
+  const trimmed = text.trim()
+  const stripped = trimmed.replace(/^\s*\/\/.*$/m, '').trim()
+  const isEchartsConfig = (
+    (/^(const\s+|let\s+|var\s+)?option\s*=\s*\{/.test(stripped)) &&
+    stripped.includes('series')
+  ) || (
+    lang === 'echarts' || lang === 'chart'
+  )
+
+  if (isEchartsConfig) {
+    let jsonStr = stripped
+      .replace(/^(const\s+|let\s+|var\s+)?option\s*=\s*/, '')
+      .replace(/;?\s*$/, '')
+
+    const chartId = 'echarts-' + Math.random().toString(36).slice(2, 10)
+    return `<div class="echarts-chart" id="${chartId}" style="width:100%;height:380px;margin:8px 0;border:1px solid #e5e7eb;border-radius:6px;overflow:hidden;"><script type="text/template">${jsonStr}<\/script></div>`
+  }
+
+  return originalCode({ text, lang })
+}
+
+marked.use({ renderer })
 
 interface ToolCall {
   name: string
@@ -25,8 +66,25 @@ const input = ref('')
 const loading = ref(false)
 const chatContainer = ref<HTMLDivElement | null>(null)
 const currentModel = ref('')
+const skills = ref<{id: string, name: string, description: string, example_queries: string[]}[]>([])
+const showSkills = ref(false)
 const CACHE_KEY = 'ai-os-chat-messages'
 let abortController: AbortController | null = null
+
+// 加载技能列表
+async function loadSkills() {
+  try {
+    const res = await agentRequest('skill_get_list', {})
+    if (res?.ok) {
+      skills.value = res.skills || []
+    }
+  } catch {}
+}
+
+function useSkillQuery(query: string) {
+  input.value = query
+  showSkills.value = false
+}
 
 // 缓存管理
 function saveToCache() {
@@ -90,8 +148,44 @@ function scrollToBottom() {
   })
 }
 
+// 初始化页面中的 ECharts 图表
+function initCharts() {
+  nextTick(() => {
+    const containers = document.querySelectorAll('.echarts-chart:not([data-initialized])')
+    containers.forEach((el) => {
+      const htmlEl = el as HTMLElement
+      const scriptEl = htmlEl.querySelector('script[type="text/template"]')
+      if (!scriptEl) return
+      const optionsStr = scriptEl.textContent
+      if (!optionsStr) return
+
+      try {
+        // 用 Function 解析 JS 对象字面量，传入 echarts 供配置中引用
+        const options = new Function('echarts', 'return ' + optionsStr)(echarts)
+        const instance = echarts.init(htmlEl)
+        instance.setOption(options)
+        chartInstances.set(htmlEl, instance)
+        htmlEl.setAttribute('data-initialized', 'true')
+        // 移除 script 标签，避免重复初始化
+        scriptEl.remove()
+      } catch (e) {
+        console.error('[ECharts] 初始化失败:', e)
+        htmlEl.innerHTML = `<div style="padding:12px;color:#ef4444;font-size:12px;">图表渲染失败: ${(e as Error).message}</div>`
+      }
+    })
+  })
+}
+
+// 清理图表实例
+function disposeCharts() {
+  chartInstances.forEach((instance) => instance.dispose())
+  chartInstances.clear()
+}
+
 function renderMarkdown(text: string, done: boolean, msgIndex: number): string {
   if (!text) return ''
+
+  _renderingDone = done
 
   if (done) {
     try {
@@ -101,12 +195,63 @@ function renderMarkdown(text: string, done: boolean, msgIndex: number): string {
     }
   }
 
+  // 流式模式：自动闭合不完整的 markdown 标签
+  const closed = autoCloseMarkdown(text)
   try {
-    const html = marked.parse(text) as string
-    return html + '<span class="cursor">|</span>'
+    return (marked.parse(closed) as string) + '<span class="cursor">|</span>'
   } catch {
     return escapeHtml(text) + '<span class="cursor">|</span>'
   }
+}
+
+// 自动闭合不完整的 Markdown 结构，让 marked 能正确解析
+function autoCloseMarkdown(text: string): string {
+  let result = text
+
+  // 1. 闭合未完成的代码块（``` 开了没闭）
+  const fenceCount = (result.match(/^```/gm) || []).length
+  if (fenceCount % 2 !== 0) {
+    result += '\n```'
+  }
+
+  // 2. 闭合未完成的表格（| header | ... 没有 | 分隔行 |）
+  const lines = result.split('\n')
+  let inTable = false
+  let tableLines: number[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim()
+    if (line.startsWith('|') && line.endsWith('|')) {
+      inTable = true
+      tableLines.push(i)
+    } else if (inTable && line.match(/^\|[\s\-:|]+\|$/)) {
+      // 分隔行，表格是完整的，继续
+      tableLines.push(i)
+    } else if (inTable) {
+      // 遇到非表格行，检查表格是否完整
+      // 至少需要 header + separator 两行
+      const hasSeparator = tableLines.some(li => lines[li].match(/^\|[\s\-:|]+\|$/))
+      if (!hasSeparator && tableLines.length >= 1) {
+        // 补上分隔行
+        const colCount = lines[tableLines[0]].split('|').length - 2
+        const sep = '|' + Array(Math.max(colCount, 1)).fill('---').join('|') + '|'
+        lines.splice(tableLines[tableLines.length - 1] + 1, 0, sep)
+        result = lines.join('\n')
+      }
+      inTable = false
+      tableLines = []
+    }
+  }
+  // 文件末尾的表格也要检查
+  if (inTable && tableLines.length >= 1) {
+    const hasSeparator = tableLines.some(li => lines[li] && lines[li].match(/^\|[\s\-:|]+\|$/))
+    if (!hasSeparator) {
+      const colCount = lines[tableLines[0]].split('|').length - 2
+      const sep = '|' + Array(Math.max(colCount, 1)).fill('---').join('|') + '|'
+      result += '\n' + sep
+    }
+  }
+
+  return result
 }
 
 function escapeHtml(text: string): string {
@@ -177,14 +322,14 @@ async function sendMessage() {
     let sseBuffer = ''
     let contentBuffer = ''
 
-    // 100ms 节流渲染
+    // 30ms 节流渲染（更流畅的逐字显示）
     const flushTimer = setInterval(() => {
       if (contentBuffer) {
         aiMsg.content += contentBuffer
         contentBuffer = ''
         scrollToBottom()
       }
-    }, 100)
+    }, 30)
 
     while (true) {
       const { done: streamDone, value } = await reader.read()
@@ -255,6 +400,7 @@ async function sendMessage() {
     saveToCache()
     saveMessage('assistant', aiMsg.content)
     scrollToBottom()
+    onMessageDone()
   } catch (e: any) {
     if (e.name === 'AbortError') {
       aiMsg.content += '\n\n[已中断]'
@@ -283,6 +429,7 @@ function stopChat() {
 function clearChat() {
   if (messages.value.length === 0) return
   if (confirm('确定清空所有对话记录？')) {
+    disposeCharts()
     messages.value = []
     clearCache()
     agentRequest('chat_clear_history', {})
@@ -298,6 +445,7 @@ function handleKeydown(e: KeyboardEvent) {
 
 onMounted(async () => {
   loadModel()
+  loadSkills()
   const cached = loadFromCache()
   if (cached.length > 0) {
     messages.value = cached
@@ -305,7 +453,16 @@ onMounted(async () => {
     await loadFromBackend()
   }
   scrollToBottom()
+  // 窗口大小变化时重绘图表
+  window.addEventListener('resize', () => {
+    chartInstances.forEach((instance) => instance.resize())
+  })
 })
+
+// 消息完成后渲染图表
+function onMessageDone() {
+  nextTick(() => initCharts())
+}
 </script>
 
 <template>
@@ -352,6 +509,26 @@ onMounted(async () => {
     </div>
 
     <div class="chat-input-area">
+      <!-- 技能选择器 -->
+      <div class="skill-selector" v-if="skills.length > 0">
+        <button class="skill-toggle-btn" @click="showSkills = !showSkills" :class="{ active: showSkills }">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+            <path d="M2 17l10 5 10-5"/>
+            <path d="M2 12l10 5 10-5"/>
+          </svg>
+        </button>
+        <div v-if="showSkills" class="skill-dropdown">
+          <div class="skill-dropdown-header">可用技能</div>
+          <div v-for="skill in skills" :key="skill.id" class="skill-item">
+            <div class="skill-item-name">{{ skill.name }}</div>
+            <div class="skill-item-desc">{{ skill.description.slice(0, 60) }}...</div>
+            <div class="skill-item-queries">
+              <button v-for="q in skill.example_queries" :key="q" class="skill-query-btn" @click="useSkillQuery(q)">{{ q }}</button>
+            </div>
+          </div>
+        </div>
+      </div>
       <textarea
         v-model="input"
         placeholder="输入消息... (Enter 发送，Shift+Enter 换行)"
@@ -481,6 +658,98 @@ onMounted(async () => {
   padding-top: 8px;
   border-top: 1px solid #e5e7eb;
   align-items: flex-end;
+}
+
+.skill-selector {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.skill-toggle-btn {
+  width: 36px;
+  height: 36px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  color: #6b7280;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.skill-toggle-btn:hover, .skill-toggle-btn.active {
+  background: #eef2ff;
+  border-color: #6366f1;
+  color: #6366f1;
+}
+
+.skill-dropdown {
+  position: absolute;
+  bottom: 42px;
+  left: 0;
+  width: 320px;
+  max-height: 400px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+  z-index: 100;
+}
+
+.skill-dropdown-header {
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #6b7280;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.skill-item {
+  padding: 8px 12px;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.skill-item:last-child {
+  border-bottom: none;
+}
+
+.skill-item-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1f2937;
+  margin-bottom: 2px;
+}
+
+.skill-item-desc {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-bottom: 6px;
+}
+
+.skill-item-queries {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.skill-query-btn {
+  font-size: 11px;
+  padding: 3px 8px;
+  border: 1px solid #c7d2fe;
+  border-radius: 4px;
+  background: #eef2ff;
+  color: #4338ca;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.skill-query-btn:hover {
+  background: #6366f1;
+  color: #fff;
+  border-color: #6366f1;
 }
 
 .chat-input-area textarea {

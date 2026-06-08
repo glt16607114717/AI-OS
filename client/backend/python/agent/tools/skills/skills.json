@@ -1,0 +1,22 @@
+[
+  {
+    "id": "station_monthly_trend",
+    "name": "12个月工位数量变化",
+    "description": "查询近12个月每月新增工位数和累计工位数。当用户询问工位数量变化、工位增长趋势、近一年工位情况时触发。调用后会返回两组数据：(1) 每月新增工位数 (2) 12个月前的历史基数。你需要用基数逐月累加每月新增，得出每月累计工位数，然后用表格或文字形式呈现给用户。",
+    "example_queries": ["最近12个月工位数量变化", "工位增长趋势", "近一年工位情况"],
+    "queries": [
+      {
+        "name": "monthly_new",
+        "label": "近12个月每月新增工位数",
+        "sql": "SELECT DATE_FORMAT(gmt_create, '%%y-%%m') AS month, COUNT(*) AS new_count FROM r_work_station WHERE gmt_create >= DATE_SUB(DATE_FORMAT(NOW(), '%%Y-%%m-01'), INTERVAL 11 MONTH) GROUP BY month ORDER BY month"
+      },
+      {
+        "name": "base_count",
+        "label": "12个月前的历史工位总数（累计基数）",
+        "sql": "SELECT COUNT(*) AS total_before FROM r_work_station WHERE gmt_create < DATE_SUB(DATE_FORMAT(NOW(), '%%Y-%%m-01'), INTERVAL 11 MONTH)"
+      }
+    ],
+    "post_instruction": "请根据以上查询结果计算：以 base_count.total_before 为起始基数，逐月累加 monthly_new 中每月的 new_count，得出每月累计工位数。然后用清晰的表格展示：月份、新增数、累计数。",
+    "security": "readonly"
+  }
+]

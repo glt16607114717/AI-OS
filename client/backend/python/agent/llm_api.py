@@ -158,6 +158,11 @@ async def llm_action(req: LlmActionRequest):
         clear_history()
         return {"ok": True}
 
+    elif action == "skill_get_list":
+        from tools.registry import get_skill_list
+        skills = get_skill_list()
+        return {"ok": True, "skills": skills}
+
     else:
         return {"ok": False, "error": f"Unknown action: {action}"}
 

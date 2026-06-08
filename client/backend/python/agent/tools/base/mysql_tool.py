@@ -24,11 +24,10 @@ DB_CONFIG = {
     "password": "nnd@1234TEST",
     "database": "nnd_robot_test",
     "charset": "utf8mb4",
-    "connect_timeout": 10,
-    "read_timeout": 10,
+    "connect_timeout": 60,
+    "read_timeout": 60,
 }
 
-MAX_ROWS = 200
 DEFAULT_LIMIT = 50
 
 
@@ -63,14 +62,6 @@ def execute(sql: str, database: str = None) -> dict:
         try:
             with conn.cursor(pymysql.cursors.DictCursor) as cursor:
                 cursor.execute(sql)
-
-                # 拦截过大结果集
-                if cursor.rowcount > MAX_ROWS:
-                    return {
-                        "ok": False,
-                        "error": f"结果集过大（{cursor.rowcount} 行），请添加更严格的 WHERE 条件或减小 LIMIT",
-                    }
-
                 rows = cursor.fetchall()
                 columns = [desc[0] for desc in cursor.description] if cursor.description else []
                 return {
