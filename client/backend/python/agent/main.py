@@ -199,6 +199,14 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"Workspace chat module not available: {e}")
 
+    # 挂载 RAG 管理路由
+    try:
+        from rag_api import router as rag_router
+        app.include_router(rag_router)
+        logger.info("RAG module initialized")
+    except Exception as e:
+        logger.warning(f"RAG module not available: {e}")
+
     # 启动定时清理任务（每天 12:00 清理 90 天前的统计数据）
     _start_daily_cleanup()
 

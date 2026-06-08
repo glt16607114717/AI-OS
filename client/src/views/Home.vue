@@ -10,6 +10,7 @@ const restarting = ref(false)
 
 const isDevActive = computed(() => route.path.startsWith('/dev'))
 const isLlmActive = computed(() => route.path.startsWith('/llm'))
+const isRagActive = computed(() => route.path.startsWith('/rag'))
 
 watch(isDevActive, (val) => {
   if (val) devExpanded.value = true
@@ -19,7 +20,12 @@ watch(isLlmActive, (val) => {
   if (val) llmExpanded.value = true
 }, { immediate: true })
 
+watch(isRagActive, (val) => {
+  if (val) ragExpanded.value = true
+}, { immediate: true })
+
 const llmExpanded = ref(false)
+const ragExpanded = ref(false)
 
 function toggleDevMenu() {
   devExpanded.value = !devExpanded.value
@@ -27,6 +33,10 @@ function toggleDevMenu() {
 
 function toggleLlmMenu() {
   llmExpanded.value = !llmExpanded.value
+}
+
+function toggleRagMenu() {
+  ragExpanded.value = !ragExpanded.value
 }
 
 let healthTimer: ReturnType<typeof setInterval> | null = null
@@ -116,6 +126,32 @@ async function restartAgent() {
           </div>
           <span class="nav-text">工作台</span>
         </router-link>
+
+        <!-- RAG Knowledge (expandable) -->
+        <div class="nav-group">
+          <div class="nav-item" :class="{ active: isRagActive }" @click="toggleRagMenu">
+            <div class="nav-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+                <line x1="8" y1="7" x2="16" y2="7" />
+                <line x1="8" y1="11" x2="14" y2="11" />
+              </svg>
+            </div>
+            <span class="nav-text">知识库</span>
+            <svg class="nav-arrow" :class="{ expanded: ragExpanded }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </div>
+          <transition name="sub-slide">
+            <div v-show="ragExpanded" class="nav-sub">
+              <router-link to="/rag/config" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                环境配置
+              </router-link>
+            </div>
+          </transition>
+        </div>
 
         <!-- LLM (expandable) -->
         <div class="nav-group">

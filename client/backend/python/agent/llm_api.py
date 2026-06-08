@@ -221,6 +221,15 @@ async def proxy_chat_completions(request: Request):
     if "tools" in body and god_rules.is_optimize_enabled():
         body["tools"] = god_rules.compress_tool_descriptions(body["tools"])
 
+    # ── RAG 增强：在请求大模型前，检索相关知识注入上下文 ──
+    try:
+        from rag.enhancer import enhance_messages
+        body["messages"] = enhance_messages(body["messages"])
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.warning(f"[LLM Proxy] RAG 增强失败: {e}")
+
     # ── 请求转储（只保留最近 20 个文件） ──
     request_dump.dump_request(body)
     _cleanup_dump_files(20)
@@ -394,6 +403,7 @@ async def proxy_chat_completions(request: Request):
                                 detail=f"model={vi.get('model_id','')},vendor_id={vi['vendor_id'][:8]}")
 
                         success = False
+                        _rag_collected = []  # RAG: 收集 AI 回答内容
                         async for line in resp.aiter_lines():
                             yield line + "\n"
                             if line.startswith("data: ") and line != "data: [DONE]":
@@ -401,6 +411,11 @@ async def proxy_chat_completions(request: Request):
                                     chunk = line[6:]
                                     import json
                                     obj = json.loads(chunk)
+                                    # RAG: 收集 AI 回答内容
+                                    for c in obj.get("choices", []):
+                                        delta = c.get("delta", {})
+                                        if delta.get("content"):
+                                            _rag_collected.append(delta["content"])
                                     if obj.get("usage"):
                                         latency_ms = int((time.monotonic() - t0) * 1000)
                                         usage = obj["usage"]
@@ -432,6 +447,16 @@ async def proxy_chat_completions(request: Request):
                                 latency_ms=latency_ms,
                                 success=True,
                             )
+
+                        # ── RAG 存储：流结束后存储问答对 ──
+                        _rag_content = "".join(_rag_collected)
+                        if _rag_content and len(_rag_content.strip()) >= 20:
+                            try:
+                                from rag.enhancer import store_assistant_response
+                                store_assistant_response(user_msg_summary, _rag_content, source="proxy")
+                            except Exception:
+                                pass
+
                         return  # 成功完成，退出循环
 
             except Exception as e:

@@ -58,6 +58,11 @@ const router = createRouter({
           name: 'Workspace',
           component: () => import('../views/ChatWorkspace.vue'),
         },
+        {
+          path: 'rag/config',
+          name: 'RagConfig',
+          component: () => import('../views/rag/RagConfig.vue'),
+        },
 
       ],
     },

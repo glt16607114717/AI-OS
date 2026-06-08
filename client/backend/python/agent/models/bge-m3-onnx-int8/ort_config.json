@@ -1,0 +1,6 @@
+{
+  "opset": 17,
+  "optimization": {
+    "enable_extended_optimization": true
+  }
+}

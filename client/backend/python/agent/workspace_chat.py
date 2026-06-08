@@ -341,8 +341,18 @@ async def workspace_chat(request: Request):
 
     logger.info(f"[Workspace] 开始对话: {len(messages)} 条消息, model={route.get('model_id')}, vendor={route.get('vendor_name')}")
 
+    # ── RAG 增强：在请求大模型前，检索相关知识注入上下文 ──
+    try:
+        from rag.enhancer import enhance_messages
+        messages = enhance_messages(messages)
+        logger.info(f"[Workspace] RAG 增强后消息数: {len(messages)}")
+    except ImportError:
+        logger.debug("[Workspace] RAG 模块不可用，跳过增强")
+    except Exception as e:
+        logger.warning(f"[Workspace] RAG 增强失败: {e}")
+
     return StreamingResponse(
-        _chat_with_tools(messages, route),
+        _rag_wrap(messages, _chat_with_tools(messages, route)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -350,3 +360,44 @@ async def workspace_chat(request: Request):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+async def _rag_wrap(messages: list[dict], stream_gen):
+    """
+    包装流式生成器，在流结束后将问答对存储到 RAG 向量库。
+    """
+    collected_content = []
+
+    async for event in stream_gen:
+        # 收集 AI 回答内容
+        if isinstance(event, str) and event.startswith("data: "):
+            data = event[6:]
+            if data.strip() == "[DONE]":
+                # 流结束，存储问答对
+                _store_qa_async(messages, "".join(collected_content))
+                yield event
+                return
+            try:
+                chunk = json.loads(data)
+                content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                if content:
+                    collected_content.append(content)
+            except json.JSONDecodeError:
+                pass
+        yield event
+
+
+def _store_qa_async(messages: list[dict], assistant_content: str):
+    """异步存储问答对到 RAG（后台执行，不阻塞）"""
+    if not assistant_content or len(assistant_content.strip()) < 20:
+        return
+    try:
+        from rag.enhancer import store_assistant_response
+        # 取最后一条用户消息
+        user_msgs = [m for m in messages if m.get("role") == "user"]
+        user_msg = user_msgs[-1].get("content", "") if user_msgs else ""
+        store_assistant_response(user_msg, assistant_content, source="workspace")
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.warning(f"[Workspace] RAG 存储失败: {e}")
