@@ -211,7 +211,7 @@ def _check_single_key(api_key: str, key_id: str, key_name: str) -> dict:
             if item.get("type") == "TOKENS_LIMIT":
                 pct_raw = item.get("percentage", 0)
                 # percentage 0-100（如 1 = 1%），转为 0-1
-                result["pct"] = round(pct_raw / 100, 4) if pct_raw > 0.01 else round(pct_raw, 4)
+                result["pct"] = round(pct_raw / 100, 4)
                 reset_ts = item.get("nextResetTime", 0)
                 if reset_ts > 1e12:
                     reset_ts = reset_ts / 1000

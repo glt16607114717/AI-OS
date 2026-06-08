@@ -20,7 +20,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
 import llm_config
-from tools.registry import TOOL_DEFINITIONS, execute as tool_execute
+from tools.registry import get_tool_definitions, execute as tool_execute
 
 logger = logging.getLogger("agent")
 
@@ -33,14 +33,12 @@ router = APIRouter()
 
 SYSTEM_PROMPT = """你是一个智能工作助手，可以帮助用户查询数据库、分析数据等。
 
-当用户的问题需要查询数据库时，请使用提供的工具进行查询，然后根据查询结果回答用户。
-
 当前可用的数据库：nnd_robot_test（测试环境）
-你可以先使用 db_list_tables 查看有哪些表，再使用 db_describe_table 查看表结构，然后使用 db_query 执行具体的查询。
+
+当用户的问题匹配到预置技能（skill_ 开头的工具）时，优先使用技能。技能的 SQL 已经写好了，你只需要确认用户的意图匹配后直接调用即可。
 
 注意事项：
 - 只执行 SELECT 查询，不要修改数据
-- 查询前先了解表结构
 - 返回结果时用清晰的格式展示
 """
 
@@ -78,8 +76,8 @@ async def _request_llm_stream(
         "messages": messages,
         "stream": True,
     }
-    if use_tools and TOOL_DEFINITIONS:
-        body["tools"] = TOOL_DEFINITIONS
+    if use_tools and get_tool_definitions():
+        body["tools"] = get_tool_definitions()
         body["tool_choice"] = "auto"
 
     tool_calls_data = []
@@ -181,8 +179,8 @@ async def _request_llm_non_stream(
         "messages": messages,
         "stream": False,
     }
-    if use_tools and TOOL_DEFINITIONS:
-        body["tools"] = TOOL_DEFINITIONS
+    if use_tools and get_tool_definitions():
+        body["tools"] = get_tool_definitions()
         body["tool_choice"] = "auto"
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
