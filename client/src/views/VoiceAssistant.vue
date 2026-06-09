@@ -466,7 +466,9 @@ onUnmounted(() => {
         <div class="command-fields">
           <el-input
             v-model="cmd.phrase"
-            placeholder="语音短语"
+            type="textarea"
+            :autosize="{ minRows: 1, maxRows: 4 }"
+            placeholder="触发词，多个用逗号分隔，如：对话,废话,对换"
             size="default"
             class="phrase-input"
             @blur="updateCommand(i, { phrase: cmd.phrase })"

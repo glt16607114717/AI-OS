@@ -47,7 +47,7 @@ const testing = ref(false)
 async function fetchStatus() {
   loading.value = true
   try {
-    const res = await window.aiOS.agentPost('/api/rag', { action: 'rag_status' })
+    const res = await window.aiOS.agentRequest('rag_status')
     status.value = res
   } catch (e: any) {
     console.error('Failed to fetch RAG status:', e)
@@ -60,10 +60,7 @@ async function doSearch() {
   searching.value = true
   searchResults.value = []
   try {
-    const res = await window.aiOS.agentPost('/api/rag', {
-      action: 'rag_search',
-      payload: { query: searchQuery.value, top_k: 5 },
-    })
+    const res = await window.aiOS.agentRequest('rag_search', { query: searchQuery.value, top_k: 5 })
     if (res.ok) {
       searchResults.value = res.results
     }
@@ -77,10 +74,7 @@ async function testEmbed() {
   testing.value = true
   testResult.value = null
   try {
-    const res = await window.aiOS.agentPost('/api/rag', {
-      action: 'rag_test_embed',
-      payload: { text: testText.value },
-    })
+    const res = await window.aiOS.agentRequest('rag_test_embed', { text: testText.value })
     testResult.value = res
   } catch (e) {
     console.error(e)
@@ -91,7 +85,7 @@ async function testEmbed() {
 async function resetStore() {
   if (!confirm('确定要清空向量库吗？此操作不可恢复。')) return
   try {
-    await window.aiOS.agentPost('/api/rag', { action: 'rag_reset' })
+    await window.aiOS.agentRequest('rag_reset')
     await fetchStatus()
   } catch (e) {
     console.error(e)
@@ -131,14 +125,14 @@ onMounted(fetchStatus)
       <div class="section">
         <h3>1. Python 依赖</h3>
         <div class="dep-grid">
-          <div v-for="(dep, name) in status.components.dependencies" :key="name"
+          <div v-for="(dep, name) in (status.components?.dependencies || {})" :key="name"
                class="dep-item" :class="{ ok: dep.installed, missing: !dep.installed }">
             <span class="dep-icon">{{ dep.installed ? '✓' : '✗' }}</span>
             <span class="dep-name">{{ name }}</span>
             <span class="dep-version">{{ dep.installed ? dep.version : '未安装' }}</span>
           </div>
         </div>
-        <div v-if="Object.values(status.components.dependencies).some((d: any) => !d.installed)" class="hint-box">
+        <div v-if="Object.values(status.components?.dependencies || {}).some((d: any) => !d.installed)" class="hint-box">
           <strong>安装命令：</strong>
           <code>pip install onnxruntime chromadb transformers numpy</code>
         </div>
@@ -149,7 +143,7 @@ onMounted(fetchStatus)
         <h3>2. BGE-M3 模型文件</h3>
         <div class="model-dir">
           <span class="label">存放目录：</span>
-          <code>{{ status.components.model?.model_dir || '-' }}</code>
+          <code>{{ status.components?.model?.model_dir || '-' }}</code>
         </div>
 
         <table class="file-table">
@@ -161,12 +155,12 @@ onMounted(fetchStatus)
             </tr>
           </thead>
           <tbody>
-            <tr v-for="f in status.components.model?.files?.found" :key="f.file">
+            <tr v-for="f in status.components?.model?.files?.found" :key="f.file">
               <td>{{ f.file }}</td>
               <td>{{ f.size_mb }} MB</td>
               <td class="ok">✓ 已就绪</td>
             </tr>
-            <tr v-for="f in status.components.model?.files?.missing" :key="f" class="missing">
+            <tr v-for="f in status.components?.model?.files?.missing" :key="f" class="missing">
               <td>{{ f }}</td>
               <td>-</td>
               <td class="missing">✗ 缺失</td>
@@ -175,16 +169,34 @@ onMounted(fetchStatus)
         </table>
 
         <!-- 下载指引 -->
-        <div v-if="status.components.model?.files?.missing?.length" class="hint-box">
-          <p><strong>缺失文件请手动下载：</strong></p>
-          <div class="download-links">
-            <a v-for="(url, name) in status.download_guide?.download_urls?.direct_files" :key="name"
-               :href="url" target="_blank" class="dl-link">
-              {{ name }}
-            </a>
-          </div>
-          <p class="hint-text">下载后放入上述目录，然后刷新状态。</p>
-        </div>
+         <div v-if="status.components?.model?.files?.missing?.length" class="hint-box download-guide">
+           <p class="guide-title">模型文件缺失，请按以下步骤下载：</p>
+           <div class="guide-steps">
+             <div class="step">
+               <span class="step-num">1</span>
+               <span>下载 <strong>model_quantized.onnx</strong>（约 558MB）</span>
+             </div>
+             <div class="step">
+               <span class="step-num">2</span>
+               <span>用迅雷或浏览器下载（二选一）：</span>
+             </div>
+             <div class="step-indent">
+               <code class="dl-url">https://hf-mirror.com/MahradHosseini/bge-m3-onnx-int8/resolve/main/model_quantized.onnx</code>
+               <code class="dl-url">https://huggingface.co/MahradHosseini/bge-m3-onnx-int8/resolve/main/model_quantized.onnx</code>
+             </div>
+             <div class="step">
+               <span class="step-num">3</span>
+               <span>下载完成后，将文件放到以下目录（卸载不会删除）：</span>
+             </div>
+             <div class="step-indent">
+               <code class="dl-path">{{ status.download_guide?.model_dir || 'C:\\ProgramData\\AI-OS\\models\\bge-m3-onnx-int8' }}</code>
+             </div>
+             <div class="step">
+               <span class="step-num">4</span>
+               <span>点击上方 <strong>刷新状态</strong> 按钮确认</span>
+             </div>
+           </div>
+         </div>
       </div>
 
       <!-- 3. 向量库状态 -->
@@ -193,23 +205,20 @@ onMounted(fetchStatus)
         <div class="vector-info">
           <div class="info-item">
             <span class="label">存储路径：</span>
-            <code>{{ status.components.vector_store?.path || '-' }}</code>
+            <code>{{ status.components?.vector_store?.path || '-' }}</code>
           </div>
           <div class="info-item">
             <span class="label">文档数量：</span>
-            <strong>{{ status.components.vector_store?.count ?? '-' }}</strong>
+            <strong>{{ status.components?.vector_store?.count ?? '-' }}</strong>
           </div>
           <div class="info-item">
             <span class="label">状态：</span>
-            <span :class="status.components.vector_store?.ok ? 'ok' : 'missing'">
-              {{ status.components.vector_store?.ok ? '正常' : (status.components.vector_store?.error || '未初始化') }}
+            <span :class="status.components?.vector_store?.ok ? 'ok' : 'missing'">
+              {{ status.components?.vector_store?.ok ? '正常' : (status.components?.vector_store?.error || '未初始化') }}
             </span>
           </div>
         </div>
-        <button v-if="status.components.vector_store?.count > 0"
-                class="btn btn-danger btn-sm" @click="resetStore">
-          清空向量库
-        </button>
+
       </div>
 
       <!-- 4. 功能测试 -->
@@ -261,6 +270,7 @@ onMounted(fetchStatus)
 <style scoped>
 .rag-config {
   max-width: 800px;
+  padding-bottom: 24px;
 }
 
 .page-header {
@@ -442,6 +452,78 @@ onMounted(fetchStatus)
 }
 
 .dl-link:hover { background: #dbeafe; }
+
+/* Download Guide */
+.download-guide {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+}
+
+.guide-title {
+  font-weight: 600;
+  color: #92400e;
+  margin: 0 0 12px;
+}
+
+.guide-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: #475569;
+}
+
+.step-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #f59e0b;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.step-indent {
+  margin-left: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dl-url {
+  display: block;
+  padding: 6px 10px;
+  background: #1e293b;
+  color: #e2e8f0;
+  border-radius: 6px;
+  font-size: 11px;
+  word-break: break-all;
+  cursor: pointer;
+}
+
+.dl-url:hover {
+  background: #334155;
+}
+
+.dl-path {
+  display: block;
+  padding: 6px 10px;
+  background: #f1f5f9;
+  color: #6366f1;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+}
 
 /* Model */
 .model-dir {

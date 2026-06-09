@@ -59,6 +59,7 @@ interface Message {
   content: string
   done?: boolean
   toolCalls?: ToolCall[]
+  references?: { index: number; source: string; similarity: number; text: string }[]
 }
 
 const messages = ref<Message[]>([])
@@ -337,6 +338,8 @@ async function sendMessage() {
       })
     }
 
+    let currentEventType = 'message' // 跟踪 SSE event 类型
+
     while (true) {
       const { done: streamDone, value } = await reader.read()
       if (streamDone) break
@@ -347,9 +350,32 @@ async function sendMessage() {
 
       for (const line of lines) {
         const trimmed = line.trim()
-        if (!trimmed || !trimmed.startsWith('data: ')) continue
+        if (!trimmed) continue
+
+        // 解析 event 类型行
+        if (trimmed.startsWith('event: ')) {
+          currentEventType = trimmed.slice(7).trim()
+          continue
+        }
+
+        if (!trimmed.startsWith('data: ')) continue
         const data = trimmed.slice(6)
         if (data === '[DONE]') continue
+
+        // RAG 引用事件
+        if (currentEventType === 'references') {
+          try {
+            const refs = JSON.parse(data)
+            if (Array.isArray(refs) && refs.length > 0) {
+              messages.value[aiIdx].references = refs
+            }
+          } catch (e) {
+            console.error('[Chat] References parse error:', e)
+          }
+          currentEventType = 'message' // 重置
+          continue
+        }
+        currentEventType = 'message' // 重置
 
         try {
           const json = JSON.parse(data)
@@ -506,6 +532,20 @@ function onMessageDone() {
           <div v-else-if="msg.toolCalls && msg.toolCalls.length && msg.done" class="tool-status done">
             已完成 {{ msg.toolCalls.length }} 次数据查询
           </div>
+          <!-- RAG 知识库引用 -->
+          <div v-if="msg.references && msg.references.length && msg.done" class="rag-references">
+            <div class="rag-ref-header">
+              <span class="rag-ref-icon">&#128218;</span>
+              <span>参考了 {{ msg.references.length }} 条知识库记录</span>
+            </div>
+            <div v-for="ref in msg.references" :key="ref.index" class="rag-ref-item">
+              <div class="rag-ref-meta">
+                <span class="rag-ref-source">来源: {{ ref.source }}</span>
+                <span class="rag-ref-sim">相关度: {{ ref.similarity }}%</span>
+              </div>
+              <div class="rag-ref-text">{{ ref.text }}</div>
+            </div>
+          </div>
           <!-- AI 回复内容 -->
           <div v-if="msg.content" class="ai-text" v-html="renderMarkdown(msg.content, msg.done, i)"></div>
         </div>
@@ -660,7 +700,9 @@ function onMessageDone() {
   display: flex;
   gap: 8px;
   padding-top: 8px;
+  padding-bottom: 8px;
   border-top: 1px solid #e5e7eb;
+  border-bottom: 1px solid #e5e7eb;
   align-items: flex-end;
 }
 
@@ -964,6 +1006,54 @@ function onMessageDone() {
   color: #6b7280;
   background: #f3f4f6;
   font-size: 11px;
+}
+
+/* RAG 知识库引用卡片 */
+.rag-references {
+  margin-bottom: 10px;
+  border: 1px solid #e0e7ff;
+  border-radius: 8px;
+  background: #f5f3ff;
+  overflow: hidden;
+}
+.rag-ref-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: #ede9fe;
+  font-size: 12px;
+  color: #5b21b6;
+  font-weight: 500;
+}
+.rag-ref-icon {
+  font-size: 14px;
+}
+.rag-ref-item {
+  padding: 6px 10px;
+  border-top: 1px solid #e0e7ff;
+}
+.rag-ref-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  color: #7c3aed;
+  margin-bottom: 3px;
+}
+.rag-ref-text {
+  font-size: 12px;
+  color: #4b5563;
+  line-height: 1.5;
+  max-height: 60px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+.rag-ref-sim {
+  color: #059669;
+  font-weight: 500;
 }
 
 .thinking-indicator {

@@ -224,7 +224,7 @@ async def proxy_chat_completions(request: Request):
     # ── RAG 增强：在请求大模型前，检索相关知识注入上下文 ──
     try:
         from rag.enhancer import enhance_messages
-        body["messages"] = enhance_messages(body["messages"])
+        body["messages"], _rag_refs = enhance_messages(body["messages"])
     except ImportError:
         pass
     except Exception as e:
@@ -453,7 +453,7 @@ async def proxy_chat_completions(request: Request):
                         if _rag_content and len(_rag_content.strip()) >= 20:
                             try:
                                 from rag.enhancer import store_assistant_response
-                                store_assistant_response(user_msg_summary, _rag_content, source="proxy")
+                                store_assistant_response(user_msg_summary, _rag_content, source="proxy", messages=body.get("messages", []))
                             except Exception:
                                 pass
 

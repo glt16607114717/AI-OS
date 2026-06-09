@@ -363,7 +363,8 @@ export class SetupManager {
       `$wdScript = '${agentScript.replace('main.py', 'watchdog.py')}'`,
       `schtasks /Delete /TN $wdName /F 2>&1 | Out-Null`,
       `schtasks /Create /SC MINUTE /MO 1 /TN $wdName /TR "'${pythonwExe}' -X utf8 '$wdScript'" /F`,
-      `schtasks /Run /TN $wdName`,
+      // 授权 Users 组对 data 目录完全控制（否则 SQLite 无法写入）
+      `icacls "C:\\ProgramData\\AI-OS\\data" /grant Users:F /T /Q 2>&1 | Out-Null`,
     ].join('\r\n')
 
     fs.writeFileSync(scriptPath, scriptContent, 'utf-8')
@@ -420,7 +421,14 @@ export class SetupManager {
       try {
         const ok = await this.checkHealth()
         if (ok) {
-          this.debug('Service health OK, step done')
+          this.debug('Service health OK, starting watchdog')
+          // Agent 启动成功后，再启动看门狗
+          try {
+            await this.execAsync('schtasks.exe', ['/Run', '/TN', 'AI-OS-Watchdog'], false)
+            this.debug('Watchdog started')
+          } catch (e: any) {
+            this.debug('Watchdog start error: ' + e.message)
+          }
           this.emit({
             step: '启动服务',
             stepIndex: this.currentStepIndex,

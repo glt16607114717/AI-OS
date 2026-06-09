@@ -350,6 +350,7 @@ onMounted(() => {
 .vendor-config {
   max-width: 800px;
   margin: 0 auto;
+  padding-bottom: 24px;
   display: flex;
   flex-direction: column;
   gap: 16px;

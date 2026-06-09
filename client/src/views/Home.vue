@@ -149,6 +149,10 @@ async function restartAgent() {
                 <span class="sub-dot"></span>
                 环境配置
               </router-link>
+              <router-link to="/rag/knowledge" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                知识浏览
+              </router-link>
             </div>
           </transition>
         </div>
@@ -247,6 +251,9 @@ async function restartAgent() {
     <!-- Content Area -->
     <main class="content-area">
       <router-view />
+      <div class="page-footer">
+        <span>AI-OS v1.0.0</span>
+      </div>
     </main>
   </div>
 </template>
@@ -254,8 +261,7 @@ async function restartAgent() {
 <style scoped>
 .home-layout {
   display: flex;
-  height: calc(100% + 40px);
-  margin: -20px;
+  height: 100%;
   overflow: hidden;
 }
 
@@ -560,5 +566,15 @@ async function restartAgent() {
   background: linear-gradient(90deg, rgba(0, 0, 0, 0.03), transparent);
   pointer-events: none;
   z-index: 1;
+}
+
+/* Page Footer */
+.page-footer {
+  margin-top: 32px;
+  padding: 12px 0;
+  border-top: 1px solid #e2e8f0;
+  text-align: center;
+  font-size: 11px;
+  color: #94a3b8;
 }
 </style>

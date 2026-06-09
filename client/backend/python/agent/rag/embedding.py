@@ -15,9 +15,35 @@ import numpy as np
 logger = logging.getLogger("agent")
 
 # ── 模型路径 ──
-
+# 小文件（tokenizer、config）打包在安装目录
+# 大文件（onnx）放在 ProgramData（卸载不删）
 AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL_DIR = os.path.join(AGENT_DIR, "models", "bge-m3-onnx-int8")
+_INSTALL_MODEL_DIR = os.path.join(AGENT_DIR, "models", "bge-m3-onnx-int8")
+_PROGRAMDATA_MODEL_DIR = os.path.join(
+    os.environ.get("PROGRAMDATA", "C:\\ProgramData"),
+    "AI-OS", "models", "bge-m3-onnx-int8"
+)
+
+
+def _find_file(filename: str) -> str | None:
+    """在安装目录和 ProgramData 中查找文件，优先安装目录"""
+    install_path = os.path.join(_INSTALL_MODEL_DIR, filename)
+    if os.path.exists(install_path):
+        return install_path
+    pd_path = os.path.join(_PROGRAMDATA_MODEL_DIR, filename)
+    if os.path.exists(pd_path):
+        return pd_path
+    return None
+
+
+def _get_model_dir_for(filename: str) -> str:
+    """获取文件所在目录"""
+    path = _find_file(filename)
+    if path:
+        return os.path.dirname(path)
+    # 默认返回 ProgramData（大文件下载位置）
+    return _PROGRAMDATA_MODEL_DIR
+
 
 # ── 全局单例 ──
 
@@ -36,13 +62,18 @@ def _check_model_files() -> dict:
     missing = []
     found = []
     for f in required:
-        path = os.path.join(MODEL_DIR, f)
-        if os.path.exists(path):
+        path = _find_file(f)
+        if path:
             size = os.path.getsize(path)
             found.append({"file": f, "size_mb": round(size / 1024 / 1024, 1)})
         else:
             missing.append(f)
-    return {"found": found, "missing": missing, "model_dir": MODEL_DIR}
+    return {
+        "found": found,
+        "missing": missing,
+        "model_dir": _PROGRAMDATA_MODEL_DIR,
+        "install_dir": _INSTALL_MODEL_DIR,
+    }
 
 
 def is_model_ready() -> bool:
@@ -65,7 +96,7 @@ def _load_model():
     try:
         import onnxruntime as ort
 
-        model_path = os.path.join(MODEL_DIR, "model_quantized.onnx")
+        model_path = _find_file("model_quantized.onnx")
 
         # CPU 优化选项
         sess_options = ort.SessionOptions()
@@ -78,7 +109,8 @@ def _load_model():
 
         # 加载分词器（用 transformers 的 tokenizer，轻量）
         from transformers import AutoTokenizer
-        _tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+        tokenizer_dir = _get_model_dir_for("tokenizer.json")
+        _tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir)
         logger.info("[RAG] Tokenizer 加载成功")
 
         return True
@@ -165,6 +197,7 @@ def get_status() -> dict:
     return {
         "model_ready": is_model_ready(),
         "model_loaded": _session is not None,
-        "model_dir": MODEL_DIR,
+        "model_dir": _PROGRAMDATA_MODEL_DIR,
+        "install_dir": _INSTALL_MODEL_DIR,
         "files": files_status,
     }

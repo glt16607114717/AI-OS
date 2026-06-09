@@ -342,17 +342,18 @@ async def workspace_chat(request: Request):
     logger.info(f"[Workspace] 开始对话: {len(messages)} 条消息, model={route.get('model_id')}, vendor={route.get('vendor_name')}")
 
     # ── RAG 增强：在请求大模型前，检索相关知识注入上下文 ──
+    rag_references = []
     try:
         from rag.enhancer import enhance_messages
-        messages = enhance_messages(messages)
-        logger.info(f"[Workspace] RAG 增强后消息数: {len(messages)}")
+        messages, rag_references = enhance_messages(messages)
+        logger.info(f"[Workspace] RAG 增强后消息数: {len(messages)}, 引用: {len(rag_references)} 条")
     except ImportError:
         logger.debug("[Workspace] RAG 模块不可用，跳过增强")
     except Exception as e:
         logger.warning(f"[Workspace] RAG 增强失败: {e}")
 
     return StreamingResponse(
-        _rag_wrap(messages, _chat_with_tools(messages, route)),
+        _rag_wrap(messages, _chat_with_tools(messages, route), rag_references),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -362,11 +363,18 @@ async def workspace_chat(request: Request):
     )
 
 
-async def _rag_wrap(messages: list[dict], stream_gen):
+async def _rag_wrap(messages: list[dict], stream_gen, rag_references: list[dict] | None = None):
     """
     包装流式生成器，在流结束后将问答对存储到 RAG 向量库。
+    如果有 RAG 引用，在流开始时发送 references 事件。
     """
     collected_content = []
+
+    # 在流开始前发送 RAG 引用
+    if rag_references:
+        import json as _json
+        ref_event = f"event: references\ndata: {_json.dumps(rag_references, ensure_ascii=False)}\n\n"
+        yield ref_event
 
     async for event in stream_gen:
         # 收集 AI 回答内容
@@ -396,7 +404,7 @@ def _store_qa_async(messages: list[dict], assistant_content: str):
         # 取最后一条用户消息
         user_msgs = [m for m in messages if m.get("role") == "user"]
         user_msg = user_msgs[-1].get("content", "") if user_msgs else ""
-        store_assistant_response(user_msg, assistant_content, source="workspace")
+        store_assistant_response(user_msg, assistant_content, source="workspace", messages=messages)
     except ImportError:
         pass
     except Exception as e:

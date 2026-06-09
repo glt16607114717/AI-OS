@@ -10,6 +10,7 @@ RAG 管理 API
 """
 
 import logging
+import os
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -63,6 +64,13 @@ async def rag_action(req: RagActionRequest):
             from rag.vector_store import reset_collection
             ok = reset_collection()
             return {"ok": ok}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    elif action == "rag_list":
+        try:
+            from rag.vector_store import get_all_documents
+            return get_all_documents(limit=payload.get("limit", 1000), offset=payload.get("offset", 0))
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -123,7 +131,7 @@ def _get_rag_status() -> dict:
 
     # 5. 模型下载指引
     status["download_guide"] = {
-        "model_dir": "backend/python/agent/models/bge-m3-onnx-int8/",
+        "model_dir": os.path.join(os.environ.get("PROGRAMDATA", "C:\\ProgramData"), "AI-OS", "models", "bge-m3-onnx-int8"),
         "files": [
             {"name": "model_quantized.onnx", "size": "558MB", "required": True},
             {"name": "tokenizer.json", "size": "17MB", "required": True},
@@ -133,16 +141,10 @@ def _get_rag_status() -> dict:
             {"name": "special_tokens_map.json", "size": "<1KB", "required": False},
         ],
         "download_urls": {
-            "official": "https://huggingface.co/gpahal/bge-m3-onnx-int8/tree/main",
-            "mirror": "https://hf-mirror.com/gpahal/bge-m3-onnx-int8/tree/main",
-            "direct_files": {
-                "model_quantized.onnx": "https://hf-mirror.com/gpahal/bge-m3-onnx-int8/resolve/main/model_quantized.onnx",
-                "tokenizer.json": "https://hf-mirror.com/gpahal/bge-m3-onnx-int8/resolve/main/tokenizer.json",
-                "tokenizer_config.json": "https://hf-mirror.com/gpahal/bge-m3-onnx-int8/resolve/main/tokenizer_config.json",
-                "sentencepiece.bpe.model": "https://hf-mirror.com/gpahal/bge-m3-onnx-int8/resolve/main/sentencepiece.bpe.model",
-                "config.json": "https://hf-mirror.com/gpahal/bge-m3-onnx-int8/resolve/main/config.json",
-                "special_tokens_map.json": "https://hf-mirror.com/gpahal/bge-m3-onnx-int8/resolve/main/special_tokens_map.json",
-            },
+            "model_quantized.onnx": [
+                "https://hf-mirror.com/MahradHosseini/bge-m3-onnx-int8/resolve/main/model_quantized.onnx",
+                "https://huggingface.co/MahradHosseini/bge-m3-onnx-int8/resolve/main/model_quantized.onnx",
+            ],
         },
         "pip_deps": ["onnxruntime", "chromadb", "transformers", "numpy"],
     }

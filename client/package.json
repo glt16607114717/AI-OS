@@ -53,7 +53,8 @@
       },
       {
         "from": "backend/python",
-        "to": "backend/python"
+        "to": "backend/python",
+        "filter": ["**/*", "!**/*.onnx"]
       }
     ],
     "generateUpdatesFilesForAllChannels": false,

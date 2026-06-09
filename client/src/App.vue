@@ -442,6 +442,7 @@ body {
 
 .content {
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -486,13 +487,14 @@ body {
 /* Dashboard */
 .dashboard {
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: #f5f7fa;
 }
 .dash-body {
   flex: 1;
-  overflow: auto;
-  padding: 20px;
+  min-height: 0;
+  overflow: hidden;
 }
 </style>

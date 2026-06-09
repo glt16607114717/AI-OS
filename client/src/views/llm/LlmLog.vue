@@ -20,6 +20,18 @@ const paused = ref(false)
 const expandedIds = ref<Set<number>>(new Set())
 const autoScroll = ref(true)
 
+// 分页
+const logPageSize = 50
+const logCurrentPage = ref(1)
+const pagedLogs = computed(() => {
+  const start = (logCurrentPage.value - 1) * logPageSize
+  return logs.value.slice(start, start + logPageSize)
+})
+const logTotalPages = computed(() => Math.ceil(logs.value.length / logPageSize))
+function goLogPage(page: number) {
+  if (page >= 1 && page <= logTotalPages.value) logCurrentPage.value = page
+}
+
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 const categories = [
@@ -163,29 +175,41 @@ onUnmounted(() => {
         </svg>
         <span>暂无日志</span>
       </div>
-      <div
-        v-for="log in logs"
-        :key="log.id"
-        class="log-item"
-        :class="[`level-${log.level}`]"
-      >
-        <div class="log-row" @click="toggleDetail(log.id)">
-          <span class="log-time">{{ log.ts.split(' ')[1] || log.ts }}</span>
-          <span class="log-badge" :style="{ background: categoryColorMap[log.category] || '#6b7280' }">
-            {{ categories.find(c => c.key === log.category)?.label || log.category }}
-          </span>
-          <span class="log-level-icon" v-if="log.level !== 'info'" :class="`lv-${log.level}`">
-            {{ levelIcon[log.level] }}
-          </span>
-          <span class="log-msg">{{ log.message }}</span>
-          <svg v-if="log.detail" class="log-expand" :class="{ rotated: expandedIds.has(log.id) }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-        </div>
-        <transition name="expand">
-          <div v-if="expandedIds.has(log.id) && log.detail" class="log-detail">
-            {{ log.detail }}
+      <template v-else>
+        <div
+          v-for="log in pagedLogs"
+          :key="log.id"
+          class="log-item"
+          :class="[`level-${log.level}`]"
+        >
+          <div class="log-row" @click="toggleDetail(log.id)">
+            <span class="log-time">{{ log.ts.split(' ')[1] || log.ts }}</span>
+            <span class="log-badge" :style="{ background: categoryColorMap[log.category] || '#6b7280' }">
+              {{ categories.find(c => c.key === log.category)?.label || log.category }}
+            </span>
+            <span class="log-level-icon" v-if="log.level !== 'info'" :class="`lv-${log.level}`">
+              {{ levelIcon[log.level] }}
+            </span>
+            <span class="log-msg">{{ log.message }}</span>
+            <svg v-if="log.detail" class="log-expand" :class="{ rotated: expandedIds.has(log.id) }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
           </div>
-        </transition>
-      </div>
+          <transition name="expand">
+            <div v-if="expandedIds.has(log.id) && log.detail" class="log-detail">
+              {{ log.detail }}
+            </div>
+          </transition>
+        </div>
+        <!-- Pagination -->
+        <div v-if="logTotalPages > 1" class="log-pagination">
+          <button class="pg-btn" :disabled="logCurrentPage <= 1" @click="goLogPage(logCurrentPage - 1)">上一页</button>
+          <template v-for="p in logTotalPages" :key="p">
+            <button v-if="p === 1 || p === logTotalPages || Math.abs(p - logCurrentPage) <= 1" class="pg-btn" :class="{ active: p === logCurrentPage }" @click="goLogPage(p)">{{ p }}</button>
+            <span v-else-if="p === 2 && logCurrentPage > 3 || p === logTotalPages - 1 && logCurrentPage < logTotalPages - 2" class="pg-ellipsis">...</span>
+          </template>
+          <button class="pg-btn" :disabled="logCurrentPage >= logTotalPages" @click="goLogPage(logCurrentPage + 1)">下一页</button>
+          <span class="pg-info">共 {{ logs.length }} 条，第 {{ logCurrentPage }}/{{ logTotalPages }} 页</span>
+        </div>
+      </template>
     </div>
 
     <!-- Loading -->
@@ -198,7 +222,7 @@ onUnmounted(() => {
 
 <style scoped>
 .log-page {
-  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 0;
@@ -289,7 +313,7 @@ onUnmounted(() => {
 
 /* Log List */
 .log-list {
-  flex: 1;
+  max-height: calc(100vh - 340px);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -448,5 +472,55 @@ onUnmounted(() => {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* Log Pagination */
+.log-pagination {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 12px 0 4px;
+  border-top: 1px solid #e2e8f0;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.pg-btn {
+  padding: 5px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 5px;
+  background: #fff;
+  color: #475569;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.pg-btn:hover:not(:disabled):not(.active) {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+}
+
+.pg-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pg-btn.active {
+  background: #6366f1;
+  color: #fff;
+  border-color: #6366f1;
+}
+
+.pg-ellipsis {
+  padding: 0 4px;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.pg-info {
+  margin-left: 8px;
+  font-size: 11px;
+  color: #94a3b8;
 }
 </style>

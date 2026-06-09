@@ -325,19 +325,26 @@ def _voice_loop() -> None:
                 normalized_text = detected_text.replace(" ", "")
                 matched = False
                 for cmd in enabled_cmds:
-                    phrase = cmd.get("phrase", "").replace(" ", "")
-                    if phrase in normalized_text:
-                        _add_recognize_log(detected_text, cmd.get("phrase", ""), True)
+                    raw_phrase = cmd.get("phrase", "")
+                    # 支持逗号分隔多个触发词
+                    keys = [k.replace(" ", "") for k in raw_phrase.replace("，", ",").split(",") if k.strip()]
+                    matched_key = None
+                    for key in keys:
+                        if key and key in normalized_text:
+                            matched_key = key
+                            break
+                    if matched_key:
+                        _add_recognize_log(detected_text, matched_key, True)
                         matched = True
                         # 录制模式：有 actions 则回放操作序列
                         if cmd.get("actions"):
                             actions = cmd["actions"]
-                            log(f"语音指令 [{cmd.get('phrase', '')}] -> 回放 {len(actions)} 步操作", "VOICE")
+                            log(f"语音指令 [{matched_key}] -> 回放 {len(actions)} 步操作", "VOICE")
                             _play_actions(actions)
                         # 标定模式：有 position 则单击
                         elif cmd.get("position"):
                             pos = cmd["position"]
-                            log(f"语音指令 [{cmd.get('phrase', '')}] -> 点击 ({pos[0]},{pos[1]})", "VOICE")
+                            log(f"语音指令 [{matched_key}] -> 点击 ({pos[0]},{pos[1]})", "VOICE")
                             _click_point(pos[0], pos[1])
                 if not matched:
                     _add_recognize_log(detected_text, "", False)

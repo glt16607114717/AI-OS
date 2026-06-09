@@ -13,7 +13,7 @@ import os
 logger = logging.getLogger("agent")
 
 AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CHROMA_DIR = os.path.join(AGENT_DIR, "data", "chroma_db")
+CHROMA_DIR = os.path.join(os.environ.get("PROGRAMDATA", "C:\\ProgramData"), "AI-OS", "data", "chroma_db")
 
 # 全局客户端
 _client = None
@@ -155,6 +155,38 @@ def get_collection_info() -> dict:
         "name": collection.name,
         "path": CHROMA_DIR,
     }
+
+
+def get_all_documents(limit: int = 1000, offset: int = 0) -> dict:
+    """获取向量库全部文档（分页）"""
+    collection = _get_or_create_collection()
+    if collection is None:
+        return {"ok": False, "error": "ChromaDB 未初始化", "documents": [], "total": 0}
+
+    try:
+        total = collection.count()
+        results = collection.get(
+            include=["documents", "metadatas"],
+            limit=limit,
+            offset=offset,
+        )
+        documents = []
+        for doc_id, doc_text, meta in zip(
+            results.get("ids", []),
+            results.get("documents", []),
+            results.get("metadatas", []),
+        ):
+            documents.append({
+                "id": doc_id,
+                "text": doc_text,
+                "metadata": meta or {},
+            })
+        # 按时间倒序：最新的在前面
+        documents.sort(key=lambda d: d["metadata"].get("timestamp", 0), reverse=True)
+        return {"ok": True, "documents": documents, "total": total}
+    except Exception as e:
+        logger.error(f"[RAG] 获取文档列表失败: {e}")
+        return {"ok": False, "error": str(e), "documents": [], "total": 0}
 
 
 def reset_collection():
