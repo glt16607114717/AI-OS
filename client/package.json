@@ -54,7 +54,10 @@
       {
         "from": "backend/python",
         "to": "backend/python",
-        "filter": ["**/*", "!**/*.onnx"]
+        "filter": [
+          "**/*",
+          "!**/*.onnx"
+        ]
       }
     ],
     "generateUpdatesFilesForAllChannels": false,

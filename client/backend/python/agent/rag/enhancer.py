@@ -57,7 +57,7 @@ def should_enhance(messages: list[dict]) -> bool:
     return True
 
 
-def enhance_messages(messages: list[dict], top_k: int = 3, min_similarity: float = 0.3) -> tuple[list[dict], list[dict]]:
+def enhance_messages(messages: list[dict], top_k: int = 3, min_similarity: float = 0.75) -> tuple[list[dict], list[dict]]:
     """
     RAG 增强：在用户消息之前注入检索到的相关上下文。
 
