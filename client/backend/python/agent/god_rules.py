@@ -7,7 +7,7 @@
 3. 去重：去除 user 消息中重复的 <system-reminder> 内容。
 4. 工具描述压缩：压缩 Trae 官方工具的冗长描述，节省 token。
 
-存储路径：C:\ProgramData\AI-OS\config\god_rules.json
+存储路径：%PROGRAMDATA%/AI-OS/config/god_rules.json
 """
 
 import json

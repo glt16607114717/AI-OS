@@ -203,7 +203,7 @@ async def proxy_chat_completions(request: Request):
     """
     OpenAI 兼容格式的转发代理。
     轮询模式下支持智能故障转移：某厂商报错自动尝试下一个。
-    每次请求完整转储到 C:\ProgramData\AI-OS\logs\requests\
+    每次请求完整转储到 %PROGRAMDATA%/AI-OS/logs/requests/
     """
     try:
         body = await request.json()

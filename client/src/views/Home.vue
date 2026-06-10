@@ -1,16 +1,20 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 const route = useRoute()
+const router = useRouter()
 
 const agentOnline = ref(false)
 const devExpanded = ref(false)
 const restarting = ref(false)
+const isAdmin = ref(false)
+const currentUser = ref('')
 
 const isDevActive = computed(() => route.path.startsWith('/dev'))
 const isLlmActive = computed(() => route.path.startsWith('/llm'))
 const isRagActive = computed(() => route.path.startsWith('/rag'))
+const isSystemActive = computed(() => route.path.startsWith('/system'))
 
 watch(isDevActive, (val) => {
   if (val) devExpanded.value = true
@@ -24,8 +28,13 @@ watch(isRagActive, (val) => {
   if (val) ragExpanded.value = true
 }, { immediate: true })
 
+watch(isSystemActive, (val) => {
+  if (val) systemExpanded.value = true
+}, { immediate: true })
+
 const llmExpanded = ref(false)
 const ragExpanded = ref(false)
+const systemExpanded = ref(false)
 
 function toggleDevMenu() {
   devExpanded.value = !devExpanded.value
@@ -39,6 +48,10 @@ function toggleRagMenu() {
   ragExpanded.value = !ragExpanded.value
 }
 
+function toggleSystemMenu() {
+  systemExpanded.value = !systemExpanded.value
+}
+
 let healthTimer: ReturnType<typeof setInterval> | null = null
 
 async function checkHealth() {
@@ -50,9 +63,34 @@ async function checkHealth() {
   }
 }
 
+async function checkAdmin() {
+  try {
+    const token = localStorage.getItem('aios_token') || ''
+    if (!token) return
+    const res = await fetch('http://127.0.0.1:18731/api/system/me', {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+    const data = await res.json()
+    if (data?.ok && data?.data) {
+      isAdmin.value = !!data.data.is_admin
+      currentUser.value = data.data.username || ''
+    }
+  } catch {
+    isAdmin.value = false
+  }
+}
+
+function logout() {
+  localStorage.removeItem('aios_token')
+  localStorage.removeItem('aios_username')
+  localStorage.removeItem('aios_is_admin')
+  router.push('/login')
+}
+
 onMounted(() => {
   checkHealth()
   healthTimer = setInterval(checkHealth, 10000)
+  checkAdmin()
 })
 
 onUnmounted(() => {
@@ -173,15 +211,19 @@ async function restartAgent() {
           </div>
           <transition name="sub-slide">
             <div v-show="llmExpanded" class="nav-sub">
-              <router-link to="/llm/config" class="nav-sub-item" active-class="active">
+              <router-link to="/llm/config" class="nav-sub-item" active-class="active" v-if="isAdmin">
                 <span class="sub-dot"></span>
                 基础配置
+              </router-link>
+              <router-link to="/llm/config" class="nav-sub-item" active-class="active" v-else>
+                <span class="sub-dot"></span>
+                基础配置（只读）
               </router-link>
               <router-link to="/llm/strategy" class="nav-sub-item" active-class="active">
                 <span class="sub-dot"></span>
                 策略编辑
               </router-link>
-              <router-link to="/llm/stats" class="nav-sub-item" active-class="active">
+              <router-link to="/llm/stats" class="nav-sub-item" active-class="active" v-if="isAdmin">
                 <span class="sub-dot"></span>
                 统计仪表
               </router-link>
@@ -229,22 +271,63 @@ async function restartAgent() {
             </div>
           </transition>
         </div>
+
+        <!-- System Settings (expandable, admin only) -->
+        <div class="nav-group" v-if="isAdmin">
+          <div class="nav-item" :class="{ active: isSystemActive }" @click="toggleSystemMenu">
+            <div class="nav-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+            </div>
+            <span class="nav-text">系统设置</span>
+            <svg class="nav-arrow" :class="{ expanded: systemExpanded }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </div>
+          <transition name="sub-slide">
+            <div v-show="systemExpanded" class="nav-sub">
+              <router-link to="/system/account" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                账户设置
+              </router-link>
+            </div>
+          </transition>
+        </div>
       </nav>
 
       <!-- Bottom status -->
       <div class="sidebar-footer">
-        <div class="status-indicator" :class="agentOnline ? 'online' : 'offline'">
-          <span class="status-dot"></span>
-          <span class="status-text">{{ agentOnline ? '服务运行中' : '服务离线' }}</span>
-        </div>
-        <button class="restart-btn" @click="restartAgent" :disabled="restarting" :title="restarting ? '重启中...' : '重启后端服务'">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="23 4 23 10 17 10" />
-            <polyline points="1 20 1 14 7 14" />
-            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+        <div class="user-info" v-if="currentUser">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+            <circle cx="12" cy="7" r="4" />
           </svg>
-          <span v-if="restarting" class="restart-spin">&#x21bb;</span>
-        </button>
+          <span class="user-name">{{ currentUser }}</span>
+          <el-tag v-if="isAdmin" size="small" type="danger" class="admin-tag">管理员</el-tag>
+        </div>
+        <div class="footer-actions">
+          <div class="status-indicator" :class="agentOnline ? 'online' : 'offline'">
+            <span class="status-dot"></span>
+            <span class="status-text">{{ agentOnline ? '服务运行中' : '服务离线' }}</span>
+          </div>
+          <button class="restart-btn" @click="restartAgent" :disabled="restarting" :title="restarting ? '重启中...' : '重启后端服务'">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="23 4 23 10 17 10" />
+              <polyline points="1 20 1 14 7 14" />
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+            </svg>
+            <span v-if="restarting" class="restart-spin">&#x21bb;</span>
+          </button>
+          <button class="logout-btn" @click="logout" title="退出登录">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+              <polyline points="16 17 21 12 16 7" />
+              <line x1="21" y1="12" x2="9" y2="12" />
+            </svg>
+          </button>
+        </div>
       </div>
     </aside>
 
@@ -473,12 +556,54 @@ async function restartAgent() {
 
 /* Footer */
 .sidebar-footer {
-  padding: 16px 20px;
+  padding: 12px 16px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   position: relative;
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.user-info {
+  display: flex;
   align-items: center;
   gap: 8px;
+  color: #a5b4fc;
+  font-size: 12px;
+  padding: 4px 4px 0;
+}
+
+.user-name {
+  font-weight: 500;
+}
+
+.admin-tag {
+  margin-left: auto;
+  transform: scale(0.85);
+}
+
+.footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.logout-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  color: #8892a8;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+.logout-btn:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
 }
 
 .restart-btn {

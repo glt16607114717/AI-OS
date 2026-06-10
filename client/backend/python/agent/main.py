@@ -11,10 +11,24 @@ from pathlib import Path
 # Force UTF-8 for pythonw.exe (no console, default encoding may be ascii)
 os.environ["PYTHONIOENCODING"] = "utf-8"
 os.environ["PYTHONUTF8"] = "1"
-if sys.stdout and hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")
-if sys.stderr and hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8")
+
+# pythonw.exe has no console: stdout/stderr are None
+# Any print() or warning to None will crash the process
+# Redirect to a null writer to prevent silent crashes
+class _NullWriter:
+    def write(self, *args): pass
+    def flush(self): pass
+    def reconfigure(self, **kw): pass
+
+if sys.stdout is None:
+    sys.stdout = _NullWriter()
+if sys.stderr is None:
+    sys.stderr = _NullWriter()
+else:
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # Ensure voice module can be imported
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -53,7 +67,26 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w', encoding='utf-8')
 
-_LOG_DIR = Path(os.environ.get("AIOS_DATA_DIR", "C:/ProgramData/AI-OS")) / "logs"
+_DATA_ROOT = Path(os.environ.get("AIOS_DATA_DIR", "C:/ProgramData/AI-OS"))
+
+# 启动时修复数据目录权限：确保当前用户有完全控制权
+# 解决安装器以 SYSTEM 身份创建目录后，普通用户无法写入日志的问题
+def _fix_permissions():
+    try:
+        import ctypes
+        if not ctypes.windll.shell32.IsUserAnAdmin():
+            return  # 非管理员不处理，避免报错
+        import subprocess
+        subprocess.run(
+            ['icacls', str(_DATA_ROOT), '/grant', 'BUILTIN\\Users:(OI)(CI)F', '/T', '/Q'],
+            capture_output=True, timeout=30,
+        )
+    except Exception:
+        pass
+
+_fix_permissions()
+
+_LOG_DIR = _DATA_ROOT / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 _LOG_LEVEL = logging.DEBUG if DEBUG else logging.INFO
@@ -206,6 +239,14 @@ async def on_startup():
         logger.info("RAG module initialized")
     except Exception as e:
         logger.warning(f"RAG module not available: {e}")
+
+    # 挂载系统设置路由（用户管理）
+    try:
+        from user_api import router as user_router
+        app.include_router(user_router)
+        logger.info("System settings module initialized")
+    except Exception as e:
+        logger.warning(f"System settings module not available: {e}")
 
     # 启动定时清理任务（每天 12:00 清理 90 天前的统计数据）
     _start_daily_cleanup()

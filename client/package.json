@@ -38,7 +38,7 @@
     "nodeGypRebuild": false,
     "buildDependenciesFromSource": false,
     "directories": {
-      "output": "D:/ai-os-build"
+      "output": "D:/ai-os-build5"
     },
     "files": [
       "dist/**/*",

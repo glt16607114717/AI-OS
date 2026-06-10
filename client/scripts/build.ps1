@@ -3,7 +3,7 @@ $projectDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Pat
 Set-Location $projectDir
 
 # Output dir is outside project to avoid Trae locking app.asar
-$releaseDir = "D:\ai-os-build"
+$releaseDir = "D:\ai-os-build5"
 
 Write-Host "=== AI-OS Build ===" -ForegroundColor Cyan
 
@@ -15,23 +15,27 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# 2. Clean intermediate files
+# 2. Clean: keep only installer exe, remove everything else
 Write-Host "[2/3] Cleaning..." -ForegroundColor Yellow
 
-$unpacked = Join-Path $releaseDir "win-unpacked"
-if (Test-Path $unpacked) {
-    Remove-Item $unpacked -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "  Removed: win-unpacked/" -ForegroundColor Gray
-}
-
-Get-ChildItem $releaseDir -Filter "builder-*" -ErrorAction SilentlyContinue | ForEach-Object {
-    Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
-    Write-Host "  Removed: $($_.Name)" -ForegroundColor Gray
-}
-
-Get-ChildItem $releaseDir -Filter "*.blockmap" -ErrorAction SilentlyContinue | ForEach-Object {
-    Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
-    Write-Host "  Removed: $($_.Name)" -ForegroundColor Gray
+Get-ChildItem $releaseDir -ErrorAction SilentlyContinue | Where-Object {
+    $_.Name -notlike "AI-OS-Setup-*.exe"
+} | ForEach-Object {
+    if ($_.PSIsContainer) {
+        cmd /c "rmdir /s /q `"$($_.FullName)`"" 2>$null
+        if (-not (Test-Path $_.FullName)) {
+            Write-Host "  Removed: $($_.Name)/" -ForegroundColor Gray
+        } else {
+            Write-Host "  Skip (locked): $($_.Name)/" -ForegroundColor DarkGray
+        }
+    } else {
+        Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path $_.FullName)) {
+            Write-Host "  Removed: $($_.Name)" -ForegroundColor Gray
+        } else {
+            Write-Host "  Skip (locked): $($_.Name)" -ForegroundColor DarkGray
+        }
+    }
 }
 
 # 3. Show result

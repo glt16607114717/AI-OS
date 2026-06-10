@@ -36,4 +36,10 @@
     StrCpy $INSTDIR "$INSTDIR\AI-OS"
   write_reg:
     WriteRegStr HKLM "Software\AI-OS" "InstallDir" "$INSTDIR"
+
+  ; 修复数据目录权限：安装器以管理员运行，确保 Users 组可写
+  ; 解决安装器以 SYSTEM 身份创建目录后，普通用户无法写入的问题
+  nsExec::ExecToStack 'icacls "C:\ProgramData\AI-OS" /grant BUILTIN\Users:(OI)(CI)F /T /Q'
+  Pop $0
+  Pop $1
 !macroend

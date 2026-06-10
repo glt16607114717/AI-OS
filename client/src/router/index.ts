@@ -1,8 +1,15 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 
+const API_BASE = 'http://127.0.0.1:18731'
+
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
+    {
+      path: '/login',
+      name: 'login',
+      component: () => import('../views/Login.vue'),
+    },
     {
       path: '/',
       component: () => import('../views/Home.vue'),
@@ -68,10 +75,43 @@ const router = createRouter({
           name: 'Knowledge',
           component: () => import('../views/rag/Knowledge.vue'),
         },
-
+        {
+          path: 'system/account',
+          name: 'AccountSettings',
+          component: () => import('../views/system/AccountSettings.vue'),
+        },
       ],
     },
   ],
+})
+
+router.beforeEach(async (to) => {
+  const token = localStorage.getItem('aios_token')
+
+  if (to.path === '/login') {
+    if (token) {
+      try {
+        const res = await fetch(`${API_BASE}/api/system/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        const data = await res.json()
+        if (data.ok) {
+          return '/voice'
+        }
+      } catch {
+        // 验证失败，清除无效 token，留在登录页
+        localStorage.removeItem('aios_token')
+      }
+    }
+    return true
+  }
+
+  // 非 /login 页面，需要 token
+  if (!token) {
+    return '/login'
+  }
+
+  return true
 })
 
 export default router

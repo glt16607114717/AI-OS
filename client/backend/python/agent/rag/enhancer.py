@@ -173,7 +173,10 @@ def store_assistant_response(user_msg: str, assistant_msg: str, source: str = "w
     try:
         from rag.distiller import distill_async
 
-        def _on_distilled(distilled_text: str):
+        def _on_distilled(is_waste: bool, distilled_text: str):
+            if is_waste:
+                logger.info(f"[RAG] 蒸馏判定为无价值，丢弃: question='{clean_msg[:30]}...'")
+                return
             if distilled_text:
                 text = f"【蒸馏】问：{clean_msg}\n答：{distilled_text}"
             else:

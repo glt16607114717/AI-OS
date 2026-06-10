@@ -1,7 +1,8 @@
 """
 大模型厂商预置目录 + 密钥管理模块
 
-厂商目录硬编码在 VENDOR_CATALOG，JSON 文件仅存储用户密钥和启用状态。
+厂商目录硬编码在 VENDOR_CATALOG，密钥、启用状态、策略存储在远程 MySQL。
+支持从旧版 JSON 文件自动迁移。MySQL 不可用时回退本地 JSON。
 
 作者：桂良涛，邮箱：桂良涛@nndrobot.com
 """
@@ -13,6 +14,13 @@ import logging
 import threading
 from pathlib import Path
 
+try:
+    import pymysql
+except ImportError:
+    pymysql = None
+
+from user_api import DB_CONFIG, DB_NAME
+
 logger = logging.getLogger("agent")
 
 # ── 存储路径 ──
@@ -21,6 +29,182 @@ _BASE_DIR = Path(r"C:\ProgramData\AI-OS\config")
 _KEYS_FILE = _BASE_DIR / "llm_keys.json"
 
 _file_lock = threading.Lock()
+
+
+# ── MySQL 辅助函数 ──
+
+def _get_db_conn():
+    """获取 MySQL 连接（复用 user_api 的 DB_CONFIG）"""
+    if pymysql is None:
+        raise RuntimeError("pymysql 未安装")
+    cfg = dict(DB_CONFIG)
+    cfg["database"] = DB_NAME
+    return pymysql.connect(**cfg, cursorclass=pymysql.cursors.DictCursor)
+
+
+def _ensure_tables():
+    """首次启动时自动建表（厂商启用状态 / API 密钥 / 转发策略）"""
+    if pymysql is None:
+        return
+    try:
+        conn = _get_db_conn()
+        with conn:
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS sys_vendor_enabled (
+                    vendor_id VARCHAR(64) PRIMARY KEY,
+                    enabled TINYINT NOT NULL DEFAULT 0,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS sys_api_key (
+                    id VARCHAR(64) PRIMARY KEY,
+                    vendor_id VARCHAR(64) NOT NULL,
+                    name VARCHAR(128) NOT NULL DEFAULT '',
+                    api_key VARCHAR(512) NOT NULL DEFAULT '',
+                    enabled TINYINT NOT NULL DEFAULT 1,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    INDEX idx_vendor (vendor_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS sys_strategy (
+                    id VARCHAR(64) PRIMARY KEY,
+                    name VARCHAR(128) NOT NULL DEFAULT '',
+                    type VARCHAR(32) NOT NULL DEFAULT 'fixed',
+                    active TINYINT NOT NULL DEFAULT 0,
+                    options JSON NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """)
+            conn.commit()
+        logger.info("[LLM Config] MySQL 表已就绪")
+    except Exception as e:
+        logger.warning("[LLM Config] MySQL 建表失败: %s", e)
+
+
+def _migrate_from_json():
+    """首次建表后检查本地 JSON 文件，存在且 MySQL 为空则自动导入"""
+    if pymysql is None or not _KEYS_FILE.exists():
+        return
+    try:
+        data = json.loads(_KEYS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    try:
+        conn = _get_db_conn()
+        with conn:
+            cur = conn.cursor()
+            # MySQL 已有数据则跳过
+            cur.execute("SELECT COUNT(*) AS cnt FROM sys_api_key")
+            if cur.fetchone()["cnt"] > 0:
+                return
+
+            # 导入 vendor_enabled
+            for vid, enabled in data.get("vendor_enabled", {}).items():
+                cur.execute(
+                    "INSERT INTO sys_vendor_enabled (vendor_id, enabled) VALUES (%s, %s)",
+                    (vid, 1 if enabled else 0),
+                )
+
+            # 导入 keys
+            for vid, keys_list in data.get("keys", {}).items():
+                for k in keys_list:
+                    cur.execute(
+                        "INSERT INTO sys_api_key (id, vendor_id, name, api_key, enabled) VALUES (%s, %s, %s, %s, %s)",
+                        (k.get("id", ""), vid, k.get("name", ""), k.get("api_key", ""), 1 if k.get("enabled", True) else 0),
+                    )
+
+            # 导入 strategies
+            for s in data.get("strategies", []):
+                cur.execute(
+                    "INSERT INTO sys_strategy (id, name, type, active, options) VALUES (%s, %s, %s, %s, %s)",
+                    (s.get("id", ""), s.get("name", ""), s.get("type", "fixed"), 1 if s.get("active", False) else 0, json.dumps(s.get("options", []), ensure_ascii=False)),
+                )
+
+            conn.commit()
+
+        # 导入成功，重命名 JSON 为备份
+        _KEYS_FILE.rename(_KEYS_FILE.with_suffix(".migrated.bak"))
+        logger.info("[LLM Config] 已从本地 JSON 迁移数据到 MySQL")
+    except Exception as e:
+        logger.warning("[LLM Config] JSON 迁移失败: %s", e)
+
+
+def _load_keys_from_db() -> dict:
+    """从 MySQL 读取配置数据，返回与 JSON 格式一致的 dict"""
+    conn = _get_db_conn()
+    with conn:
+        cur = conn.cursor()
+
+        # vendor_enabled
+        cur.execute("SELECT vendor_id, enabled FROM sys_vendor_enabled")
+        vendor_enabled = {row["vendor_id"]: bool(row["enabled"]) for row in cur.fetchall()}
+
+        # keys
+        cur.execute("SELECT id, vendor_id, name, api_key, enabled FROM sys_api_key")
+        keys = {}
+        for row in cur.fetchall():
+            vid = row["vendor_id"]
+            keys.setdefault(vid, []).append({
+                "id": row["id"],
+                "name": row["name"],
+                "api_key": row["api_key"],
+                "enabled": bool(row["enabled"]),
+            })
+
+        # strategies
+        cur.execute("SELECT id, name, type, active, options FROM sys_strategy")
+        strategies = []
+        for row in cur.fetchall():
+            opts = row["options"]
+            strategies.append({
+                "id": row["id"],
+                "name": row["name"],
+                "type": row["type"],
+                "active": bool(row["active"]),
+                "options": json.loads(opts) if isinstance(opts, str) else opts,
+            })
+
+        return {"keys": keys, "vendor_enabled": vendor_enabled, "strategies": strategies}
+
+
+def _save_keys_to_db(data: dict) -> None:
+    """将配置数据全量同步到 MySQL（DELETE + INSERT，由 _file_lock 保证线程安全）"""
+    conn = _get_db_conn()
+    with conn:
+        cur = conn.cursor()
+
+        # vendor_enabled
+        cur.execute("DELETE FROM sys_vendor_enabled")
+        for vid, enabled in data.get("vendor_enabled", {}).items():
+            cur.execute(
+                "INSERT INTO sys_vendor_enabled (vendor_id, enabled) VALUES (%s, %s)",
+                (vid, 1 if enabled else 0),
+            )
+
+        # api_key
+        cur.execute("DELETE FROM sys_api_key")
+        for vid, keys_list in data.get("keys", {}).items():
+            for k in keys_list:
+                cur.execute(
+                    "INSERT INTO sys_api_key (id, vendor_id, name, api_key, enabled) VALUES (%s, %s, %s, %s, %s)",
+                    (k.get("id", ""), vid, k.get("name", ""), k.get("api_key", ""), 1 if k.get("enabled", True) else 0),
+                )
+
+        # strategy
+        cur.execute("DELETE FROM sys_strategy")
+        for s in data.get("strategies", []):
+            cur.execute(
+                "INSERT INTO sys_strategy (id, name, type, active, options) VALUES (%s, %s, %s, %s, %s)",
+                (s.get("id", ""), s.get("name", ""), s.get("type", "fixed"), 1 if s.get("active", False) else 0, json.dumps(s.get("options", []), ensure_ascii=False)),
+            )
+
+        conn.commit()
 
 
 # ── 厂商预置目录（硬编码，不可由用户修改） ──
@@ -156,7 +340,11 @@ def _ensure_dir():
 
 
 def _load_keys_data() -> dict:
-    """读取密钥文件，不存在则返回空结构"""
+    """读取配置数据，优先 MySQL，失败则回退本地 JSON"""
+    try:
+        return _load_keys_from_db()
+    except Exception as e:
+        logger.debug("[LLM Config] MySQL 读取失败，回退本地 JSON: %s", e)
     if _KEYS_FILE.exists():
         try:
             return json.loads(_KEYS_FILE.read_text(encoding="utf-8"))
@@ -172,7 +360,12 @@ def get_keys_data() -> dict:
 
 
 def _save_keys_data(data: dict) -> None:
-    """写入密钥文件（调用方需持锁）"""
+    """写入配置数据，优先 MySQL，失败则回退本地 JSON"""
+    try:
+        _save_keys_to_db(data)
+        return
+    except Exception as e:
+        logger.debug("[LLM Config] MySQL 写入失败，回退本地 JSON: %s", e)
     _ensure_dir()
     _KEYS_FILE.write_text(
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -639,3 +832,8 @@ def get_all_routes_for_failover(exclude_vendor_ids: set = None) -> list[dict]:
             "model_id": opt.get("model_id", ""),
         })
     return routes
+
+
+# ── 初始化：建表 + 自动迁移 ──
+_ensure_tables()
+_migrate_from_json()

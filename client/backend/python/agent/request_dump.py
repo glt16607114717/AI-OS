@@ -4,7 +4,7 @@
 将 LLM 请求和响应完整保存到文件，用于调试和分析。
 每个请求一个文件，按时间戳命名。
 
-存储路径：C:\ProgramData\AI-OS\logs\requests\
+存储路径：%PROGRAMDATA%/AI-OS/logs/requests/
 """
 
 import json
