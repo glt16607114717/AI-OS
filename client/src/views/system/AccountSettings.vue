@@ -3,7 +3,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { CirclePlus, Delete, Edit } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-const BASE_URL = 'http://127.0.0.1:18731'
+import { API_BASE as BASE_URL } from '../../api'
 
 interface User {
   id: number

@@ -43,3 +43,14 @@ Desktop.ini
 
 # === 打包资源中的二进制（构建时从 .cache 复制）===
 client/resources/winsw/*.exe
+
+# === Go 编译产物 ===
+go-backend/ai-os-server
+go-backend/ai-os-server.exe
+*.test
+
+# === 已废弃的旧代码备份 ===
+_python_backup/
+client/_python_backup/
+client/backend/
+client/go-backend/

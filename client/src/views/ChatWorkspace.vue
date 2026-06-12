@@ -2,6 +2,7 @@
 import { ref, nextTick, onMounted } from 'vue'
 import { marked } from 'marked'
 import * as echarts from 'echarts'
+import { API_BASE } from '../api'
 
 const agentRequest = window.aiOS.agentRequest
 
@@ -298,7 +299,7 @@ async function sendMessage() {
 
   try {
     // 使用独立的工作台接口（不走代理）
-    const response = await fetch('http://127.0.0.1:18731/api/workspace/chat', {
+    const response = await fetch(`${API_BASE}/api/workspace/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: abortController.signal,

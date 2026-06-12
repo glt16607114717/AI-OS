@@ -10,7 +10,7 @@ const rememberMe = ref(true)
 const loading = ref(false)
 const errorMsg = ref('')
 
-const API_BASE = 'http://127.0.0.1:18731'
+import { API_BASE } from '../api'
 
 onMounted(() => {
   const savedUsername = localStorage.getItem('aios_saved_username')

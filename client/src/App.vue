@@ -1,6 +1,6 @@
 <template>
   <div class="shell">
-    <div class="titlebar" :class="{ 'titlebar-dark': setupMode || (!setupMode && !showDashboard) }">
+    <div class="titlebar" :class="{ 'titlebar-dark': !showDashboard }">
       <div class="titlebar-left">
         <div class="app-icon"></div>
         <span class="app-name">AI-OS</span>
@@ -24,68 +24,30 @@
     </div>
 
     <div class="content">
-      <SetupWizard
-        v-if="setupMode"
-        :current-step="setupProgress.stepIndex"
-        :step-name="setupProgress.step || ''"
-        :total-steps="setupProgress.totalSteps"
-        :percent="setupProgress.percent"
-        :detail="setupProgress.detail"
-        :error="setupProgress.error"
-        :done="setupProgress.done"
-        @retry="retrySetup"
-      />
+      <!-- Splash: matrix rain + lightning, shown for 3s -->
+      <div v-if="!showDashboard" class="splash-page">
+        <canvas ref="splashCanvas"></canvas>
+        <h1 class="splash-title">AI-OS</h1>
+      </div>
 
-      <template v-else>
-        <!-- Splash: matrix rain + lightning, shown for 3s -->
-        <div v-if="!showDashboard" class="splash-page">
-          <canvas ref="splashCanvas"></canvas>
-          <h1 class="splash-title">AI-OS</h1>
+      <!-- Dashboard -->
+      <div v-if="showDashboard" class="dashboard">
+        <div class="dash-body">
+          <router-view />
         </div>
-
-        <!-- Dashboard -->
-        <div v-if="showDashboard" class="dashboard">
-          <div class="dash-body">
-            <router-view />
-          </div>
-        </div>
-      </template>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
-import SetupWizard from './setup/SetupWizard.vue'
+import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 
 const windowAiOS = window.aiOS
 
-const online = ref(false)
-const uptime = ref(0)
-const version = ref('')
-const pid = ref(0)
-const setupMode = ref(false)
 const showDashboard = ref(false)
 const splashCanvas = ref<HTMLCanvasElement | null>(null)
 
-const setupProgress = ref<{
-  step: string
-  stepIndex: number
-  totalSteps: number
-  percent: number
-  detail: string
-  error?: string
-  done?: boolean
-}>({
-  step: '',
-  stepIndex: 0,
-  totalSteps: 5,
-  percent: 0,
-  detail: '',
-})
-
-let timer: ReturnType<typeof setInterval> | null = null
-let healthChecking = false
 let splashAnimId = 0
 
 function startSplashAnimation() {
@@ -242,103 +204,19 @@ function stopSplashAnimation() {
   if (splashAnimId) { cancelAnimationFrame(splashAnimId); splashAnimId = 0 }
 }
 
-function formatUptime(seconds: number): string {
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  const s = seconds % 60
-  if (h > 0) return `${h}h ${m}m ${s}s`
-  if (m > 0) return `${m}m ${s}s`
-  return `${s}s`
-}
-
-async function checkHealth() {
-  if (healthChecking) return
-  healthChecking = true
-  try {
-    const res = await windowAiOS.agentHealth()
-    online.value = res.ok
-    if (res.ok) {
-      uptime.value = res.uptime ?? 0
-      version.value = res.version ?? ''
-      pid.value = res.pid ?? 0
-    }
-  } catch {
-    online.value = false
-  } finally {
-    healthChecking = false
-  }
-}
-
-async function startSetup() {
-  let setupDone = false
-  const doFinish = () => {
-    if (setupDone) return
-    setupDone = true
-    setTimeout(() => {
-      finishSetup()
-    }, 1500)
-  }
-
-  try {
-    await windowAiOS.runSetup((info: any) => {
-      setupProgress.value = { ...info }
-      if (info.done) {
-        doFinish()
-      }
-    })
-    // Promise resolved — ensure we transition even if done event was missed
-    doFinish()
-  } catch {}
-}
-
-async function retrySetup() {
-  setupProgress.value = {
-    step: '',
-    stepIndex: 0,
-    totalSteps: 5,
-    percent: 0,
-    detail: '',
-    error: undefined,
-    done: undefined,
-  }
-  await startSetup()
-}
-
-function finishSetup() {
-  setupMode.value = false
-  nextTick(() => {
-    startSplashAnimation()
-    checkHealth()
-    timer = setInterval(checkHealth, 10000)
-    setTimeout(() => {
-      stopSplashAnimation()
-      showDashboard.value = true
-    }, 7000)
-  })
-}
-
 onMounted(async () => {
-  const needed = await windowAiOS.checkSetupNeeded()
-  if (needed) {
-    setupMode.value = true
-    startSetup()
-  } else {
-    setupMode.value = false
-    showDashboard.value = false
-    // Start splash animation after DOM updates
-    await nextTick()
-    startSplashAnimation()
-    checkHealth()
-    setTimeout(() => {
-      stopSplashAnimation()
-      showDashboard.value = true
-      timer = setInterval(checkHealth, 10000)
-    }, 7000)
-  }
+  showDashboard.value = false
+  // Start splash animation after DOM updates
+  await nextTick()
+  startSplashAnimation()
+  setTimeout(() => {
+    stopSplashAnimation()
+    showDashboard.value = true
+  }, 7000)
 })
 
 onUnmounted(() => {
-  if (timer) clearInterval(timer)
+  stopSplashAnimation()
 })
 </script>
 

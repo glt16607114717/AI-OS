@@ -19,10 +19,10 @@ interface Model {
 }
 
 interface Vendor {
-  id: string
+  id: number
+  code: string
   name: string
   base_url: string
-  sort_order: number
   models: Model[]
   keys: ApiKey[]
   enabled: boolean
@@ -38,7 +38,7 @@ const vendors = ref<Vendor[]>([])
 const loading = ref(false)
 
 // 正在添加密钥的厂商 ID
-const addingKeyVendorId = ref<string | null>(null)
+const addingKeyVendorId = ref<number | null>(null)
 const newKeyForm = reactive<NewKeyForm>({ name: '', api_key: '' })
 
 // ── 数据加载 ──
@@ -50,9 +50,9 @@ async function fetchCatalog() {
     if (res.ok) {
       vendors.value = (res.catalog || []).map((v: any) => ({
         id: v.id,
+        code: v.code || '',
         name: v.name,
         base_url: v.base_url || '',
-        sort_order: v.sort_order ?? 0,
         models: (v.models || []).map((m: any) => ({
           model_id: m.model_id || '',
           display_name: m.display_name || '',
@@ -101,7 +101,7 @@ function toggleExpand(vendor: Vendor) {
 
 // ── 密钥管理 ──
 
-function startAddKey(vendorId: string) {
+function startAddKey(vendorId: number) {
   addingKeyVendorId.value = vendorId
   newKeyForm.name = ''
   newKeyForm.api_key = ''

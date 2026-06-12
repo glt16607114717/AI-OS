@@ -338,8 +338,7 @@ export class SetupManager {
     })
 
     const pythonwExe = path.join(this.pythonDir, 'pythonw.exe')
-    const pythonExe = path.join(this.pythonDir, 'python.exe')
-    const agentScript = path.join(this.appDir, 'resources', 'backend', 'python', 'agent', 'main.py')
+    const agentScript = path.join(this.appDir, 'resources', 'backend', 'python', 'agent', 'run.py')
     const taskName = 'AI-OS-Agent'
 
     this.emit({
@@ -350,20 +349,22 @@ export class SetupManager {
       detail: '正在注册计划任务...',
     })
 
-    // PowerShell 脚本：注销旧任务 → 注册新计划任务（AtLogOn 自启）
+    // PowerShell 脚本：停 Watchdog → 杀旧进程 → 注销旧任务 → 注册新计划任务
     const scriptPath = path.join(this.appDir, '.temp-svc-setup.ps1')
     const scriptContent = [
       `$ErrorActionPreference = 'Continue'`,
-      // Agent：登录时启动
+      `schtasks /End /TN 'AI-OS-Watchdog' 2>&1 | Out-Null`,
+      `Stop-Process -Name pythonw -Force -ErrorAction SilentlyContinue`,
+      `Stop-Process -Name python -Force -ErrorAction SilentlyContinue`,
+      `Stop-Process -Name ai-os-agent -Force -ErrorAction SilentlyContinue`,
+      `Start-Sleep -Seconds 2`,
       `$taskName = '${taskName}'`,
       `schtasks /Delete /TN $taskName /F 2>&1 | Out-Null`,
       `schtasks /Create /SC ONLOGON /TN $taskName /TR "'${pythonwExe}' -X utf8 '${agentScript}'" /RL HIGHEST /F`,
-      // Watchdog：每 1 分钟检查 main.py 是否存活，不在就启动
       `$wdName = 'AI-OS-Watchdog'`,
-      `$wdScript = '${agentScript.replace('main.py', 'watchdog.py')}'`,
+      `$wdScript = '${agentScript.replace('run.py', 'watchdog.py')}'`,
       `schtasks /Delete /TN $wdName /F 2>&1 | Out-Null`,
       `schtasks /Create /SC MINUTE /MO 1 /TN $wdName /TR "'${pythonwExe}' -X utf8 '$wdScript'" /F`,
-      // 授权 Users 组对 data 目录完全控制（否则 SQLite 无法写入）
       `icacls "C:\\ProgramData\\AI-OS\\data" /grant Users:F /T /Q 2>&1 | Out-Null`,
     ].join('\r\n')
 
@@ -383,13 +384,13 @@ export class SetupManager {
       try { fs.unlinkSync(scriptPath) } catch {}
     }
 
-    // 从用户进程启动计划任务（不能在 UAC 管理员进程里启动，会跑在 Session 0）
+    // 启动计划任务
     this.emit({
       step: '注册服务',
       stepIndex: this.currentStepIndex,
       totalSteps: this.totalVisibleSteps,
       percent: 60,
-      detail: '正在启动后端...',
+      detail: '正在启动计划任务...',
     })
     try {
       await this.execAsync('schtasks.exe', ['/Run', '/TN', taskName], false)
@@ -413,22 +414,37 @@ export class SetupManager {
       stepIndex: this.currentStepIndex,
       totalSteps: this.totalVisibleSteps,
       percent: 0,
-      detail: '正在等待服务启动...',
+      detail: '正在启动后端服务...',
     })
 
-    for (let i = 0; i < 100; i++) {
-      await this.sleep(500)
+    // schtasks /Run 在上一步已触发，等待 3 秒看是否启动成功
+    await this.sleep(3000)
+    let started = await this.checkHealth()
+    this.debug(`startService: after schtasks wait, health=${started}`)
+
+    // 如果 schtasks 没启动成功，直接 spawn pythonw
+    if (!started) {
+      this.debug('schtasks /Run did not start agent, spawning directly...')
+      const pythonwExe = path.join(this.pythonDir, 'pythonw.exe')
+      const mainScript = path.join(this.appDir, 'resources', 'backend', 'python', 'agent', 'run.py')
+      spawn(pythonwExe, ['-X', 'utf8', mainScript], {
+        cwd: this.pythonDir,
+        detached: true,
+        stdio: 'ignore',
+      }).unref()
+    }
+
+    // 同步等待后端就绪（最多 30 秒）
+    for (let i = 0; i < 30; i++) {
+      await this.sleep(1000)
       try {
-        const ok = await this.checkHealth()
-        if (ok) {
-          this.debug('Service health OK, starting watchdog')
-          // Agent 启动成功后，再启动看门狗
+        const result = await this.checkHealthDetail()
+        this.debug(`startService health #${i}: ok=${result.ok} err=${result.error || 'none'}`)
+        if (result.ok) {
+          // 启动看门狗
           try {
             await this.execAsync('schtasks.exe', ['/Run', '/TN', 'AI-OS-Watchdog'], false)
-            this.debug('Watchdog started')
-          } catch (e: any) {
-            this.debug('Watchdog start error: ' + e.message)
-          }
+          } catch {}
           this.emit({
             step: '启动服务',
             stepIndex: this.currentStepIndex,
@@ -439,17 +455,16 @@ export class SetupManager {
           return
         }
       } catch {}
-
       this.emit({
         step: '启动服务',
         stepIndex: this.currentStepIndex,
         totalSteps: this.totalVisibleSteps,
-        percent: i + 1,
+        percent: Math.round(((i + 1) / 30) * 100),
         detail: '正在等待服务启动...',
       })
     }
 
-    this.debug('Service health timeout')
+    this.debug('startService: timeout')
     this.emit({
       step: '启动服务',
       stepIndex: this.currentStepIndex,
@@ -470,6 +485,20 @@ export class SetupManager {
       })
       req.on('error', () => resolve(false))
       req.on('timeout', () => { req.destroy(); resolve(false) })
+    })
+  }
+
+  private checkHealthDetail(): Promise<{ ok: boolean; error?: string; data?: string }> {
+    return new Promise((resolve) => {
+      const req = http.get(`http://127.0.0.1:${AGENT_PORT}/health`, { timeout: 2000 }, (res) => {
+        let data = ''
+        res.on('data', (chunk: string) => { data += chunk })
+        res.on('end', () => {
+          resolve({ ok: data.includes('"ok"') && data.includes('true'), data: data.substring(0, 200) })
+        })
+      })
+      req.on('error', (e) => resolve({ ok: false, error: e.message }))
+      req.on('timeout', () => { req.destroy(); resolve({ ok: false, error: 'timeout' }) })
     })
   }
 

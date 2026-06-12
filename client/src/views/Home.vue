@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { API_BASE } from '../api'
 
 const route = useRoute()
 const router = useRouter()
@@ -67,7 +68,7 @@ async function checkAdmin() {
   try {
     const token = localStorage.getItem('aios_token') || ''
     if (!token) return
-    const res = await fetch('http://127.0.0.1:18731/api/system/me', {
+    const res = await fetch(`${API_BASE}/api/system/me`, {
       headers: { Authorization: `Bearer ${token}` }
     })
     const data = await res.json()
@@ -215,15 +216,11 @@ async function restartAgent() {
                 <span class="sub-dot"></span>
                 基础配置
               </router-link>
-              <router-link to="/llm/config" class="nav-sub-item" active-class="active" v-else>
-                <span class="sub-dot"></span>
-                基础配置（只读）
-              </router-link>
               <router-link to="/llm/strategy" class="nav-sub-item" active-class="active">
                 <span class="sub-dot"></span>
                 策略编辑
               </router-link>
-              <router-link to="/llm/stats" class="nav-sub-item" active-class="active" v-if="isAdmin">
+              <router-link to="/llm/stats" class="nav-sub-item" active-class="active">
                 <span class="sub-dot"></span>
                 统计仪表
               </router-link>
@@ -238,6 +235,10 @@ async function restartAgent() {
               <router-link to="/llm/quota" class="nav-sub-item" active-class="active">
                 <span class="sub-dot"></span>
                 用量统计
+              </router-link>
+              <router-link to="/llm/ai-advice" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                AI 建议
               </router-link>
             </div>
           </transition>

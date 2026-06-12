@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
+    "chart.js": "^4.5.1",
     "echarts": "^6.1.0",
     "element-plus": "^2.14.1",
     "highlight.js": "^11.11.1",
@@ -50,14 +51,6 @@
       {
         "from": "public/icon.ico",
         "to": "icon.ico"
-      },
-      {
-        "from": "backend/python",
-        "to": "backend/python",
-        "filter": [
-          "**/*",
-          "!**/*.onnx"
-        ]
       }
     ],
     "generateUpdatesFilesForAllChannels": false,

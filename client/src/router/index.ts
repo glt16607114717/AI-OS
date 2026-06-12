@@ -1,6 +1,5 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
-
-const API_BASE = 'http://127.0.0.1:18731'
+import { API_BASE } from '../api'
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -59,6 +58,11 @@ const router = createRouter({
           path: 'llm/quota',
           name: 'LlmQuota',
           component: () => import('../views/llm/QuotaMonitor.vue'),
+        },
+        {
+          path: 'llm/ai-advice',
+          name: 'LlmAiAdvice',
+          component: () => import('../views/llm/AiAdvice.vue'),
         },
         {
           path: 'workspace',
