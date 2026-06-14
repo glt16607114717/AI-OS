@@ -19,7 +19,7 @@ interface AiOSApi {
   agentRequest: (action: string, params: Record<string, unknown>) => Promise<any>
   agentRestart: () => Promise<{ ok: boolean; error?: string }>
   checkSetupNeeded: () => Promise<boolean>
-  runSetup: (onProgress: (info: any) => void) => Promise<void>
+  runSetup: (onProgress: (info: any) => void) => Promise<{ ok: boolean; error?: string }>
   windowMinimize: () => Promise<void>
   windowMaximize: () => Promise<void>
   windowClose: () => Promise<void>

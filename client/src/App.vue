@@ -25,13 +25,27 @@
 
     <div class="content">
       <!-- Splash: matrix rain + lightning, shown for 3s -->
-      <div v-if="!showDashboard" class="splash-page">
-        <canvas ref="splashCanvas"></canvas>
-        <h1 class="splash-title">AI-OS</h1>
-      </div>
+    <div v-if="!showDashboard" class="splash-page">
+      <canvas ref="splashCanvas"></canvas>
+      <h1 class="splash-title">AI-OS</h1>
+    </div>
 
-      <!-- Dashboard -->
-      <div v-if="showDashboard" class="dashboard">
+    <!-- Setup Wizard: shown when Python env not ready -->
+    <div v-else-if="needSetup" class="loading-page">
+      <SetupWizard
+        :current-step="setupStep"
+        :step-name="setupStepName"
+        :total-steps="5"
+        :percent="setupPercent"
+        :detail="setupDetail"
+        :error="setupError"
+        :done="setupDone"
+        @retry="runSetup"
+      />
+    </div>
+
+    <!-- Dashboard -->
+    <div v-else class="dashboard">
         <div class="dash-body">
           <router-view />
         </div>
@@ -42,11 +56,21 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import SetupWizard from './setup/SetupWizard.vue'
 
 const windowAiOS = window.aiOS
 
 const showDashboard = ref(false)
 const splashCanvas = ref<HTMLCanvasElement | null>(null)
+
+// Setup state
+const needSetup = ref(false)
+const setupStep = ref(0)
+const setupStepName = ref('')
+const setupPercent = ref(0)
+const setupDetail = ref('')
+const setupError = ref('')
+const setupDone = ref(false)
 
 let splashAnimId = 0
 
@@ -209,11 +233,52 @@ onMounted(async () => {
   // Start splash animation after DOM updates
   await nextTick()
   startSplashAnimation()
-  setTimeout(() => {
+  setTimeout(async () => {
     stopSplashAnimation()
     showDashboard.value = true
+
+    // Check if Python environment needs setup
+    if (windowAiOS?.checkSetupNeeded) {
+      try {
+        const ready = await windowAiOS.checkSetupNeeded()
+        if (!ready) {
+          needSetup.value = true
+          await runSetup()
+        }
+      } catch (e) {
+        console.error('[AI-OS] Setup check failed:', e)
+      }
+    }
   }, 7000)
 })
+
+async function runSetup() {
+  setupError.value = ''
+  setupDone.value = false
+
+  try {
+    const result = await windowAiOS.runSetup((info: any) => {
+      setupStep.value = info.stepIndex ?? 0
+      setupStepName.value = info.step ?? ''
+      setupPercent.value = info.percent ?? 0
+      setupDetail.value = info.detail ?? ''
+      if (info.error) {
+        setupError.value = info.error
+      }
+    })
+
+    if (result?.ok) {
+      setupDone.value = true
+      setTimeout(() => {
+        needSetup.value = false
+      }, 2000)
+    } else if (result?.error) {
+      setupError.value = result.error
+    }
+  } catch (e: any) {
+    setupError.value = e.message || '环境配置失败'
+  }
+}
 
 onUnmounted(() => {
   stopSplashAnimation()
