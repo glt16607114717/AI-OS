@@ -21,7 +21,7 @@ const EMBED_URL = 'https://npmmirror.com/mirrors/python/3.12.10/python-3.12.10-e
 const NUGET_URL = 'https://registry.npmmirror.com/-/binary/python/3.12.10/python-3.12.10-amd64.zip'
 const GET_PIP_URL = 'https://bootstrap.pypa.io/get-pip.py'
 const PIP_INDEX = 'https://mirrors.aliyun.com/pypi/simple'
-const AGENT_PORT = 18731
+const AGENT_PORT = 18732
 const DATA_DIR = path.join(process.env.ProgramData || 'C:\\ProgramData', 'AI-OS')
 
 export class SetupManager {
@@ -338,7 +338,7 @@ export class SetupManager {
     })
 
     const pythonwExe = path.join(this.pythonDir, 'pythonw.exe')
-    const agentScript = path.join(this.appDir, 'resources', 'backend', 'python', 'agent', 'run.py')
+    const agentScript = path.join(this.appDir, 'resources', 'backend', 'python', 'agent', 'main.py')
     const taskName = 'AI-OS-Agent'
 
     this.emit({
@@ -362,7 +362,7 @@ export class SetupManager {
       `schtasks /Delete /TN $taskName /F 2>&1 | Out-Null`,
       `schtasks /Create /SC ONLOGON /TN $taskName /TR "'${pythonwExe}' -X utf8 '${agentScript}'" /RL HIGHEST /F`,
       `$wdName = 'AI-OS-Watchdog'`,
-      `$wdScript = '${agentScript.replace('run.py', 'watchdog.py')}'`,
+      `$wdScript = '${agentScript.replace('main.py', 'watchdog.py')}'`,
       `schtasks /Delete /TN $wdName /F 2>&1 | Out-Null`,
       `schtasks /Create /SC MINUTE /MO 1 /TN $wdName /TR "'${pythonwExe}' -X utf8 '$wdScript'" /F`,
       `icacls "C:\\ProgramData\\AI-OS\\data" /grant Users:F /T /Q 2>&1 | Out-Null`,
@@ -426,7 +426,7 @@ export class SetupManager {
     if (!started) {
       this.debug('schtasks /Run did not start agent, spawning directly...')
       const pythonwExe = path.join(this.pythonDir, 'pythonw.exe')
-      const mainScript = path.join(this.appDir, 'resources', 'backend', 'python', 'agent', 'run.py')
+      const mainScript = path.join(this.appDir, 'resources', 'backend', 'python', 'agent', 'main.py')
       spawn(pythonwExe, ['-X', 'utf8', mainScript], {
         cwd: this.pythonDir,
         detached: true,

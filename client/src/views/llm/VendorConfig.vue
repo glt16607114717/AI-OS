@@ -2,8 +2,12 @@
 import { ref, reactive, onMounted } from 'vue'
 import { CirclePlus, Delete, ArrowDown, Check } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { API_BASE } from '../../api'
 
-const agentRequest = window.aiOS.agentRequest
+function authHeaders() {
+  const token = localStorage.getItem('aios_token')
+  return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }
+}
 
 interface ApiKey {
   id: string
@@ -46,9 +50,10 @@ const newKeyForm = reactive<NewKeyForm>({ name: '', api_key: '' })
 async function fetchCatalog() {
   loading.value = true
   try {
-    const res = await agentRequest('llm_get_catalog', {})
-    if (res.ok) {
-      vendors.value = (res.catalog || []).map((v: any) => ({
+    const response = await fetch(`${API_BASE}/api/llm/catalog`, { headers: authHeaders() })
+    const result = await response.json()
+    if (result.ok) {
+      vendors.value = (result.data || []).map((v: any) => ({
         id: v.id,
         code: v.code || '',
         name: v.name,
@@ -79,14 +84,16 @@ async function fetchCatalog() {
 async function toggleVendor(vendor: Vendor) {
   const newVal = !vendor.enabled
   try {
-    const res = await agentRequest('llm_toggle_vendor', {
-      vendor_id: vendor.id,
-      enabled: newVal,
+    const response = await fetch(`${API_BASE}/api/llm/toggle-vendor?vendor_id=${vendor.id}`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ enabled: newVal }),
     })
-    if (res.ok) {
+    const result = await response.json()
+    if (result.ok) {
       vendor.enabled = newVal
     } else {
-      ElMessage.error(res.error || '操作失败')
+      ElMessage.error(result.error || '操作失败')
     }
   } catch {
     ElMessage.error('操作失败')
@@ -129,18 +136,20 @@ async function confirmAddKey(vendor: Vendor) {
   ]
 
   try {
-    const res = await agentRequest('llm_save_keys', {
-      vendor_id: vendor.id,
-      keys: updatedKeys,
+    const response = await fetch(`${API_BASE}/api/llm/vendor-keys?vendor_id=${vendor.id}`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ keys: updatedKeys }),
     })
-    if (res.ok) {
+    const result = await response.json()
+    if (result.ok) {
       ElMessage.success('密钥已添加')
       addingKeyVendorId.value = null
       await fetchCatalog()
       const updated = vendors.value.find(v => v.id === vendor.id)
       if (updated) updated.expanded = true
     } else {
-      ElMessage.error(res.error || '添加失败')
+      ElMessage.error(result.error || '添加失败')
     }
   } catch {
     ElMessage.error('添加失败')
@@ -163,17 +172,19 @@ async function removeKey(vendor: Vendor, key: ApiKey) {
     .map(k => ({ name: k.name, api_key: k.api_key, enabled: k.enabled }))
 
   try {
-    const res = await agentRequest('llm_save_keys', {
-      vendor_id: vendor.id,
-      keys: updatedKeys,
+    const response = await fetch(`${API_BASE}/api/llm/vendor-keys?vendor_id=${vendor.id}`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ keys: updatedKeys }),
     })
-    if (res.ok) {
+    const result = await response.json()
+    if (result.ok) {
       ElMessage.success('密钥已删除')
       await fetchCatalog()
       const updated = vendors.value.find(v => v.id === vendor.id)
       if (updated) updated.expanded = true
     } else {
-      ElMessage.error(res.error || '删除失败')
+      ElMessage.error(result.error || '删除失败')
     }
   } catch {
     ElMessage.error('删除失败')
@@ -188,14 +199,16 @@ async function toggleKey(vendor: Vendor, key: ApiKey) {
   )
 
   try {
-    const res = await agentRequest('llm_save_keys', {
-      vendor_id: vendor.id,
-      keys: updatedKeys,
+    const response = await fetch(`${API_BASE}/api/llm/vendor-keys?vendor_id=${vendor.id}`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ keys: updatedKeys }),
     })
-    if (res.ok) {
+    const result = await response.json()
+    if (result.ok) {
       key.enabled = !key.enabled
     } else {
-      ElMessage.error(res.error || '操作失败')
+      ElMessage.error(result.error || '操作失败')
     }
   } catch {
     ElMessage.error('操作失败')

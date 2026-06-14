@@ -35,7 +35,7 @@ async function handleLogin() {
 
   loading.value = true
   try {
-    const res = await fetch(`${API_BASE}/api/system/login`, {
+    const res = await fetch(`${API_BASE}/api/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: username.value.trim(), password: password.value }),

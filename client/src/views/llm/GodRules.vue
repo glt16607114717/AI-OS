@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { API_BASE } from '../../api'
 
-const agentRequest = window.aiOS.agentRequest
+function authHeaders() {
+  const token = localStorage.getItem('aios_token')
+  return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }
+}
 
 const enabled = ref(true)
 const promptOptimize = ref(true)
@@ -91,11 +95,13 @@ function renderMarkdown(text: string): string {
 async function loadRules() {
   loading.value = true
   try {
-    const res = await agentRequest('llm_get_god_rules', {})
-    if (res.ok) {
-      enabled.value = res.enabled ?? true
-      promptOptimize.value = res.prompt_optimize ?? true
-      rules.value = res.rules ?? ''
+    const response = await fetch(`${API_BASE}/api/god-rules`, { headers: authHeaders() })
+    const result = await response.json()
+    if (result.ok) {
+      const d = result.data || {}
+      enabled.value = d.enabled ?? true
+      promptOptimize.value = d.prompt_optimize ?? true
+      rules.value = d.rules ?? ''
     }
   } catch (e) {
     console.error('[GodRules] load error:', e)
@@ -107,16 +113,21 @@ async function saveRules() {
   saving.value = true
   msg.value = ''
   try {
-    const res = await agentRequest('llm_save_god_rules', {
-      enabled: enabled.value,
-      rules: rules.value,
-      prompt_optimize: promptOptimize.value
+    const response = await fetch(`${API_BASE}/api/god-rules/save`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({
+        enabled: enabled.value,
+        rules: rules.value,
+        prompt_optimize: promptOptimize.value
+      }),
     })
-    if (res.ok) {
+    const result = await response.json()
+    if (result.ok) {
       msg.value = '保存成功'
       msgType.value = 'success'
     } else {
-      msg.value = res.error || '保存失败'
+      msg.value = result.error || '保存失败'
       msgType.value = 'error'
     }
   } catch (e: any) {

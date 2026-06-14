@@ -1,8 +1,129 @@
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } from 'electron'
 import * as path from 'path'
+import * as http from 'http'
+import { SetupManager, SetupProgress } from './setup-manager'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
+let setupManager: SetupManager | null = null
+
+const LOCAL_AGENT_PORT = 18732
+
+// ─── 本地 Agent 通信 ────────────────────────────────
+
+function getSetupManager(): SetupManager {
+  if (!setupManager) {
+    const appDir = app.isPackaged
+      ? path.dirname(app.getPath('exe'))
+      : path.join(__dirname, '..', '..')
+    setupManager = new SetupManager(appDir, (info: SetupProgress) => {
+      // 转发进度到渲染进程
+      mainWindow?.webContents.send('setup:progress', info)
+    })
+  }
+  return setupManager
+}
+
+function agentHealthCheck(): Promise<{ ok: boolean; uptime?: number; version?: string; pid?: number }> {
+  return new Promise((resolve) => {
+    const req = http.get(`http://127.0.0.1:${LOCAL_AGENT_PORT}/health`, { timeout: 2000 }, (res) => {
+      let data = ''
+      res.on('data', (chunk: string) => { data += chunk })
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data)
+          resolve({ ok: json.ok === true, uptime: json.uptime, version: json.version, pid: json.pid })
+        } catch {
+          resolve({ ok: false })
+        }
+      })
+    })
+    req.on('error', () => resolve({ ok: false }))
+    req.on('timeout', () => { req.destroy(); resolve({ ok: false }) })
+  })
+}
+
+/**
+ * 调用本地 Python Agent 的 /api/voice 接口
+ */
+function agentRequest(action: string, params: Record<string, unknown>): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({ action, payload: params })
+    const req = http.request(
+      `http://127.0.0.1:${LOCAL_AGENT_PORT}/api/voice`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+        timeout: 10000,
+      },
+      (res) => {
+        let data = ''
+        res.on('data', (chunk: string) => { data += chunk })
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(data))
+          } catch {
+            resolve({ ok: false, error: 'Invalid response' })
+          }
+        })
+      },
+    )
+    req.on('error', (e) => resolve({ ok: false, error: e.message }))
+    req.on('timeout', () => { req.destroy(); resolve({ ok: false, error: 'timeout' }) })
+    req.write(body)
+    req.end()
+  })
+}
+
+async function agentRestart(): Promise<{ ok: boolean; error?: string }> {
+  try {
+    // 先尝试优雅关闭
+    await new Promise<void>((resolve) => {
+      const body = JSON.stringify({})
+      const req = http.request(
+        `http://127.0.0.1:${LOCAL_AGENT_PORT}/shutdown`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+          timeout: 3000,
+        },
+        () => resolve(),
+      )
+      req.on('error', () => resolve())
+      req.on('timeout', () => { req.destroy(); resolve() })
+      req.write(body)
+      req.end()
+    })
+
+    // 等待 3 秒让进程退出
+    await new Promise(r => setTimeout(r, 3000))
+
+    // 通过计划任务重新启动
+    const { exec } = require('child_process')
+    exec('schtasks.exe /Run /TN "AI-OS-Agent"', (err: Error | null) => {
+      if (err) {
+        // 计划任务失败，尝试直接 spawn
+        const mgr = getSetupManager()
+        // spawn 会在 startService 里处理
+      }
+    })
+
+    // 等待健康检查通过
+    for (let i = 0; i < 15; i++) {
+      await new Promise(r => setTimeout(r, 1000))
+      const health = await agentHealthCheck()
+      if (health.ok) return { ok: true }
+    }
+    return { ok: false, error: 'Agent 启动超时' }
+  } catch (e: any) {
+    return { ok: false, error: e.message }
+  }
+}
+
+// ─── 窗口管理 ────────────────────────────────────────
 
 function createTray() {
   const iconPath = app.isPackaged
@@ -74,11 +195,16 @@ function createWindow() {
     mainWindow = null
   })
 
-  // 默认打开 DevTools 用于调试
-  mainWindow.webContents.openDevTools({ mode: 'bottom' })
+  // 开发模式打开 DevTools
+  if (!app.isPackaged) {
+    mainWindow.webContents.openDevTools({ mode: 'bottom' })
+  }
 }
 
+// ─── IPC 注册 ────────────────────────────────────────
+
 function registerIpcHandlers() {
+  // 窗口控制
   ipcMain.handle('window:minimize', () => mainWindow?.minimize())
   ipcMain.handle('window:maximize', () => {
     if (mainWindow?.isMaximized()) {
@@ -88,7 +214,45 @@ function registerIpcHandlers() {
     }
   })
   ipcMain.handle('window:close', () => mainWindow?.close())
+  ipcMain.handle('window:is-maximized', () => mainWindow?.isMaximized() ?? false)
+
+  // 本地 Agent 健康
+  ipcMain.handle('agent:health', async () => {
+    return await agentHealthCheck()
+  })
+
+  // 本地 Agent 请求（语音等）
+  ipcMain.handle('agent:request', async (_event, action: string, params: Record<string, unknown>) => {
+    return await agentRequest(action, params)
+  })
+
+  // 本地 Agent 重启
+  ipcMain.handle('agent:restart', async () => {
+    return await agentRestart()
+  })
+
+  // Setup 检查
+  ipcMain.handle('setup:check', async () => {
+    const mgr = getSetupManager()
+    const pythonReady = mgr.isPythonReady()
+    const agentOk = (await agentHealthCheck()).ok
+    // 如果 Python 就绪但 Agent 没跑，需要启动
+    return pythonReady && agentOk
+  })
+
+  // Setup 执行
+  ipcMain.handle('setup:run', async () => {
+    const mgr = getSetupManager()
+    try {
+      await mgr.runFullSetup()
+      return { ok: true }
+    } catch (e: any) {
+      return { ok: false, error: e.message }
+    }
+  })
 }
+
+// ─── 应用启动 ────────────────────────────────────────
 
 const gotTheLock = app.requestSingleInstanceLock()
 
@@ -101,10 +265,25 @@ if (!gotTheLock) {
     mainWindow?.focus()
   })
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     registerIpcHandlers()
     createTray()
     createWindow()
+
+    // 启动时检查是否需要自动初始化
+    const mgr = getSetupManager()
+    const pythonReady = mgr.isPythonReady()
+    const agentOk = (await agentHealthCheck()).ok
+
+    if (pythonReady && !agentOk) {
+      // Python 已安装但 Agent 没跑，直接启动
+      console.log('[AI-OS] Python ready but agent not running, starting...')
+      try {
+        await mgr.startService()
+      } catch (e) {
+        console.error('[AI-OS] Auto-start failed:', e)
+      }
+    }
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {

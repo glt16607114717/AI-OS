@@ -1,0 +1,6 @@
+# AI-OS 本地 Agent 依赖（瘦身版）
+# 仅保留语音助手 + FastAPI 服务
+fastapi>=0.115.0
+uvicorn>=0.34.0
+vosk>=0.3.44
+sounddevice>=0.5

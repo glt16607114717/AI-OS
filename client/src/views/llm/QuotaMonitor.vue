@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
-const agentRequest = window.aiOS.agentRequest
+import { API_BASE } from '../../api'
+
+function authHeaders() {
+  const token = localStorage.getItem('aios_token')
+  return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }
+}
 
 const loading = ref(false)
 const refreshing = ref(false)
@@ -10,9 +15,10 @@ const autoRefreshInterval = ref<number | null>(null)
 async function fetchKeys() {
   loading.value = true
   try {
-    const res = await agentRequest('llm_get_quota_status', {})
-    if (res.ok) {
-      keys.value = res.all_keys || []
+    const response = await fetch(`${API_BASE}/api/quota/status`, { headers: authHeaders() })
+    const result = await response.json()
+    if (result.ok) {
+      keys.value = result.data?.records || []
     }
   } catch (e) {
     console.error('[QuotaMonitor] fetchKeys error:', e)
@@ -23,7 +29,11 @@ async function fetchKeys() {
 async function refreshNow() {
   refreshing.value = true
   try {
-    await agentRequest('llm_force_quota_check', {})
+    await fetch(`${API_BASE}/api/quota/force-check`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({}),
+    })
     // 等待一小段时间让检查完成
     await new Promise((resolve) => setTimeout(resolve, 1000))
     await fetchKeys()

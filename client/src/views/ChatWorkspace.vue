@@ -4,7 +4,14 @@ import { marked } from 'marked'
 import * as echarts from 'echarts'
 import { API_BASE } from '../api'
 
-const agentRequest = window.aiOS.agentRequest
+// 统一获取鉴权请求头（Token 从 localStorage 读取）
+function authHeaders(json = false): Record<string, string> {
+  const headers: Record<string, string> = {}
+  const token = localStorage.getItem('aios_token')
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  if (json) headers['Content-Type'] = 'application/json'
+  return headers
+}
 
 // 配置 marked
 marked.use({ breaks: true, gfm: true })
@@ -76,9 +83,12 @@ let abortController: AbortController | null = null
 // 加载技能列表
 async function loadSkills() {
   try {
-    const res = await agentRequest('skill_get_list', {})
-    if (res?.ok) {
-      skills.value = res.skills || []
+    const res = await fetch(`${API_BASE}/api/skills`, { headers: authHeaders() })
+    if (!res.ok) return
+    const json = await res.json()
+    const list = json.data || []
+    if (Array.isArray(list)) {
+      skills.value = list
     }
   } catch {}
 }
@@ -113,9 +123,12 @@ function clearCache() {
 
 async function loadFromBackend() {
   try {
-    const res = await agentRequest('chat_get_history', {})
-    if (res?.messages) {
-      messages.value = res.messages.map((m: any) => ({
+    const res = await fetch(`${API_BASE}/api/chat/history?page=1&page_size=20`, { headers: authHeaders() })
+    if (!res.ok) return
+    const json = await res.json()
+    const list = json.data?.list || json.data || []
+    if (Array.isArray(list) && list.length > 0) {
+      messages.value = list.map((m: any) => ({
         role: m.role,
         content: m.content,
         done: m.role === 'assistant'
@@ -125,16 +138,17 @@ async function loadFromBackend() {
   } catch {}
 }
 
-async function saveMessage(role: 'user' | 'assistant', content: string) {
-  try {
-    await agentRequest('chat_add_message', { role, content })
-  } catch {}
+// chat_add_message 是本地操作：消息已通过 messages.value 维护，无需调用后端
+async function saveMessage(_role: 'user' | 'assistant', _content: string) {
+  // no-op
 }
 
 async function loadModel() {
   try {
-    const res = await agentRequest('llm_get_strategies', {})
-    const strategies = res?.strategies || []
+    const res = await fetch(`${API_BASE}/api/llm/strategies`, { headers: authHeaders() })
+    if (!res.ok) return
+    const json = await res.json()
+    const strategies = json.data || []
     const active = strategies.find((s: any) => s.active)
     if (active?.options?.length) {
       currentModel.value = active.options[0].model_id || ''
@@ -301,7 +315,7 @@ async function sendMessage() {
     // 使用独立的工作台接口（不走代理）
     const response = await fetch(`${API_BASE}/api/workspace/chat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders(true),
       signal: abortController.signal,
       body: JSON.stringify({
         messages: messages.value.slice(0, aiIdx).map(m => ({
@@ -458,13 +472,18 @@ function stopChat() {
   }
 }
 
-function clearChat() {
+async function clearChat() {
   if (messages.value.length === 0) return
   if (confirm('确定清空所有对话记录？')) {
     disposeCharts()
     messages.value = []
     clearCache()
-    agentRequest('chat_clear_history', {})
+    try {
+      await fetch(`${API_BASE}/api/chat/clear`, {
+        method: 'POST',
+        headers: authHeaders(true)
+      })
+    } catch {}
   }
 }
 

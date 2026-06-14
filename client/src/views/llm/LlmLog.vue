@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { API_BASE } from '../../api'
 
-const agentRequest = window.aiOS.agentRequest
+function authHeaders() {
+  const token = localStorage.getItem('aios_token')
+  return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }
+}
 
 interface LogEntry {
   id: number
@@ -47,13 +51,16 @@ const categories = [
 async function fetchLogs(incremental = false) {
   if (paused.value && incremental) return
   try {
-    const res = await agentRequest('llm_get_logs', {
-      limit: 200,
+    const params = new URLSearchParams({
+      limit: '200',
       category: activeCategory.value || '',
-      ...(incremental && maxId.value > 0 ? { after_id: maxId.value } : {}),
     })
-    if (res?.ok) {
-      const newLogs: LogEntry[] = res.logs || []
+    if (incremental && maxId.value > 0) params.set('after_id', String(maxId.value))
+    const response = await fetch(`${API_BASE}/api/logs?${params}`, { headers: authHeaders() })
+    const result = await response.json()
+    if (result?.ok) {
+      const d = result.data || {}
+      const newLogs: LogEntry[] = d.logs || []
       if (incremental && maxId.value > 0) {
         if (newLogs.length > 0) {
           // 增量：追加到前面（日志按 id DESC 排序）
@@ -62,7 +69,7 @@ async function fetchLogs(incremental = false) {
       } else {
         logs.value = newLogs
       }
-      if (res.max_id) maxId.value = res.max_id
+      if (d.max_id) maxId.value = d.max_id
     }
   } catch (e) {
     console.error('fetch logs failed:', e)
@@ -73,7 +80,11 @@ async function fetchLogs(incremental = false) {
 async function clearLogs() {
   if (!confirm('确定清空所有日志？')) return
   try {
-    await agentRequest('llm_clear_logs', {})
+    await fetch(`${API_BASE}/api/logs/clear`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({}),
+    })
     logs.value = []
     maxId.value = 0
   } catch (e) {

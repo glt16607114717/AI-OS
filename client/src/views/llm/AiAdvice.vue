@@ -102,7 +102,12 @@ async function fetchSuggestions() {
 async function processSuggestion(id: number) {
   processingIds.value.add(id)
   try {
-    const res = await fetch(`${API_BASE}/api/ai-advisor/suggestions/${id}/process`, { method: 'POST' })
+    const token = localStorage.getItem('aios_token')
+    const res = await fetch(`${API_BASE}/api/ai-advisor/process`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ suggestion_id: id })
+    })
     const data = await res.json()
     if (data?.ok) {
       await fetchSuggestions()

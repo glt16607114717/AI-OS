@@ -1,6 +1,14 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { Microphone, CirclePlus, Delete, VideoCamera, VideoPause, Check } from '@element-plus/icons-vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
+import {
+  Microphone,
+  CirclePlus,
+  Delete,
+  VideoCamera,
+  VideoPause,
+  Aim,
+  Download,
+} from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { API_BASE } from '../api'
 
@@ -15,6 +23,60 @@ interface VoiceCommand {
 const voiceEnabled = ref(false)
 const commands = ref<VoiceCommand[]>([])
 const loading = ref(false)
+
+// 本地 Agent 状态
+const agentOnline = ref(false)
+const agentListening = ref(false)
+const modelReady = ref(false)
+
+// 标定状态
+const calibrating = ref(false)
+const calibratingIndex = ref(-1)
+
+// 录制状态
+const recording = ref(false)
+const recordingIndex = ref(-1)
+
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
+/** 判断 window.aiOS 是否可用（浏览器开发环境下不存在） */
+function hasAgent(): boolean {
+  return !!window.aiOS?.agentHealth
+}
+
+/** 安全调用 Agent API，失败返回 null */
+async function safeAgent<T = any>(fn: () => Promise<T>): Promise<T | null> {
+  if (!hasAgent()) return null
+  try {
+    return await fn()
+  } catch (e) {
+    console.error('[VoiceAssistant] agent 调用失败:', e)
+    return null
+  }
+}
+
+/** 检测本地 Agent 健康状态 + 语音状态 */
+async function checkAgent() {
+  if (!hasAgent()) {
+    agentOnline.value = false
+    return
+  }
+  try {
+    const health = await window.aiOS.agentHealth()
+    agentOnline.value = !!health?.ok
+    if (agentOnline.value) {
+      const status = await safeAgent(() =>
+        window.aiOS.agentRequest('voice_status', {})
+      )
+      if (status) {
+        agentListening.value = status.listening ?? false
+        modelReady.value = status.model_ready ?? false
+      }
+    }
+  } catch {
+    agentOnline.value = false
+  }
+}
 
 async function fetchStatus() {
   loading.value = true
@@ -40,6 +102,14 @@ async function fetchStatus() {
   loading.value = false
 }
 
+/** 同步指令列表到本地 Agent 的 voice_config.json */
+async function syncToAgent() {
+  if (!agentOnline.value) return
+  await safeAgent(() =>
+    window.aiOS.agentRequest('voice_sync_commands', { commands: commands.value })
+  )
+}
+
 async function toggleEnabled(val: boolean) {
   try {
     const token = localStorage.getItem('aios_token')
@@ -48,6 +118,12 @@ async function toggleEnabled(val: boolean) {
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ enabled: val })
     })
+    // 通知本地 Agent 启动/停止监听
+    if (agentOnline.value) {
+      await safeAgent(() =>
+        window.aiOS.agentRequest('voice_set_enabled', { enabled: val })
+      )
+    }
   } catch { voiceEnabled.value = !val }
 }
 
@@ -68,6 +144,7 @@ async function addCommand() {
         actions: null,
         enabled: true,
       })
+      syncToAgent()
     }
   } catch {}
 }
@@ -82,6 +159,7 @@ async function updateCommand(index: number, updates: Record<string, any>) {
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify(updates)
     })
+    syncToAgent()
   } catch {}
 }
 
@@ -96,7 +174,107 @@ async function removeCommand(index: number) {
       body: JSON.stringify({})
     })
     commands.value.splice(index, 1)
+    syncToAgent()
   } catch {}
+}
+
+/** 标定：启动后用户按空格键确认鼠标位置 */
+async function startCalibration(i: number) {
+  if (!agentOnline.value) {
+    ElMessage.warning('本地服务未启动')
+    return
+  }
+  if (recording.value || calibrating.value) return
+
+  calibrating.value = true
+  calibratingIndex.value = i
+
+  const result = await safeAgent(() =>
+    window.aiOS.agentRequest('voice_start_calibration', { index: i })
+  )
+
+  if (result?.error) {
+    calibrating.value = false
+    calibratingIndex.value = -1
+    ElMessage.error(result.error)
+    return
+  }
+
+  // 如果调用阻塞返回了位置（用户已按空格），直接保存
+  if (result?.position) {
+    await updateCommand(i, { position: result.position })
+    ElMessage.success(`标定成功：(${result.position.x}, ${result.position.y})`)
+    calibrating.value = false
+    calibratingIndex.value = -1
+    return
+  }
+
+  // 非阻塞模式：等待用户按空格
+  ElMessage.info('请将鼠标移动到目标位置，然后按空格键确认')
+}
+
+async function cancelCalibration() {
+  await safeAgent(() =>
+    window.aiOS.agentRequest('voice_cancel_calibration', {})
+  )
+  calibrating.value = false
+  calibratingIndex.value = -1
+}
+
+/** 录制键鼠操作 */
+async function startRecording(i: number) {
+  if (!agentOnline.value) {
+    ElMessage.warning('本地服务未启动')
+    return
+  }
+  if (recording.value || calibrating.value) return
+
+  const result = await safeAgent(() =>
+    window.aiOS.agentRequest('voice_start_recording', { index: i })
+  )
+
+  if (result?.error) {
+    ElMessage.error(result.error)
+    return
+  }
+
+  recording.value = true
+  recordingIndex.value = i
+  ElMessage.info('录制中，按 F9 停止')
+}
+
+async function stopRecording() {
+  const idx = recordingIndex.value
+  const result = await safeAgent(() =>
+    window.aiOS.agentRequest('voice_stop_recording', {})
+  )
+
+  recording.value = false
+  recordingIndex.value = -1
+
+  if (result?.error) {
+    ElMessage.error(result.error)
+    return
+  }
+
+  if (result?.ok && result.actions) {
+    await updateCommand(idx, { actions: result.actions })
+    ElMessage.success(`录制完成，共 ${result.actions.length} 步`)
+  }
+}
+
+/** 下载语音模型 */
+async function downloadModel() {
+  const result = await safeAgent(() =>
+    window.aiOS.agentRequest('voice_download_model', {})
+  )
+
+  if (result?.error) {
+    ElMessage.error(result.error)
+    return
+  }
+
+  ElMessage.success('模型下载已开始，请等待几分钟')
 }
 
 function getCommandMode(cmd: VoiceCommand): string {
@@ -112,7 +290,37 @@ function getCommandModeLabel(cmd: VoiceCommand): string {
   return '未配置'
 }
 
-onMounted(() => { fetchStatus() })
+function isCommandActive(i: number): boolean {
+  return (
+    (calibrating.value && calibratingIndex.value === i) ||
+    (recording.value && recordingIndex.value === i)
+  )
+}
+
+const agentStatusText = computed(() => {
+  if (!hasAgent()) return '浏览器模式'
+  if (!agentOnline.value) return '本地服务未启动'
+  if (!modelReady.value) return '模型未就绪'
+  if (agentListening.value) return '监听中'
+  return '在线'
+})
+
+const agentStatusType = computed<'success' | 'info' | 'warning' | 'danger'>(() => {
+  if (!hasAgent() || !agentOnline.value) return 'danger'
+  if (!modelReady.value) return 'warning'
+  if (agentListening.value) return 'success'
+  return 'info'
+})
+
+onMounted(() => {
+  fetchStatus()
+  checkAgent()
+  pollTimer = setInterval(checkAgent, 10000)
+})
+
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
+})
 </script>
 
 <template>
@@ -126,13 +334,13 @@ onMounted(() => { fetchStatus() })
     <el-card shadow="never" class="status-card">
       <div class="status-row">
         <div class="status-left">
-          <div class="mic-icon-wrap">
+          <div class="mic-icon-wrap" :class="{ 'mic-active': agentListening }">
             <el-icon :size="28"><Microphone /></el-icon>
           </div>
           <div class="status-text">
             <div class="status-label">语音助手</div>
-            <el-tag type="info" size="small" class="model-tag">
-              云端模式（指令管理）
+            <el-tag :type="agentStatusType" size="small" class="model-tag">
+              {{ agentStatusText }}
             </el-tag>
           </div>
         </div>
@@ -141,7 +349,65 @@ onMounted(() => { fetchStatus() })
           <el-switch v-model="voiceEnabled" @change="toggleEnabled" />
         </div>
       </div>
+
+      <!-- Agent 状态详情 -->
+      <div class="agent-status-row">
+        <div class="agent-status-item">
+          <span class="agent-status-label">本地服务</span>
+          <el-tag
+            :type="agentOnline ? 'success' : 'danger'"
+            size="small"
+            effect="light"
+          >
+            {{ agentOnline ? '在线' : (hasAgent() ? '离线' : '不可用') }}
+          </el-tag>
+        </div>
+        <div class="agent-status-item">
+          <span class="agent-status-label">语音模型</span>
+          <el-tag
+            v-if="agentOnline && modelReady"
+            type="success"
+            size="small"
+            effect="light"
+          >就绪</el-tag>
+          <el-tag
+            v-else-if="agentOnline && !modelReady"
+            type="warning"
+            size="small"
+            effect="light"
+          >未就绪</el-tag>
+          <el-tag v-else type="info" size="small" effect="light">-</el-tag>
+        </div>
+        <div class="agent-status-item">
+          <span class="agent-status-label">监听状态</span>
+          <el-tag
+            v-if="agentOnline && agentListening"
+            type="success"
+            size="small"
+            effect="light"
+          >监听中</el-tag>
+          <el-tag v-else type="info" size="small" effect="light">未监听</el-tag>
+        </div>
+        <el-button
+          v-if="agentOnline && !modelReady"
+          type="primary"
+          size="small"
+          :icon="Download"
+          @click="downloadModel"
+        >
+          下载语音模型
+        </el-button>
+      </div>
     </el-card>
+
+    <!-- 标定提示条 -->
+    <div v-if="calibrating" class="calibration-banner">
+      <div class="calibration-banner-text">
+        <el-icon class="calibration-icon"><Aim /></el-icon>
+        <span>标定中：将鼠标移动到目标位置，按 <kbd>空格键</kbd> 确认</span>
+      </div>
+      <el-button size="small" @click="cancelCalibration">取消标定</el-button>
+    </div>
 
     <!-- Commands List -->
     <el-card shadow="never" class="commands-card">
@@ -158,7 +424,12 @@ onMounted(() => { fetchStatus() })
         暂无语音指令，点击上方按钮添加
       </div>
 
-      <div v-for="(cmd, i) in commands" :key="cmd.id" class="command-item">
+      <div
+        v-for="(cmd, i) in commands"
+        :key="cmd.id"
+        class="command-item"
+        :class="{ 'command-active': isCommandActive(i) }"
+      >
         <div class="command-fields">
           <el-input
             v-model="cmd.phrase"
@@ -179,7 +450,65 @@ onMounted(() => { fetchStatus() })
             <el-tag v-else type="info" size="small">未配置</el-tag>
           </div>
           <el-switch v-model="cmd.enabled" @change="updateCommand(i, { enabled: cmd.enabled })" />
+
+          <!-- 标定按钮 -->
+          <el-tooltip
+            :content="agentOnline ? '标定鼠标位置（空格键确认）' : '本地服务未启动'"
+            placement="top"
+          >
+            <span>
+              <el-button
+                size="small"
+                :icon="Aim"
+                :disabled="!agentOnline || recording || calibrating"
+                :type="calibrating && calibratingIndex === i ? 'warning' : 'default'"
+                @click="startCalibration(i)"
+              >
+                标定
+              </el-button>
+            </span>
+          </el-tooltip>
+
+          <!-- 录制按钮 -->
+          <el-tooltip
+            :content="agentOnline
+              ? (recording && recordingIndex === i ? '按 F9 停止录制' : '录制键鼠操作（F9 停止）')
+              : '本地服务未启动'"
+            placement="top"
+          >
+            <span>
+              <el-button
+                v-if="!(recording && recordingIndex === i)"
+                size="small"
+                :icon="VideoCamera"
+                :disabled="!agentOnline || recording || calibrating"
+                @click="startRecording(i)"
+              >
+                录制
+              </el-button>
+              <el-button
+                v-else
+                size="small"
+                type="danger"
+                :icon="VideoPause"
+                @click="stopRecording"
+              >
+                停止 (F9)
+              </el-button>
+            </span>
+          </el-tooltip>
+
           <el-button type="danger" text size="small" :icon="Delete" @click="removeCommand(i)" />
+        </div>
+
+        <!-- 录制中提示 -->
+        <div v-if="recording && recordingIndex === i" class="recording-hint">
+          <span class="recording-dot"></span> 录制中，按 F9 停止
+        </div>
+
+        <!-- 标定中提示 -->
+        <div v-if="calibrating && calibratingIndex === i" class="calibrating-hint">
+          按空格键确认鼠标位置
         </div>
       </div>
     </el-card>
@@ -233,6 +562,18 @@ onMounted(() => { fetchStatus() })
   justify-content: center;
   background: #ecf5ff;
   color: #409eff;
+  transition: all 0.3s;
+}
+
+.mic-icon-wrap.mic-active {
+  background: #f0f9eb;
+  color: #67c23a;
+  animation: mic-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(103, 194, 58, 0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(103, 194, 58, 0); }
 }
 
 .status-text {
@@ -262,6 +603,66 @@ onMounted(() => { fetchStatus() })
   color: #909399;
 }
 
+/* Agent 状态详情 */
+.agent-status-row {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #f0f0f0;
+  flex-wrap: wrap;
+}
+
+.agent-status-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-status-label {
+  font-size: 12px;
+  color: #909399;
+}
+
+/* 标定提示条 */
+.calibration-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  background: #ecf5ff;
+  border: 1px solid #d9ecff;
+  border-radius: 8px;
+  color: #409eff;
+}
+
+.calibration-banner-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.calibration-icon {
+  animation: calibration-blink 1s ease-in-out infinite;
+}
+
+@keyframes calibration-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.calibration-banner kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  background: #fff;
+  border: 1px solid #d9ecff;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: monospace;
+}
+
 /* Commands Card */
 .commands-card {
   border-radius: 10px;
@@ -289,11 +690,19 @@ onMounted(() => { fetchStatus() })
 .command-item {
   padding: 10px 0;
   border-bottom: 1px solid #f0f0f0;
+  transition: background-color 0.2s;
 }
 
 .command-item:last-child {
   border-bottom: none;
   padding-bottom: 0;
+}
+
+.command-item.command-active {
+  background-color: #fff8e6;
+  margin: 0 -12px;
+  padding: 10px 12px;
+  border-radius: 6px;
 }
 
 .command-fields {
@@ -310,5 +719,37 @@ onMounted(() => { fetchStatus() })
 
 .mode-display {
   min-width: 80px;
+}
+
+/* 录制/标定提示 */
+.recording-hint,
+.calibrating-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.recording-hint {
+  color: #f56c6c;
+}
+
+.calibrating-hint {
+  color: #e6a23c;
+}
+
+.recording-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f56c6c;
+  animation: recording-pulse 1s ease-in-out infinite;
+}
+
+@keyframes recording-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.8); }
 }
 </style>

@@ -1,8 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { API_BASE } from '../../api'
 
-const agentRequest = window.aiOS.agentRequest
+function authHeaders() {
+  const token = localStorage.getItem('aios_token')
+  return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }
+}
 
 interface Option {
   vendor_id: string
@@ -52,9 +56,10 @@ function resolveOptionLabel(val: string) {
 
 async function fetchOptions() {
   try {
-    const res = await agentRequest('llm_get_options', {})
-    if (res.ok) {
-      availableOptions.value = res.options || []
+    const response = await fetch(`${API_BASE}/api/llm/available-options`, { headers: authHeaders() })
+    const result = await response.json()
+    if (result.ok) {
+      availableOptions.value = result.data || []
     }
   } catch (e) {
     console.error('[StrategyEditor] fetchOptions error:', e)
@@ -64,9 +69,10 @@ async function fetchOptions() {
 async function fetchStrategies() {
   loading.value = true
   try {
-    const res = await agentRequest('llm_get_strategies', {})
-    if (res.ok) {
-      strategies.value = (res.strategies || []).map((s: any) => ({
+    const response = await fetch(`${API_BASE}/api/llm/strategies`, { headers: authHeaders() })
+    const result = await response.json()
+    if (result.ok) {
+      strategies.value = (result.data || []).map((s: any) => ({
         id: s.id,
         name: s.name,
         type: s.type,
@@ -133,20 +139,25 @@ async function saveStrategy() {
   }
 
   try {
-    const res = await agentRequest('llm_save_strategy', {
-      id: s.id,
-      name: editForm.value.name.trim(),
-      type: editForm.value.type,
-      options: editForm.value.options.map(parseOptionValue),
+    const response = await fetch(`${API_BASE}/api/llm/save-strategy`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({
+        id: s.id,
+        name: editForm.value.name.trim(),
+        type: editForm.value.type,
+        options: editForm.value.options.map(parseOptionValue),
+      }),
     })
-    if (res.ok) {
+    const result = await response.json()
+    if (result.ok) {
       ElMessage.success('保存成功')
       await fetchStrategies()
       // 重新选中
-      if (res.id) selectedId.value = res.id
+      if (result.data?.id) selectedId.value = result.data.id
       else selectStrategy(s.id)
     } else {
-      ElMessage.error(res.error || '保存失败')
+      ElMessage.error(result.error || '保存失败')
     }
   } catch {
     ElMessage.error('保存失败')
@@ -168,13 +179,17 @@ async function deleteStrategy() {
   }
 
   try {
-    const res = await agentRequest('llm_delete_strategy', { id: s.id })
-    if (res.ok) {
+    const response = await fetch(`${API_BASE}/api/llm/delete-strategy?id=${s.id}`, {
+      method: 'POST',
+      headers: authHeaders(),
+    })
+    const result = await response.json()
+    if (result.ok) {
       ElMessage.success('已删除')
       selectedId.value = null
       await fetchStrategies()
     } else {
-      ElMessage.error(res.error || '删除失败')
+      ElMessage.error(result.error || '删除失败')
     }
   } catch {
     ElMessage.error('删除失败')
@@ -186,12 +201,17 @@ async function setActive() {
   if (!s) return
 
   try {
-    const res = await agentRequest('llm_set_active_strategy', { id: s.id })
-    if (res.ok) {
+    const response = await fetch(`${API_BASE}/api/llm/set-active-strategy`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ id: s.id }),
+    })
+    const result = await response.json()
+    if (result.ok) {
       ElMessage.success('已激活')
       await fetchStrategies()
     } else {
-      ElMessage.error(res.error || '激活失败')
+      ElMessage.error(result.error || '激活失败')
     }
   } catch {
     ElMessage.error('激活失败')

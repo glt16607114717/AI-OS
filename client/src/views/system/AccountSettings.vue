@@ -38,10 +38,10 @@ function authHeaders(): Record<string, string> {
 async function fetchUsers() {
   loading.value = true
   try {
-    const res = await fetch(`${BASE_URL}/api/system/users`, { headers: authHeaders() })
+    const res = await fetch(`${BASE_URL}/api/users`, { headers: authHeaders() })
     const data = await res.json()
     if (data.ok) {
-      users.value = data.data
+      users.value = data.data.users
     } else if (data.detail === '未登录' || res.status === 401) {
       ElMessage.error('请先登录管理员账号')
     }
@@ -64,7 +64,7 @@ async function doAdd() {
   if (!addForm.username.trim()) { ElMessage.warning('请输入用户名'); return }
   if (addForm.password.length < 4) { ElMessage.warning('密码至少 4 个字符'); return }
   try {
-    const res = await fetch(`${BASE_URL}/api/system/users`, {
+    const res = await fetch(`${BASE_URL}/api/users/create`, {
       method: 'POST',
       headers: authHeaders(),
       body: JSON.stringify(addForm),
@@ -94,10 +94,10 @@ async function doEdit() {
   if (!editTarget.value) return
   if (editForm.password.length < 4) { ElMessage.warning('密码至少 4 个字符'); return }
   try {
-    const res = await fetch(`${BASE_URL}/api/system/users/${editTarget.value.id}`, {
-      method: 'PUT',
+    const res = await fetch(`${BASE_URL}/api/users/update-password`, {
+      method: 'POST',
       headers: authHeaders(),
-      body: JSON.stringify({ password: editForm.password }),
+      body: JSON.stringify({ id: editTarget.value.id, password: editForm.password }),
     })
     const data = await res.json()
     if (data.ok) {
@@ -118,10 +118,10 @@ async function toggleStatus(user: User) {
   const label = newStatus === 1 ? '启用' : '停用'
   try {
     await ElMessageBox.confirm(`确认${label}用户「${user.username}」？`, '提示', { type: 'warning' })
-    const res = await fetch(`${BASE_URL}/api/system/users/${user.id}/status`, {
-      method: 'PATCH',
+    const res = await fetch(`${BASE_URL}/api/users/toggle-status`, {
+      method: 'POST',
       headers: authHeaders(),
-      body: JSON.stringify({ status: newStatus }),
+      body: JSON.stringify({ id: user.id }),
     })
     const data = await res.json()
     if (data.ok) {
@@ -138,10 +138,10 @@ async function toggleAdmin(user: User) {
   const label = newAdmin ? '设为管理员' : '取消管理员'
   try {
     await ElMessageBox.confirm(`确认${label}「${user.username}」？`, '提示', { type: 'warning' })
-    const res = await fetch(`${BASE_URL}/api/system/users/${user.id}/admin`, {
-      method: 'PATCH',
+    const res = await fetch(`${BASE_URL}/api/users/toggle-admin`, {
+      method: 'POST',
       headers: authHeaders(),
-      body: JSON.stringify({ is_admin: newAdmin }),
+      body: JSON.stringify({ id: user.id }),
     })
     const data = await res.json()
     if (data.ok) {
@@ -156,7 +156,11 @@ async function toggleAdmin(user: User) {
 async function doDelete(user: User) {
   try {
     await ElMessageBox.confirm(`确认删除用户「${user.username}」？此操作不可恢复。`, '警告', { type: 'error' })
-    const res = await fetch(`${BASE_URL}/api/system/users/${user.id}`, { method: 'DELETE', headers: authHeaders() })
+    const res = await fetch(`${BASE_URL}/api/users/delete`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ id: user.id }),
+    })
     const data = await res.json()
     if (data.ok) {
       ElMessage.success('已删除')

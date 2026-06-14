@@ -5,7 +5,10 @@ import { API_BASE } from '../../api'
 
 Chart.register(...registerables)
 
-const agentRequest = window.aiOS.agentRequest
+function authHeaders() {
+  const token = localStorage.getItem('aios_token')
+  return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }
+}
 
 interface VendorStat {
   name: string
@@ -288,9 +291,10 @@ function renderCharts() {
 async function fetchStats() {
   loading.value = true
   try {
-    const res = await agentRequest('llm_get_stats', { days: days.value })
-    if (res.ok) {
-      stats.value = res.stats || null
+    const response = await fetch(`${API_BASE}/api/stats/summary?days=${days.value}`, { headers: authHeaders() })
+    const result = await response.json()
+    if (result.ok) {
+      stats.value = result.data || null
       await nextTick()
       renderCharts()
     }
