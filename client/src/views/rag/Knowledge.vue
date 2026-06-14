@@ -42,7 +42,7 @@ function goPage(page: number) {
 async function loadDocs() {
   loading.value = true
   try {
-    const res = await window.aiOS.agentRequest('rag_list')
+    const res = await window.aiOS.agentRequest('rag_list', {})
     if (res.ok) {
       documents.value = res.documents || []
       total.value = res.total || 0

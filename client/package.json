@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
+    "@types/chart.js": "^2.9.41",
     "chart.js": "^4.5.1",
     "echarts": "^6.1.0",
     "element-plus": "^2.14.1",
@@ -51,6 +52,11 @@
       {
         "from": "public/icon.ico",
         "to": "icon.ico"
+      },
+      {
+        "from": "backend/python",
+        "to": "backend/python",
+        "filter": ["**/*", "!__pycache__/**", "!**/*.pyc", "!models/bge-m3-onnx-int8/model_quantized.onnx"]
       }
     ],
     "generateUpdatesFilesForAllChannels": false,

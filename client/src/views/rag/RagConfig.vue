@@ -47,7 +47,7 @@ const testing = ref(false)
 async function fetchStatus() {
   loading.value = true
   try {
-    const res = await window.aiOS.agentRequest('rag_status')
+    const res = await window.aiOS.agentRequest('rag_status', {})
     status.value = res
   } catch (e: any) {
     console.error('Failed to fetch RAG status:', e)
@@ -85,7 +85,7 @@ async function testEmbed() {
 async function resetStore() {
   if (!confirm('确定要清空向量库吗？此操作不可恢复。')) return
   try {
-    await window.aiOS.agentRequest('rag_reset')
+    await window.aiOS.agentRequest('rag_reset', {})
     await fetchStatus()
   } catch (e) {
     console.error(e)

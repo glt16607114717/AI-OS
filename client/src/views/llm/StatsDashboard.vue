@@ -277,7 +277,7 @@ function renderCharts() {
           x: { beginAtZero: true, grid: { color: '#f0f0f0' }, ticks: { font: { size: 11 } } },
           y: { grid: { display: false }, ticks: {
             font: { size: 12 },
-            color: (ctx) => {
+            color: (ctx: any) => {
               const label = ctx.tick?.label as string
               return label === currentUsername.value ? '#f56c6c' : '#606266'
             },

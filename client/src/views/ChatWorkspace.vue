@@ -29,7 +29,7 @@ const originalCode = renderer.code.bind(renderer)
 renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
   // 流式过程中不渲染 ECharts，只显示代码块
   if (!_renderingDone) {
-    return originalCode({ text, lang })
+    return originalCode({ type: 'code', raw: text, text, lang })
   }
 
   // 仅在消息完成后检测 ECharts
@@ -51,7 +51,7 @@ renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
     return `<div class="echarts-chart" id="${chartId}" style="width:100%;height:380px;margin:8px 0;border:1px solid #e5e7eb;border-radius:6px;overflow:hidden;"><script type="text/template">${jsonStr}<\/script></div>`
   }
 
-  return originalCode({ text, lang })
+  return originalCode({ type: 'code', raw: text, text, lang })
 }
 
 marked.use({ renderer })
@@ -567,7 +567,7 @@ function onMessageDone() {
             </div>
           </div>
           <!-- AI 回复内容 -->
-          <div v-if="msg.content" class="ai-text" v-html="renderMarkdown(msg.content, msg.done, i)"></div>
+          <div v-if="msg.content" class="ai-text" v-html="renderMarkdown(msg.content, msg.done ?? false, i)"></div>
         </div>
       </div>
     </div>
