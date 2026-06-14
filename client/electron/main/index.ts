@@ -231,13 +231,10 @@ function registerIpcHandlers() {
     return await agentRestart()
   })
 
-  // Setup 检查
+  // Setup 检查（只检测 health，返回 true = 需要配置）
   ipcMain.handle('setup:check', async () => {
-    const mgr = getSetupManager()
-    const pythonReady = mgr.isPythonReady()
-    const agentOk = (await agentHealthCheck()).ok
-    // 如果 Python 就绪但 Agent 没跑，需要启动
-    return pythonReady && agentOk
+    const health = await agentHealthCheck()
+    return !health.ok
   })
 
   // Setup 执行
