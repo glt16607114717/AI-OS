@@ -230,24 +230,41 @@ function stopSplashAnimation() {
 
 onMounted(async () => {
   showDashboard.value = false
+  needSetup.value = false
   // Start splash animation after DOM updates
   await nextTick()
   startSplashAnimation()
   setTimeout(async () => {
     stopSplashAnimation()
-    showDashboard.value = true
 
-    // Check if Python environment needs setup
-    if (windowAiOS?.checkSetupNeeded) {
+    // 判断是否需要环境配置：
+    // 1. localStorage 没有 setup_completed 标记 → 首次运行，必须配置
+    // 2. 有标记但 checkSetupNeeded 返回 false → 环境损坏，重新配置
+    const setupDone = localStorage.getItem('aios_setup_completed')
+    let setupRequired = false
+
+    if (!setupDone) {
+      // 首次运行，强制进入环境配置
+      setupRequired = true
+      console.log('[AI-OS] First run, setup required')
+    } else if (windowAiOS?.checkSetupNeeded) {
       try {
         const ready = await windowAiOS.checkSetupNeeded()
+        console.log('[AI-OS] setup check result:', ready)
         if (!ready) {
-          needSetup.value = true
-          await runSetup()
+          setupRequired = true
         }
       } catch (e) {
         console.error('[AI-OS] Setup check failed:', e)
       }
+    }
+
+    if (setupRequired) {
+      needSetup.value = true
+      showDashboard.value = true
+      await runSetup()
+    } else {
+      showDashboard.value = true
     }
   }, 7000)
 })
@@ -268,6 +285,7 @@ async function runSetup() {
     })
 
     if (result?.ok) {
+      localStorage.setItem('aios_setup_completed', '1')
       setupDone.value = true
       setTimeout(() => {
         needSetup.value = false
