@@ -242,19 +242,20 @@ onMounted(async () => {
     }
   }
 
-  // 显示 splash 动画
-  await nextTick()
-  startSplashAnimation()
-
-  setTimeout(() => {
-    stopSplashAnimation()
+  if (setupRequired) {
+    // 需要配置：直接进入 SetupWizard，不显示 splash
     showDashboard.value = true
-
-    if (setupRequired) {
-      needSetup.value = true
-      runSetup()
-    }
-  }, 3000)
+    needSetup.value = true
+    runSetup()
+  } else {
+    // 不需要配置：显示 splash 动画后进入 Dashboard
+    await nextTick()
+    startSplashAnimation()
+    setTimeout(() => {
+      stopSplashAnimation()
+      showDashboard.value = true
+    }, 7000)
+  }
 })
 
 async function runSetup() {
