@@ -33,8 +33,10 @@ func main() {
 	service.EnsureStrategyTable()
 	service.EnsureGodRulesTable()
 	service.EnsureEmbeddingTable()
-	service.EnsureVoiceTable()
 	log.Println("[init] 数据库表初始化完成")
+
+	// 注入 API Key 查询函数（避免循环依赖）
+	middleware.APIKeyLookup = service.GetUserByAPIKey
 
 	// 启动额度监控
 	service.StartQuotaMonitor()
@@ -86,13 +88,6 @@ func main() {
 
 		// 技能
 		r.Get("/api/skills", handler.GetSkillList)
-
-		// 语音指令
-		r.Get("/api/voice/status", handler.VoiceGetStatus)
-		r.Post("/api/voice/add", handler.VoiceAddCommand)
-		r.Post("/api/voice/update", handler.VoiceUpdateCommand)
-		r.Post("/api/voice/delete", handler.VoiceDeleteCommand)
-		r.Post("/api/voice/set-enabled", handler.VoiceSetEnabled)
 
 		// RAG 知识库
 		r.Get("/api/rag/status", handler.RagStatus)

@@ -344,8 +344,13 @@ def _voice_loop() -> None:
                         # 标定模式：有 position 则单击
                         elif cmd.get("position"):
                             pos = cmd["position"]
-                            log(f"语音指令 [{matched_key}] -> 点击 ({pos[0]},{pos[1]})", "VOICE")
-                            _click_point(pos[0], pos[1])
+                            # 兼容 dict {"x":..,"y":..} 和 list [x,y] 两种格式
+                            if isinstance(pos, dict):
+                                px, py = pos.get("x", 0), pos.get("y", 0)
+                            else:
+                                px, py = pos[0], pos[1]
+                            log(f"语音指令 [{matched_key}] -> 点击 ({px},{py})", "VOICE")
+                            _click_point(px, py)
                 if not matched:
                     _add_recognize_log(detected_text, "", False)
     except Exception as e:

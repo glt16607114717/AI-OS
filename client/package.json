@@ -1,6 +1,6 @@
 {
   "name": "ai-os-client",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "AI-OS Enterprise AI Asset Operating System",
   "author": "桂良涛 <桂良涛@nndrobot.com>",
   "main": "dist-electron/main/index.js",

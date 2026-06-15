@@ -426,11 +426,14 @@ func SystemMe(w http.ResponseWriter, r *http.Request) {
 		errResponse(w, "未登录", 401)
 		return
 	}
+	// 查询用户的 api_key
+	apiKey, _ := service.GetUserAPIKey(session.UserID)
 	okResponse(w, map[string]interface{}{
 		"user_id":   session.UserID,
 		"username":  session.Username,
 		"is_admin":  session.IsAdmin,
 		"token":     session.Expire.Format("2006-01-02T15:04:05Z07:00"),
+		"api_key":   apiKey,
 	})
 }
 

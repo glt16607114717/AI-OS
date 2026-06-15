@@ -13,6 +13,9 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// APIKeyLookup 由 service 包在初始化时注入，避免循环依赖
+var APIKeyLookup func(apiKey string) (userID int, username string, isAdmin bool, err error)
+
 var (
 	Sessions   = make(map[string]*model.Session) // token -> session
 	UserTokens = make(map[int]string)             // user_id -> token
@@ -59,8 +62,21 @@ func CreateSession(userID int, username string, isAdmin bool) string {
 	return token
 }
 
-// GetSession 从请求获取会话
+// GetSession 从请求获取会话（支持 Authorization/Cookie/?key= 三种方式）
 func GetSession(r *http.Request) *model.Session {
+	// 方式1: URL query ?key=xxx（API Key 认证）
+	if apiKey := r.URL.Query().Get("key"); apiKey != "" && APIKeyLookup != nil {
+		uid, username, isAdmin, err := APIKeyLookup(apiKey)
+		if err == nil && uid > 0 {
+			return &model.Session{
+				UserID:   uid,
+				Username: username,
+				IsAdmin:  isAdmin,
+				Expire:   time.Now().Add(24 * time.Hour),
+			}
+		}
+	}
+
 	auth := r.Header.Get("Authorization")
 	if auth == "" {
 		// 尝试从 cookie 获取

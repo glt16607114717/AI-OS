@@ -8,12 +8,11 @@ import {
   VideoPause,
   Aim,
   Download,
+  Document,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { API_BASE } from '../api'
 
 interface VoiceCommand {
-  id: number
   phrase: string
   position: { x: number; y: number } | null
   actions: any[] | null
@@ -38,6 +37,10 @@ const currentMousePos = ref<{ x: number; y: number } | null>(null)
 const recording = ref(false)
 const recordingIndex = ref(-1)
 
+// 识别日志
+const recognizeLogs = ref<any[]>([])
+const showLogPanel = ref(false)
+
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
 /** 判断 window.aiOS 是否可用（浏览器开发环境下不存在） */
@@ -56,7 +59,7 @@ async function safeAgent<T = any>(fn: () => Promise<T>): Promise<T | null> {
   }
 }
 
-/** 检测本地 Agent 健康状态 + 语音状态 */
+/** 检测本地 Agent 健康状态 + 加载语音数据（全本地） */
 async function checkAgent() {
   if (!hasAgent()) {
     agentOnline.value = false
@@ -72,156 +75,78 @@ async function checkAgent() {
       if (status) {
         agentListening.value = status.listening ?? false
         modelReady.value = status.model_ready ?? false
+        voiceEnabled.value = status.enabled ?? false
+        commands.value = (status.commands ?? []).map((c: any) => ({
+          phrase: c.phrase ?? '',
+          position: c.position ?? null,
+          actions: c.actions ?? null,
+          enabled: c.enabled ?? true,
+        }))
+        // 如果开关已开但监听未启动，自动触发一次
+        if (status.enabled && !status.listening && status.model_ready) {
+          await safeAgent(() =>
+            window.aiOS.agentRequest('voice_set_enabled', { enabled: true })
+          )
+          agentListening.value = true
+        }
       }
     }
   } catch (e: any) {
     console.error('[VoiceAssistant] checkAgent:', e)
-    ElMessage.error('检查本地服务状态失败: ' + (e?.message || '未知错误'))
     agentOnline.value = false
   }
 }
 
-async function fetchStatus() {
-  loading.value = true
-  try {
-    const token = localStorage.getItem('aios_token')
-    const res = await fetch(`${API_BASE}/api/voice/status`, {
-      headers: { 'Authorization': `Bearer ${token}` }
-    })
-    const data = await res.json()
-    if (data.ok) {
-      // 后端 okResponse 包装：{ok: true, data: {enabled, commands}}
-      const payload = data.data || data
-      voiceEnabled.value = payload.enabled ?? false
-      commands.value = (payload.commands ?? []).map((c: any) => ({
-        id: c.id,
-        phrase: c.phrase ?? '',
-        position: c.position ? (typeof c.position === 'string' ? JSON.parse(c.position) : c.position) : null,
-        actions: c.actions ? (typeof c.actions === 'string' ? JSON.parse(c.actions) : c.actions) : null,
-        enabled: c.enabled ?? true,
-      }))
-    } else {
-      ElMessage.error(data.error || '加载语音状态失败')
-    }
-  } catch (e: any) {
-    console.error('[VoiceAssistant] fetchStatus 失败:', e)
-    ElMessage.error('加载语音状态失败: ' + e.message)
-  }
-  loading.value = false
-}
-
-/** 同步指令列表到本地 Agent 的 voice_config.json */
-async function syncToAgent() {
-  if (!agentOnline.value) return
-  await safeAgent(() =>
-    window.aiOS.agentRequest('voice_sync_commands', { commands: commands.value })
-  )
-}
-
 async function toggleEnabled(val: boolean) {
-  try {
-    const token = localStorage.getItem('aios_token')
-    const res = await fetch(`${API_BASE}/api/voice/set-enabled`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ enabled: val })
-    })
-    const data = await res.json()
-    if (!data.ok) {
-      ElMessage.error(data.error || '设置失败')
-      voiceEnabled.value = !val
-      return
-    }
-    // 通知本地 Agent 启动/停止监听
-    if (agentOnline.value) {
-      await safeAgent(() =>
-        window.aiOS.agentRequest('voice_set_enabled', { enabled: val })
-      )
-    }
-  } catch (e: any) {
-    console.error('[VoiceAssistant] toggleEnabled 失败:', e)
-    ElMessage.error('设置失败: ' + e.message)
+  const result = await safeAgent(() =>
+    window.aiOS.agentRequest('voice_set_enabled', { enabled: val })
+  )
+  if (!result?.ok) {
+    ElMessage.error('设置失败')
     voiceEnabled.value = !val
   }
 }
 
 async function addCommand() {
-  try {
-    const token = localStorage.getItem('aios_token')
-    if (!token) {
-      ElMessage.warning('请先登录')
-      return
-    }
-    const res = await fetch(`${API_BASE}/api/voice/add`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ phrase: '' })
+  if (!agentOnline.value) {
+    ElMessage.warning('本地服务未启动')
+    return
+  }
+  const result = await safeAgent(() =>
+    window.aiOS.agentRequest('voice_add_command', { phrase: '' })
+  )
+  if (result?.ok) {
+    commands.value.push({
+      phrase: '',
+      position: null,
+      actions: null,
+      enabled: true,
     })
-    const data = await res.json()
-    if (data.ok && data.data) {
-      commands.value.push({
-        id: data.data.id,
-        phrase: '',
-        position: null,
-        actions: null,
-        enabled: true,
-      })
-      syncToAgent()
-    } else {
-      ElMessage.error(data.error || '添加失败')
-    }
-  } catch (e: any) {
-    console.error('[VoiceAssistant] addCommand 失败:', e)
-    ElMessage.error('网络错误：' + e.message)
+  } else {
+    ElMessage.error('添加失败')
   }
 }
 
 async function updateCommand(index: number, updates: Record<string, any>) {
-  const cmd = commands.value[index]
-  if (!cmd) return
-  try {
-    const token = localStorage.getItem('aios_token')
-    const res = await fetch(`${API_BASE}/api/voice/update?id=${cmd.id}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify(updates)
-    })
-    const data = await res.json()
-    if (!data.ok) {
-      ElMessage.error(data.error || '更新失败')
-      return
-    }
-    syncToAgent()
-  } catch (e: any) {
-    console.error('[VoiceAssistant] updateCommand 失败:', e)
-    ElMessage.error('更新指令失败: ' + e.message)
-  }
+  if (!agentOnline.value) return
+  await safeAgent(() =>
+    window.aiOS.agentRequest('voice_update_command', { index, ...updates })
+  )
 }
 
 async function removeCommand(index: number) {
-  const cmd = commands.value[index]
-  if (!cmd) return
-  try {
-    const token = localStorage.getItem('aios_token')
-    const res = await fetch(`${API_BASE}/api/voice/delete?id=${cmd.id}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({})
-    })
-    const data = await res.json()
-    if (!data.ok) {
-      ElMessage.error(data.error || '删除失败')
-      return
-    }
+  if (!agentOnline.value) return
+  const result = await safeAgent(() =>
+    window.aiOS.agentRequest('voice_remove_command', { index })
+  )
+  if (result?.ok) {
     commands.value.splice(index, 1)
-    syncToAgent()
-  } catch (e: any) {
-    console.error('[VoiceAssistant] removeCommand 失败:', e)
-    ElMessage.error('删除指令失败: ' + e.message)
+  } else {
+    ElMessage.error('删除失败')
   }
 }
 
-/** 标定：启动后轮询本地 Agent 状态，空格确认后保存到云端 */
+/** 标定：启动后轮询本地 Agent 状态，空格确认后保存 */
 async function startCalibration(i: number) {
   if (!agentOnline.value) {
     ElMessage.warning('本地服务未启动')
@@ -232,14 +157,12 @@ async function startCalibration(i: number) {
   calibrating.value = true
   calibratingIndex.value = i
 
-  // 调用本地 Agent 启动标定（非阻塞，后台线程监听空格）
   await safeAgent(() =>
     window.aiOS.agentRequest('voice_start_calibration', { index: i })
   )
 
   ElMessage.info('请将鼠标移动到目标位置，然后按空格键确认')
 
-  // 轮询标定状态，直到完成或取消
   const pollCalibration = async () => {
     let elapsed = 0
     const timer = setInterval(async () => {
@@ -251,17 +174,14 @@ async function startCalibration(i: number) {
         clearInterval(timer)
         return
       }
-      // 实时更新当前鼠标位置
       if (status.mouse_pos) {
         currentMousePos.value = { x: status.mouse_pos[0], y: status.mouse_pos[1] }
       }
-      // 标定完成（calibrating 变为 false）
       if (!status.calibrating) {
         clearInterval(timer)
         const pos = status.mouse_pos
         if (pos && (pos[0] !== 0 || pos[1] !== 0)) {
           const position = { x: pos[0], y: pos[1] }
-          // 更新本地状态，避免重复调用 updateCommand
           commands.value[i].position = position
           await updateCommand(i, { position })
           ElMessage.success(`标定成功：(${position.x}, ${position.y})`)
@@ -272,7 +192,6 @@ async function startCalibration(i: number) {
         calibratingIndex.value = -1
         currentMousePos.value = null
       }
-      // 超时 60 秒自动取消
       if (elapsed > 60) {
         clearInterval(timer)
         calibrating.value = false
@@ -349,6 +268,31 @@ async function downloadModel() {
   ElMessage.success('模型下载已开始，请等待几分钟')
 }
 
+/** 加载识别日志 */
+async function loadRecognizeLogs() {
+  const result = await safeAgent(() =>
+    window.aiOS.agentRequest('voice_recognize_log', {})
+  )
+  if (result?.ok && result.logs) {
+    recognizeLogs.value = result.logs
+  }
+}
+
+/** 清空识别日志 */
+async function clearRecognizeLogs() {
+  await safeAgent(() =>
+    window.aiOS.agentRequest('voice_clear_recognize_log', {})
+  )
+  recognizeLogs.value = []
+}
+
+function toggleLogPanel() {
+  showLogPanel.value = !showLogPanel.value
+  if (showLogPanel.value) {
+    loadRecognizeLogs()
+  }
+}
+
 function getCommandMode(cmd: VoiceCommand): string {
   if (cmd.actions && cmd.actions.length > 0) return 'recording'
   if (cmd.position) return 'calibration'
@@ -385,7 +329,6 @@ const agentStatusType = computed<'success' | 'info' | 'warning' | 'danger'>(() =
 })
 
 onMounted(() => {
-  fetchStatus()
   checkAgent()
   pollTimer = setInterval(checkAgent, 10000)
 })
@@ -400,7 +343,45 @@ onUnmounted(() => {
     <!-- Header -->
     <div class="page-header">
       <h2 class="page-title">语音助手</h2>
+      <el-button
+        :type="showLogPanel ? 'primary' : 'default'"
+        :icon="Document"
+        size="small"
+        @click="toggleLogPanel"
+        class="log-btn"
+      >
+        识别日志
+      </el-button>
     </div>
+
+    <!-- 识别日志面板 -->
+    <el-collapse-transition>
+      <el-card v-if="showLogPanel" shadow="never" class="log-card">
+        <template #header>
+          <div class="log-header">
+            <span>语音识别日志</span>
+            <el-button size="small" @click="loadRecognizeLogs">刷新</el-button>
+            <el-button size="small" type="danger" plain @click="clearRecognizeLogs">清空</el-button>
+          </div>
+        </template>
+        <div v-if="recognizeLogs.length === 0" class="empty-hint">
+          暂无识别记录
+        </div>
+        <div v-else class="log-list">
+          <div
+            v-for="(log, i) in recognizeLogs.slice().reverse()"
+            :key="i"
+            class="log-item"
+            :class="{ 'log-matched': log.matched }"
+          >
+            <span class="log-time">{{ log.time || '' }}</span>
+            <span class="log-text">"{{ log.text }}"</span>
+            <el-tag v-if="log.matched" type="success" size="small">已匹配</el-tag>
+            <el-tag v-else type="info" size="small">未匹配</el-tag>
+          </div>
+        </div>
+      </el-card>
+    </el-collapse-transition>
 
     <!-- Status Card -->
     <el-card shadow="never" class="status-card">
@@ -503,7 +484,7 @@ onUnmounted(() => {
 
       <div
         v-for="(cmd, i) in commands"
-        :key="cmd.id"
+        :key="i"
         class="command-item"
         :class="{ 'command-active': isCommandActive(i) }"
       >
@@ -611,6 +592,56 @@ onUnmounted(() => {
   font-size: 18px;
   font-weight: 600;
   color: #303133;
+  flex: 1;
+}
+
+.log-btn {
+  margin-left: auto;
+}
+
+/* 识别日志面板 */
+.log-card {
+  border-radius: 10px;
+}
+
+.log-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.log-list {
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.log-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #f5f7fa;
+  font-size: 13px;
+}
+
+.log-item.log-matched {
+  background: #f0f9eb;
+}
+
+.log-time {
+  color: #909399;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.log-text {
+  flex: 1;
+  color: #303133;
+  font-weight: 500;
 }
 
 /* Status Card */

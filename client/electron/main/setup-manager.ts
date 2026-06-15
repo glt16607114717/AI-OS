@@ -349,24 +349,14 @@ export class SetupManager {
       detail: '正在注册计划任务...',
     })
 
-    // PowerShell 脚本内容（直接编码，不保存文件，避免窗口显示）
+    // PowerShell 脚本：只注册计划任务（杀进程/删旧任务由安装器负责）
+    const watchdogScript = agentScript.replace('main.py', 'watchdog.py')
     const scriptContent = [
       `$ErrorActionPreference = 'Continue'`,
-      `schtasks /End /TN 'AI-OS-Watchdog' 2>&1 | Out-Null`,
-      `Stop-Process -Name pythonw -Force -ErrorAction SilentlyContinue`,
-      `Stop-Process -Name python -Force -ErrorAction SilentlyContinue`,
-      `Stop-Process -Name ai-os-agent -Force -ErrorAction SilentlyContinue`,
-      `Start-Sleep -Seconds 2`,
-      `$taskName = '${taskName}'`,
-      `schtasks /Delete /TN $taskName /F 2>&1 | Out-Null`,
-      `schtasks /Create /SC ONLOGON /TN $taskName /TR "'${pythonwExe}' -X utf8 '${agentScript}'" /RL HIGHEST /F`,
-      `$wdName = 'AI-OS-Watchdog'`,
-      `$wdScript = '${agentScript.replace('main.py', 'watchdog.py')}'`,
-      `schtasks /Delete /TN $wdName /F 2>&1 | Out-Null`,
-      `schtasks /Create /SC MINUTE /MO 1 /TN $wdName /TR "'${pythonwExe}' -X utf8 '$wdScript'" /F`,
-      `$dataDir = 'C:\\ProgramData\\AI-OS\\data'`,
-      `if (-not (Test-Path $dataDir)) { New-Item -ItemType Directory -Path $dataDir -Force | Out-Null }`,
-      `icacls $dataDir /grant Users:F /T /Q 2>&1 | Out-Null`,
+      `schtasks /Create /SC ONLOGON /TN '${taskName}' /TR "'${pythonwExe}' -X utf8 '${agentScript}'" /RL HIGHEST /F`,
+      `schtasks /Create /SC MINUTE /MO 1 /TN 'AI-OS-Watchdog' /TR "'${pythonwExe}' -X utf8 '${watchdogScript}'" /F`,
+      `if (-not (Test-Path 'C:\\ProgramData\\AI-OS\\data')) { New-Item -ItemType Directory -Path 'C:\\ProgramData\\AI-OS\\data' -Force | Out-Null }`,
+      `icacls 'C:\\ProgramData\\AI-OS\\data' /grant Users:F /T /Q 2>&1 | Out-Null`,
     ].join(';')
 
     this.debug('Svc script: ' + scriptContent)
