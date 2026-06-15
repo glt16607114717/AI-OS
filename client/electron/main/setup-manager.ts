@@ -349,8 +349,7 @@ export class SetupManager {
       detail: '正在注册计划任务...',
     })
 
-    // PowerShell 脚本：停 Watchdog → 杀旧进程 → 注销旧任务 → 注册新计划任务
-    const scriptPath = path.join(this.appDir, '.temp-svc-setup.ps1')
+    // PowerShell 脚本内容（直接编码，不保存文件，避免窗口显示）
     const scriptContent = [
       `$ErrorActionPreference = 'Continue'`,
       `schtasks /End /TN 'AI-OS-Watchdog' 2>&1 | Out-Null`,
@@ -365,23 +364,24 @@ export class SetupManager {
       `$wdScript = '${agentScript.replace('main.py', 'watchdog.py')}'`,
       `schtasks /Delete /TN $wdName /F 2>&1 | Out-Null`,
       `schtasks /Create /SC MINUTE /MO 1 /TN $wdName /TR "'${pythonwExe}' -X utf8 '$wdScript'" /F`,
-      `icacls "C:\\ProgramData\\AI-OS\\data" /grant Users:F /T /Q 2>&1 | Out-Null`,
-    ].join('\r\n')
+      `$dataDir = 'C:\\ProgramData\\AI-OS\\data'`,
+      `if (-not (Test-Path $dataDir)) { New-Item -ItemType Directory -Path $dataDir -Force | Out-Null }`,
+      `icacls $dataDir /grant Users:F /T /Q 2>&1 | Out-Null`,
+    ].join(';')
 
-    fs.writeFileSync(scriptPath, scriptContent, 'utf-8')
-    this.debug('Svc script: ' + scriptPath)
+    this.debug('Svc script: ' + scriptContent)
 
     try {
+      // 编码 PowerShell 命令，直接执行而不保存文件
+      const encodedScript = Buffer.from(scriptContent, 'utf-8').toString('base64')
       await this.execAsync('powershell.exe', [
-        '-NoProfile', '-Command',
-        `Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File','${scriptPath}'`,
+        '-NoProfile', '-WindowStyle', 'Hidden', '-Command',
+        `Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-EncodedCommand','${encodedScript}'`,
       ])
       this.debug('Svc script done')
     } catch (e: any) {
       this.debug('Svc script error: ' + e.message)
       throw new Error('服务注册失败: ' + e.message)
-    } finally {
-      try { fs.unlinkSync(scriptPath) } catch {}
     }
 
     // 启动计划任务

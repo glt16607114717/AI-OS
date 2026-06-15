@@ -3,7 +3,7 @@ $projectDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Pat
 Set-Location $projectDir
 
 # Output dir is outside project to avoid Trae locking app.asar
-$releaseDir = "D:\ai-os-build5"
+$releaseDir = "D:\ai-os-build"
 
 Write-Host "=== AI-OS Build ===" -ForegroundColor Cyan
 

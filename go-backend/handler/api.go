@@ -167,7 +167,10 @@ func ListUsers(w http.ResponseWriter, r *http.Request) {
 		errResponse(w, err.Error(), 500)
 		return
 	}
-	okResponse(w, users)
+	if users == nil {
+		users = []map[string]interface{}{}
+	}
+	okResponse(w, map[string]interface{}{"users": users})
 }
 
 func CreateUser(w http.ResponseWriter, r *http.Request) {
@@ -189,10 +192,9 @@ func CreateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func UpdateUserPassword(w http.ResponseWriter, r *http.Request) {
-	idStr := r.URL.Query().Get("id")
-	id, _ := strconv.Atoi(idStr)
 	var body map[string]interface{}
 	json.NewDecoder(r.Body).Decode(&body)
+	id := intFloat(body["id"])
 	password, _ := body["password"].(string)
 	if err := service.UpdateUserPassword(id, password); err != nil {
 		errResponse(w, err.Error(), 500)
@@ -202,13 +204,13 @@ func UpdateUserPassword(w http.ResponseWriter, r *http.Request) {
 }
 
 func ToggleUserStatus(w http.ResponseWriter, r *http.Request) {
-	idStr := r.URL.Query().Get("id")
-	id, _ := strconv.Atoi(idStr)
 	var body map[string]interface{}
 	json.NewDecoder(r.Body).Decode(&body)
-	status := 1
-	if v, ok := body["status"].(float64); ok {
-		status = int(v)
+	id := intFloat(body["id"])
+	status := int(intFloat(body["status"]))
+	if status != 1 && status != 2 {
+		errResponse(w, "status 参数无效（1=启用, 2=停用）", 400)
+		return
 	}
 	if err := service.ToggleUserStatus(id, status); err != nil {
 		errResponse(w, err.Error(), 500)
@@ -218,10 +220,9 @@ func ToggleUserStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func ToggleUserAdmin(w http.ResponseWriter, r *http.Request) {
-	idStr := r.URL.Query().Get("id")
-	id, _ := strconv.Atoi(idStr)
 	var body map[string]interface{}
 	json.NewDecoder(r.Body).Decode(&body)
+	id := intFloat(body["id"])
 	isAdmin, _ := body["is_admin"].(bool)
 	if err := service.ToggleUserAdmin(id, isAdmin); err != nil {
 		errResponse(w, err.Error(), 500)
@@ -231,8 +232,9 @@ func ToggleUserAdmin(w http.ResponseWriter, r *http.Request) {
 }
 
 func DeleteUser(w http.ResponseWriter, r *http.Request) {
-	idStr := r.URL.Query().Get("id")
-	id, _ := strconv.Atoi(idStr)
+	var body map[string]interface{}
+	json.NewDecoder(r.Body).Decode(&body)
+	id := intFloat(body["id"])
 	if err := service.DeleteUser(id); err != nil {
 		errResponse(w, err.Error(), 500)
 		return

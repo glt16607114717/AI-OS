@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
 
 interface Suggestion {
   id: number
@@ -84,17 +85,23 @@ function formatTime(dateStr: string | null): string {
 async function fetchSuggestions() {
   loading.value = true
   try {
+    const token = localStorage.getItem('aios_token') || ''
     const params = new URLSearchParams()
     if (filterStatus.value !== 'all') params.set('status', filterStatus.value)
     if (filterDate.value) params.set('date', filterDate.value)
     const qs = params.toString()
-    const res = await fetch(`${API_BASE}/api/ai-advisor/suggestions${qs ? '?' + qs : ''}`)
+    const res = await fetch(`${API_BASE}/api/ai-advisor/suggestions${qs ? '?' + qs : ''}`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
     const data = await res.json()
     if (data?.ok) {
       suggestions.value = data.data || []
+    } else {
+      ElMessage.error(data.error || '加载建议失败')
     }
-  } catch (e) {
+  } catch (e: any) {
     console.error('[AiAdvice] fetchSuggestions error:', e)
+    ElMessage.error('加载建议失败: ' + e.message)
   }
   loading.value = false
 }
@@ -112,8 +119,9 @@ async function processSuggestion(id: number) {
     if (data?.ok) {
       await fetchSuggestions()
     }
-  } catch (e) {
+  } catch (e: any) {
     console.error('[AiAdvice] processSuggestion error:', e)
+    ElMessage.error('处理建议失败: ' + e.message)
   }
   processingIds.value.delete(id)
 }
@@ -121,13 +129,21 @@ async function processSuggestion(id: number) {
 async function triggerAnalyze() {
   analyzing.value = true
   try {
-    const res = await fetch(`${API_BASE}/api/ai-advisor/analyze`, { method: 'POST' })
+    const token = localStorage.getItem('aios_token') || ''
+    const res = await fetch(`${API_BASE}/api/ai-advisor/analyze`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
     const data = await res.json()
     if (data?.ok) {
+      ElMessage.success('分析完成')
       await fetchSuggestions()
+    } else {
+      ElMessage.error(data.error || '分析失败')
     }
-  } catch (e) {
+  } catch (e: any) {
     console.error('[AiAdvice] triggerAnalyze error:', e)
+    ElMessage.error('分析失败: ' + e.message)
   }
   analyzing.value = false
 }

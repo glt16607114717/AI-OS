@@ -40,7 +40,7 @@
     "nodeGypRebuild": false,
     "buildDependenciesFromSource": false,
     "directories": {
-      "output": "D:/ai-os-build6"
+      "output": "D:/ai-os-build"
     },
     "files": [
       "dist/**/*",
@@ -73,7 +73,7 @@
     },
     "nsis": {
       "oneClick": false,
-      "perMachine": true,
+      "perMachine": false,
       "allowElevation": true,
       "allowToChangeInstallationDirectory": true,
       "installerLanguages": [

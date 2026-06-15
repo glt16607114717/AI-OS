@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -276,8 +277,9 @@ func SaveGodRules(enabled bool, rules string, promptOptimize bool) {
 	godRulesLock.Unlock()
 
 	// 持久化
-	conn, _ := GetDB()
-	if conn == nil {
+	conn, err := GetDB()
+	if err != nil {
+		log.Printf("[god_rules] DB连接失败: %v", err)
 		return
 	}
 	e, po := 0, 0
@@ -287,8 +289,12 @@ func SaveGodRules(enabled bool, rules string, promptOptimize bool) {
 	if promptOptimize {
 		po = 1
 	}
-	conn.Exec("TRUNCATE TABLE sys_god_rules")
-	conn.Exec("INSERT INTO sys_god_rules (enabled, rules, prompt_optimize) VALUES (?, ?, ?)", e, rules, po)
+	if _, err := conn.Exec("TRUNCATE TABLE sys_god_rules"); err != nil {
+		log.Printf("[god_rules] TRUNCATE 失败: %v", err)
+	}
+	if _, err := conn.Exec("INSERT INTO sys_god_rules (enabled, rules, prompt_optimize) VALUES (?, ?, ?)", e, rules, po); err != nil {
+		log.Printf("[god_rules] INSERT 失败: %v", err)
+	}
 }
 
 func InjectGodRules(messages []map[string]interface{}) []map[string]interface{} {

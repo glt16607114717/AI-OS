@@ -32,6 +32,7 @@ const modelReady = ref(false)
 // 标定状态
 const calibrating = ref(false)
 const calibratingIndex = ref(-1)
+const currentMousePos = ref<{ x: number; y: number } | null>(null)
 
 // 录制状态
 const recording = ref(false)
@@ -73,7 +74,9 @@ async function checkAgent() {
         modelReady.value = status.model_ready ?? false
       }
     }
-  } catch {
+  } catch (e: any) {
+    console.error('[VoiceAssistant] checkAgent:', e)
+    ElMessage.error('检查本地服务状态失败: ' + (e?.message || '未知错误'))
     agentOnline.value = false
   }
 }
@@ -87,17 +90,22 @@ async function fetchStatus() {
     })
     const data = await res.json()
     if (data.ok) {
-      voiceEnabled.value = data.enabled ?? false
-      commands.value = (data.commands ?? []).map((c: any) => ({
+      // 后端 okResponse 包装：{ok: true, data: {enabled, commands}}
+      const payload = data.data || data
+      voiceEnabled.value = payload.enabled ?? false
+      commands.value = (payload.commands ?? []).map((c: any) => ({
         id: c.id,
         phrase: c.phrase ?? '',
         position: c.position ? (typeof c.position === 'string' ? JSON.parse(c.position) : c.position) : null,
         actions: c.actions ? (typeof c.actions === 'string' ? JSON.parse(c.actions) : c.actions) : null,
         enabled: c.enabled ?? true,
       }))
+    } else {
+      ElMessage.error(data.error || '加载语音状态失败')
     }
   } catch (e: any) {
     console.error('[VoiceAssistant] fetchStatus 失败:', e)
+    ElMessage.error('加载语音状态失败: ' + e.message)
   }
   loading.value = false
 }
@@ -113,23 +121,37 @@ async function syncToAgent() {
 async function toggleEnabled(val: boolean) {
   try {
     const token = localStorage.getItem('aios_token')
-    await fetch(`${API_BASE}/api/voice/set-enabled`, {
+    const res = await fetch(`${API_BASE}/api/voice/set-enabled`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ enabled: val })
     })
+    const data = await res.json()
+    if (!data.ok) {
+      ElMessage.error(data.error || '设置失败')
+      voiceEnabled.value = !val
+      return
+    }
     // 通知本地 Agent 启动/停止监听
     if (agentOnline.value) {
       await safeAgent(() =>
         window.aiOS.agentRequest('voice_set_enabled', { enabled: val })
       )
     }
-  } catch { voiceEnabled.value = !val }
+  } catch (e: any) {
+    console.error('[VoiceAssistant] toggleEnabled 失败:', e)
+    ElMessage.error('设置失败: ' + e.message)
+    voiceEnabled.value = !val
+  }
 }
 
 async function addCommand() {
   try {
     const token = localStorage.getItem('aios_token')
+    if (!token) {
+      ElMessage.warning('请先登录')
+      return
+    }
     const res = await fetch(`${API_BASE}/api/voice/add`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
@@ -145,8 +167,13 @@ async function addCommand() {
         enabled: true,
       })
       syncToAgent()
+    } else {
+      ElMessage.error(data.error || '添加失败')
     }
-  } catch {}
+  } catch (e: any) {
+    console.error('[VoiceAssistant] addCommand 失败:', e)
+    ElMessage.error('网络错误：' + e.message)
+  }
 }
 
 async function updateCommand(index: number, updates: Record<string, any>) {
@@ -154,13 +181,21 @@ async function updateCommand(index: number, updates: Record<string, any>) {
   if (!cmd) return
   try {
     const token = localStorage.getItem('aios_token')
-    await fetch(`${API_BASE}/api/voice/update?id=${cmd.id}`, {
+    const res = await fetch(`${API_BASE}/api/voice/update?id=${cmd.id}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify(updates)
     })
+    const data = await res.json()
+    if (!data.ok) {
+      ElMessage.error(data.error || '更新失败')
+      return
+    }
     syncToAgent()
-  } catch {}
+  } catch (e: any) {
+    console.error('[VoiceAssistant] updateCommand 失败:', e)
+    ElMessage.error('更新指令失败: ' + e.message)
+  }
 }
 
 async function removeCommand(index: number) {
@@ -168,17 +203,25 @@ async function removeCommand(index: number) {
   if (!cmd) return
   try {
     const token = localStorage.getItem('aios_token')
-    await fetch(`${API_BASE}/api/voice/delete?id=${cmd.id}`, {
+    const res = await fetch(`${API_BASE}/api/voice/delete?id=${cmd.id}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({})
     })
+    const data = await res.json()
+    if (!data.ok) {
+      ElMessage.error(data.error || '删除失败')
+      return
+    }
     commands.value.splice(index, 1)
     syncToAgent()
-  } catch {}
+  } catch (e: any) {
+    console.error('[VoiceAssistant] removeCommand 失败:', e)
+    ElMessage.error('删除指令失败: ' + e.message)
+  }
 }
 
-/** 标定：启动后用户按空格键确认鼠标位置 */
+/** 标定：启动后轮询本地 Agent 状态，空格确认后保存到云端 */
 async function startCalibration(i: number) {
   if (!agentOnline.value) {
     ElMessage.warning('本地服务未启动')
@@ -189,28 +232,57 @@ async function startCalibration(i: number) {
   calibrating.value = true
   calibratingIndex.value = i
 
-  const result = await safeAgent(() =>
+  // 调用本地 Agent 启动标定（非阻塞，后台线程监听空格）
+  await safeAgent(() =>
     window.aiOS.agentRequest('voice_start_calibration', { index: i })
   )
 
-  if (result?.error) {
-    calibrating.value = false
-    calibratingIndex.value = -1
-    ElMessage.error(result.error)
-    return
-  }
-
-  // 如果调用阻塞返回了位置（用户已按空格），直接保存
-  if (result?.position) {
-    await updateCommand(i, { position: result.position })
-    ElMessage.success(`标定成功：(${result.position.x}, ${result.position.y})`)
-    calibrating.value = false
-    calibratingIndex.value = -1
-    return
-  }
-
-  // 非阻塞模式：等待用户按空格
   ElMessage.info('请将鼠标移动到目标位置，然后按空格键确认')
+
+  // 轮询标定状态，直到完成或取消
+  const pollCalibration = async () => {
+    let elapsed = 0
+    const timer = setInterval(async () => {
+      elapsed += 0.3
+      const status = await safeAgent(() =>
+        window.aiOS.agentRequest('voice_status', {})
+      )
+      if (!status || !calibrating.value) {
+        clearInterval(timer)
+        return
+      }
+      // 实时更新当前鼠标位置
+      if (status.mouse_pos) {
+        currentMousePos.value = { x: status.mouse_pos[0], y: status.mouse_pos[1] }
+      }
+      // 标定完成（calibrating 变为 false）
+      if (!status.calibrating) {
+        clearInterval(timer)
+        const pos = status.mouse_pos
+        if (pos && (pos[0] !== 0 || pos[1] !== 0)) {
+          const position = { x: pos[0], y: pos[1] }
+          // 更新本地状态，避免重复调用 updateCommand
+          commands.value[i].position = position
+          await updateCommand(i, { position })
+          ElMessage.success(`标定成功：(${position.x}, ${position.y})`)
+        } else {
+          ElMessage.error('标定失败：未获取到有效坐标')
+        }
+        calibrating.value = false
+        calibratingIndex.value = -1
+        currentMousePos.value = null
+      }
+      // 超时 60 秒自动取消
+      if (elapsed > 60) {
+        clearInterval(timer)
+        calibrating.value = false
+        calibratingIndex.value = -1
+        currentMousePos.value = null
+        ElMessage.warning('标定超时')
+      }
+    }, 300)
+  }
+  pollCalibration()
 }
 
 async function cancelCalibration() {
@@ -404,7 +476,12 @@ onUnmounted(() => {
     <div v-if="calibrating" class="calibration-banner">
       <div class="calibration-banner-text">
         <el-icon class="calibration-icon"><Aim /></el-icon>
-        <span>标定中：将鼠标移动到目标位置，按 <kbd>空格键</kbd> 确认</span>
+        <span v-if="currentMousePos">
+          标定中：当前坐标 ({{ currentMousePos.x }}, {{ currentMousePos.y }})，移动到目标位置后按 <kbd>空格键</kbd> 确认
+        </span>
+        <span v-else>
+          标定中：将鼠标移动到目标位置，按 <kbd>空格键</kbd> 确认
+        </span>
       </div>
       <el-button size="small" @click="cancelCalibration">取消标定</el-button>
     </div>

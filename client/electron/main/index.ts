@@ -231,7 +231,7 @@ function registerIpcHandlers() {
     return await agentRestart()
   })
 
-  // Setup 检查（只检测 health，返回 true = 需要配置）
+  // Setup 检查（只检测 health 接口，返回 true = 需要配置）
   ipcMain.handle('setup:check', async () => {
     const health = await agentHealthCheck()
     return !health.ok
@@ -266,21 +266,6 @@ if (!gotTheLock) {
     registerIpcHandlers()
     createTray()
     createWindow()
-
-    // 启动时检查是否需要自动初始化
-    const mgr = getSetupManager()
-    const pythonReady = mgr.isPythonReady()
-    const agentOk = (await agentHealthCheck()).ok
-
-    if (pythonReady && !agentOk) {
-      // Python 已安装但 Agent 没跑，直接启动
-      console.log('[AI-OS] Python ready but agent not running, starting...')
-      try {
-        await mgr.startService()
-      } catch (e) {
-        console.error('[AI-OS] Auto-start failed:', e)
-      }
-    }
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -15,9 +16,10 @@ import (
 func EnsureUserTable() {
 	conn, err := GetDB()
 	if err != nil {
+		log.Printf("[user] DB连接失败: %v", err)
 		return
 	}
-	conn.Exec(`CREATE TABLE IF NOT EXISTS sys_user (
+	if _, err := conn.Exec(`CREATE TABLE IF NOT EXISTS sys_user (
 		id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
 		username VARCHAR(64) NOT NULL UNIQUE,
 		password VARCHAR(128) NOT NULL,
@@ -25,7 +27,9 @@ func EnsureUserTable() {
 		is_admin TINYINT UNSIGNED NOT NULL DEFAULT 0,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`); err != nil {
+		log.Printf("[user] 建表失败: %v", err)
+	}
 }
 
 func LoginUser(username, password string) (map[string]interface{}, error) {
@@ -202,6 +206,7 @@ func GetSuggestions(status, date string) ([]map[string]interface{}, error) {
 		var reportDate, category, title, content, priority, status2, createdAt string
 		var processedAt sql.NullString
 		if err := rows.Scan(&id, &reportDate, &category, &title, &content, &priority, &status2, &createdAt, &processedAt); err != nil {
+			log.Printf("[suggestion] scan 失败: %v", err)
 			continue
 		}
 		pa := ""
@@ -391,10 +396,13 @@ func GetSkillList() ([]map[string]interface{}, error) {
 		var id, name, description string
 		var exampleJSON string
 		if err := rows.Scan(&id, &name, &description, &exampleJSON); err != nil {
+			log.Printf("[skill] scan 失败: %v", err)
 			continue
 		}
 		var examples []string
-		json.Unmarshal([]byte(exampleJSON), &examples)
+		if err := json.Unmarshal([]byte(exampleJSON), &examples); err != nil {
+			log.Printf("[skill] 解析 example_queries 失败: %v", err)
+		}
 		result = append(result, map[string]interface{}{
 			"id": id, "name": name, "description": description,
 			"example_queries": examples,

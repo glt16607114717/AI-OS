@@ -59,7 +59,8 @@ async function checkHealth() {
   try {
     const res = await window.aiOS.agentHealth()
     agentOnline.value = res?.ok ?? false
-  } catch {
+  } catch (e) {
+    console.error('[Home] checkHealth error:', e)
     agentOnline.value = false
   }
 }
@@ -76,7 +77,9 @@ async function checkAdmin() {
       isAdmin.value = !!data.data.is_admin
       currentUser.value = data.data.username || ''
     }
-  } catch {
+  } catch (e: any) {
+    console.error('[Home] checkAdmin error:', e)
+    ElMessage.error('获取用户信息失败: ' + (e?.message || '未知错误'))
     isAdmin.value = false
   }
 }

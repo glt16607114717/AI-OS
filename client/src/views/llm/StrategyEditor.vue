@@ -61,8 +61,9 @@ async function fetchOptions() {
     if (result.ok) {
       availableOptions.value = result.data || []
     }
-  } catch (e) {
+  } catch (e: any) {
     console.error('[StrategyEditor] fetchOptions error:', e)
+    ElMessage.error('加载选项失败: ' + e.message)
   }
 }
 
@@ -82,8 +83,9 @@ async function fetchStrategies() {
         active: s.active,
       }))
     }
-  } catch (e) {
+  } catch (e: any) {
     console.error('[StrategyEditor] fetchStrategies error:', e)
+    ElMessage.error('加载策略失败: ' + e.message)
   }
   loading.value = false
 }
@@ -159,8 +161,9 @@ async function saveStrategy() {
     } else {
       ElMessage.error(result.error || '保存失败')
     }
-  } catch {
-    ElMessage.error('保存失败')
+  } catch (e: any) {
+    console.error('[StrategyEditor] saveStrategy error:', e)
+    ElMessage.error('保存失败: ' + e.message)
   }
 }
 
@@ -191,8 +194,9 @@ async function deleteStrategy() {
     } else {
       ElMessage.error(result.error || '删除失败')
     }
-  } catch {
-    ElMessage.error('删除失败')
+  } catch (e: any) {
+    console.error('[StrategyEditor] deleteStrategy error:', e)
+    ElMessage.error('删除失败: ' + e.message)
   }
 }
 
@@ -213,8 +217,9 @@ async function setActive() {
     } else {
       ElMessage.error(result.error || '激活失败')
     }
-  } catch {
-    ElMessage.error('激活失败')
+  } catch (e: any) {
+    console.error('[StrategyEditor] setActive error:', e)
+    ElMessage.error('激活失败: ' + e.message)
   }
 }
 

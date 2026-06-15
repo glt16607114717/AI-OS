@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
 import { API_BASE } from '../../api'
 
 function authHeaders() {
@@ -103,8 +104,9 @@ async function loadRules() {
       promptOptimize.value = d.prompt_optimize ?? true
       rules.value = d.rules ?? ''
     }
-  } catch (e) {
+  } catch (e: any) {
     console.error('[GodRules] load error:', e)
+    ElMessage.error('加载规则失败: ' + e.message)
   }
   loading.value = false
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -19,7 +20,7 @@ func EnsureEmbeddingTable() {
 	if conn == nil {
 		return
 	}
-	conn.Exec(`CREATE TABLE IF NOT EXISTS sys_embedding (
+	if _, err := conn.Exec(`CREATE TABLE IF NOT EXISTS sys_embedding (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY,
 		user_id INT NOT NULL DEFAULT 0,
 		content TEXT NOT NULL,
@@ -30,10 +31,25 @@ func EnsureEmbeddingTable() {
 		INDEX idx_content_hash (content_hash),
 		INDEX idx_user_id (user_id),
 		INDEX idx_source (source)
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`); err != nil {
+		log.Printf("[embedding] 建表失败: %v", err)
+	}
 }
 
 // ── 智谱 Embedding-3 API 调用 ──
+
+// GetEmbeddingCount 获取用户的向量数量
+func GetEmbeddingCount(userID int) int {
+	conn, _ := GetDB()
+	if conn == nil {
+		return 0
+	}
+	var count int
+	if err := conn.QueryRow("SELECT COUNT(*) FROM sys_embedding WHERE user_id = ?", userID).Scan(&count); err != nil {
+		log.Printf("[embedding] 查询数量失败: %v", err)
+	}
+	return count
+}
 
 type embeddingRequest struct {
 	Model      string   `json:"model"`
@@ -127,7 +143,9 @@ func StoreEmbedding(userID int, content, source string) error {
 	// 计算内容 hash 去重
 	hash := contentHash(content)
 	var exists int
-	conn.QueryRow("SELECT 1 FROM sys_embedding WHERE content_hash = ?", hash).Scan(&exists)
+	if err := conn.QueryRow("SELECT 1 FROM sys_embedding WHERE content_hash = ?", hash).Scan(&exists); err != nil && err != sql.ErrNoRows {
+		log.Printf("[embedding] 查询去重失败: %v", err)
+	}
 	if exists == 1 {
 		return nil // 已存在，跳过
 	}
@@ -139,13 +157,19 @@ func StoreEmbedding(userID int, content, source string) error {
 	}
 
 	// 序列化向量
-	vectorJSON, _ := json.Marshal(vector)
+	vectorJSON, err := json.Marshal(vector)
+	if err != nil {
+		return fmt.Errorf("序列化向量失败: %v", err)
+	}
 
 	_, err = conn.Exec(
 		"INSERT INTO sys_embedding (user_id, content, content_hash, vector, source) VALUES (?, ?, ?, ?, ?)",
 		userID, content, hash, string(vectorJSON), source,
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("插入 embedding 失败: %v", err)
+	}
+	return nil
 }
 
 // StoreEmbeddings 批量存储
@@ -164,7 +188,9 @@ func StoreEmbeddings(userID int, contents []string, source string) error {
 	for _, c := range contents {
 		hash := contentHash(c)
 		var exists int
-		conn.QueryRow("SELECT 1 FROM sys_embedding WHERE content_hash = ?", hash).Scan(&exists)
+		if err := conn.QueryRow("SELECT 1 FROM sys_embedding WHERE content_hash = ?", hash).Scan(&exists); err != nil && err != sql.ErrNoRows {
+			log.Printf("[embedding] 查询去重失败: %v", err)
+		}
 		if exists == 0 {
 			newContents = append(newContents, c)
 		}
@@ -184,10 +210,12 @@ func StoreEmbeddings(userID int, contents []string, source string) error {
 	for i, content := range newContents {
 		vectorJSON, _ := json.Marshal(vectors[i])
 		hash := contentHash(content)
-		conn.Exec(
+		if _, err := conn.Exec(
 			"INSERT INTO sys_embedding (user_id, content, content_hash, vector, source) VALUES (?, ?, ?, ?, ?)",
 			userID, content, hash, string(vectorJSON), source,
-		)
+		); err != nil {
+			log.Printf("[embedding] 插入失败: %v", err)
+		}
 	}
 	return nil
 }
@@ -247,10 +275,12 @@ func SearchSimilar(query string, topK int, userID int) ([]SearchResult, error) {
 		var id int64
 		var content, source, vectorStr, createdAt string
 		if err := rows.Scan(&id, &content, &source, &vectorStr, &createdAt); err != nil {
+			log.Printf("[embedding] scan 失败: %v", err)
 			continue
 		}
 		var vector []float64
 		if err := json.Unmarshal([]byte(vectorStr), &vector); err != nil {
+			log.Printf("[embedding] 解析 vector 失败: %v", err)
 			continue
 		}
 		items = append(items, item{id, content, source, vector, createdAt})
@@ -350,6 +380,7 @@ func GetRecentEmbeddings(userID int, limit int) ([]SearchResult, error) {
 	for rows.Next() {
 		var r SearchResult
 		if err := rows.Scan(&r.ID, &r.Content, &r.Source, &r.CreatedAt); err != nil {
+			log.Printf("[embedding] scan 失败: %v", err)
 			continue
 		}
 		results = append(results, r)

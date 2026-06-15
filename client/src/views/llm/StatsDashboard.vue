@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { Chart, registerables } from 'chart.js'
+import { ElMessage } from 'element-plus'
 import { API_BASE } from '../../api'
 
 Chart.register(...registerables)
@@ -88,7 +89,10 @@ async function fetchCurrentUser() {
     if (data?.ok && data?.data) {
       currentUsername.value = data.data.username || ''
     }
-  } catch {}
+  } catch (e) {
+    console.error('[StatsDashboard] fetchCurrentUser error:', e)
+    ElMessage.error('获取用户信息失败: ' + (e as Error).message)
+  }
 }
 
 const sortedDaily = computed(() => {

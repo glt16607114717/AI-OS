@@ -41,12 +41,17 @@ async function fetchUsers() {
     const res = await fetch(`${BASE_URL}/api/users`, { headers: authHeaders() })
     const data = await res.json()
     if (data.ok) {
-      users.value = data.data.users
-    } else if (data.detail === '未登录' || res.status === 401) {
+      // 兼容两种返回格式：data.data.users 和 data.data（数组）
+      const raw = data.data
+      users.value = Array.isArray(raw) ? raw : (raw?.users || [])
+    } else if (data.error === '未登录' || res.status === 401) {
       ElMessage.error('请先登录管理员账号')
+    } else {
+      ElMessage.error(data.error || '加载用户列表失败')
     }
   } catch (e: any) {
-    ElMessage.error('加载用户列表失败')
+    console.error('[AccountSettings] fetchUsers error:', e)
+    ElMessage.error('加载用户列表失败: ' + e.message)
   }
   loading.value = false
 }
@@ -75,10 +80,11 @@ async function doAdd() {
       showAddDialog.value = false
       fetchUsers()
     } else {
-      ElMessage.error(data.detail || '创建失败')
+      ElMessage.error(data.error || '创建失败')
     }
   } catch (e: any) {
-    ElMessage.error('请求失败')
+    console.error('[AccountSettings] doAdd error:', e)
+    ElMessage.error('请求失败: ' + e.message)
   }
 }
 
@@ -104,10 +110,11 @@ async function doEdit() {
       ElMessage.success('密码已更新')
       showEditDialog.value = false
     } else {
-      ElMessage.error(data.detail || '更新失败')
+      ElMessage.error(data.error || '更新失败')
     }
   } catch (e: any) {
-    ElMessage.error('请求失败')
+    console.error('[AccountSettings] doEdit error:', e)
+    ElMessage.error('请求失败: ' + e.message)
   }
 }
 
@@ -121,12 +128,14 @@ async function toggleStatus(user: User) {
     const res = await fetch(`${BASE_URL}/api/users/toggle-status`, {
       method: 'POST',
       headers: authHeaders(),
-      body: JSON.stringify({ id: user.id }),
+      body: JSON.stringify({ id: user.id, status: newStatus }),
     })
     const data = await res.json()
     if (data.ok) {
       ElMessage.success(`已${label}`)
       fetchUsers()
+    } else {
+      ElMessage.error(data.error || `${label}失败`)
     }
   } catch { /* 取消 */ }
 }
@@ -134,19 +143,21 @@ async function toggleStatus(user: User) {
 // ── 管理员切换 ──
 
 async function toggleAdmin(user: User) {
-  const newAdmin = user.is_admin ? 0 : 1
-  const label = newAdmin ? '设为管理员' : '取消管理员'
+  const newIsAdmin = !user.is_admin
+  const label = newIsAdmin ? '设为管理员' : '取消管理员'
   try {
     await ElMessageBox.confirm(`确认${label}「${user.username}」？`, '提示', { type: 'warning' })
     const res = await fetch(`${BASE_URL}/api/users/toggle-admin`, {
       method: 'POST',
       headers: authHeaders(),
-      body: JSON.stringify({ id: user.id }),
+      body: JSON.stringify({ id: user.id, is_admin: newIsAdmin }),
     })
     const data = await res.json()
     if (data.ok) {
       ElMessage.success(`已${label}`)
       fetchUsers()
+    } else {
+      ElMessage.error(data.error || `${label}失败`)
     }
   } catch { /* 取消 */ }
 }
@@ -165,6 +176,8 @@ async function doDelete(user: User) {
     if (data.ok) {
       ElMessage.success('已删除')
       fetchUsers()
+    } else {
+      ElMessage.error(data.error || '删除失败')
     }
   } catch { /* 取消 */ }
 }

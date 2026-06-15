@@ -75,6 +75,7 @@ async function fetchCatalog() {
     }
   } catch (e: any) {
     console.error('[VendorConfig] fetchCatalog error:', e)
+    ElMessage.error('加载厂商配置失败: ' + e.message)
   }
   loading.value = false
 }
@@ -95,8 +96,9 @@ async function toggleVendor(vendor: Vendor) {
     } else {
       ElMessage.error(result.error || '操作失败')
     }
-  } catch {
-    ElMessage.error('操作失败')
+  } catch (e: any) {
+    console.error('[VendorConfig] toggleVendor error:', e)
+    ElMessage.error('操作失败: ' + e.message)
   }
 }
 
@@ -151,8 +153,9 @@ async function confirmAddKey(vendor: Vendor) {
     } else {
       ElMessage.error(result.error || '添加失败')
     }
-  } catch {
-    ElMessage.error('添加失败')
+  } catch (e: any) {
+    console.error('[VendorConfig] confirmAddKey error:', e)
+    ElMessage.error('添加失败: ' + e.message)
   }
 }
 
@@ -186,8 +189,9 @@ async function removeKey(vendor: Vendor, key: ApiKey) {
     } else {
       ElMessage.error(result.error || '删除失败')
     }
-  } catch {
-    ElMessage.error('删除失败')
+  } catch (e: any) {
+    console.error('[VendorConfig] removeKey error:', e)
+    ElMessage.error('删除失败: ' + e.message)
   }
 }
 
@@ -210,8 +214,9 @@ async function toggleKey(vendor: Vendor, key: ApiKey) {
     } else {
       ElMessage.error(result.error || '操作失败')
     }
-  } catch {
-    ElMessage.error('操作失败')
+  } catch (e: any) {
+    console.error('[VendorConfig] toggleKey error:', e)
+    ElMessage.error('操作失败: ' + e.message)
   }
 }
 

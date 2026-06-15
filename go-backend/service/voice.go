@@ -3,6 +3,7 @@ package service
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 )
 
@@ -107,7 +108,9 @@ func UpdateVoiceCommand(userID, cmdID int, updates map[string]interface{}) error
 
 	// 验证归属
 	var count int
-	db.QueryRow("SELECT COUNT(*) FROM voice_commands WHERE id = ? AND user_id = ?", cmdID, userID).Scan(&count)
+	if err := db.QueryRow("SELECT COUNT(*) FROM voice_commands WHERE id = ? AND user_id = ?", cmdID, userID).Scan(&count); err != nil {
+		return fmt.Errorf("验证归属失败: %v", err)
+	}
 	if count == 0 {
 		return sql.ErrNoRows
 	}
@@ -183,6 +186,9 @@ func GetVoiceEnabled(userID int) bool {
 		userID,
 	).Scan(&val)
 	if err != nil {
+		if err != sql.ErrNoRows {
+			log.Printf("[voice] 查询 voice_enabled 失败: %v", err)
+		}
 		return false
 	}
 	return val == "true"

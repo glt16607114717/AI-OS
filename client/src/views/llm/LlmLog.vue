@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ElMessage } from 'element-plus'
 import { API_BASE } from '../../api'
 
 function authHeaders() {
@@ -71,8 +72,9 @@ async function fetchLogs(incremental = false) {
       }
       if (d.max_id) maxId.value = d.max_id
     }
-  } catch (e) {
+  } catch (e: any) {
     console.error('fetch logs failed:', e)
+    ElMessage.error('加载日志失败: ' + (e?.message || '未知错误'))
   }
   loading.value = false
 }
@@ -80,15 +82,22 @@ async function fetchLogs(incremental = false) {
 async function clearLogs() {
   if (!confirm('确定清空所有日志？')) return
   try {
-    await fetch(`${API_BASE}/api/logs/clear`, {
+    const res = await fetch(`${API_BASE}/api/logs/clear`, {
       method: 'POST',
       headers: authHeaders(),
       body: JSON.stringify({}),
     })
-    logs.value = []
-    maxId.value = 0
+    const data = await res.json()
+    if (data.ok) {
+      logs.value = []
+      maxId.value = 0
+      ElMessage.success('日志已清空')
+    } else {
+      ElMessage.error(data.error || '清空失败')
+    }
   } catch (e) {
     console.error('clear logs failed:', e)
+    ElMessage.error('清空日志失败: ' + (e as Error).message)
   }
 }
 

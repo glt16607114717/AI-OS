@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync/atomic"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -202,6 +203,7 @@ func GetAvailableOptions() ([]map[string]interface{}, error) {
 		var keyID int
 		var keyName, apiKey, modelID, displayName string
 		if err := rows.Scan(&vendorID, &vendorName, &baseURL, &keyID, &keyName, &apiKey, &modelID, &displayName); err != nil {
+			log.Printf("[options] scan 失败: %v", err)
 			continue
 		}
 		result = append(result, map[string]interface{}{
@@ -230,17 +232,22 @@ func EnsureStrategyTable() {
 }
 
 func loadStrategiesFromDB() []model.Strategy {
-	conn, _ := GetDB()
-	if conn == nil {
+	conn, err := GetDB()
+	if err != nil {
+		log.Printf("[strategy] DB连接失败: %v", err)
 		return nil
 	}
 	var data string
-	err := conn.QueryRow("SELECT data FROM sys_strategy ORDER BY id DESC LIMIT 1").Scan(&data)
+	err = conn.QueryRow("SELECT data FROM sys_strategy ORDER BY id DESC LIMIT 1").Scan(&data)
 	if err != nil {
+		if err != sql.ErrNoRows {
+			log.Printf("[strategy] 加载失败: %v", err)
+		}
 		return nil
 	}
 	var strategies []model.Strategy
 	if err := parseJSON(data, &strategies); err != nil {
+		log.Printf("[strategy] 解析 JSON 失败: %v", err)
 		return nil
 	}
 	return strategies
@@ -424,6 +431,10 @@ func parseJSON(s string, v interface{}) error {
 }
 
 func toJSON(v interface{}) string {
-	b, _ := json.Marshal(v)
+	b, err := json.Marshal(v)
+	if err != nil {
+		log.Printf("[json] 序列化失败: %v", err)
+		return "null"
+	}
 	return string(b)
 }

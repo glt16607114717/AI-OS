@@ -2,6 +2,7 @@
 import { ref, nextTick, onMounted } from 'vue'
 import { marked } from 'marked'
 import * as echarts from 'echarts'
+import { ElMessage } from 'element-plus'
 import { API_BASE } from '../api'
 
 // 统一获取鉴权请求头（Token 从 localStorage 读取）
@@ -84,13 +85,16 @@ let abortController: AbortController | null = null
 async function loadSkills() {
   try {
     const res = await fetch(`${API_BASE}/api/skills`, { headers: authHeaders() })
-    if (!res.ok) return
     const json = await res.json()
+    if (!json.ok) return
     const list = json.data || []
     if (Array.isArray(list)) {
       skills.value = list
     }
-  } catch {}
+  } catch (e) {
+    console.error('[ChatWorkspace] loadSkills error:', e)
+    ElMessage.error('加载技能列表失败: ' + (e as Error).message)
+  }
 }
 
 function useSkillQuery(query: string) {
@@ -102,7 +106,9 @@ function useSkillQuery(query: string) {
 function saveToCache() {
   try {
     localStorage.setItem(CACHE_KEY, JSON.stringify(messages.value))
-  } catch {}
+  } catch (e) {
+    console.error('[ChatWorkspace] saveToCache error:', e)
+  }
 }
 
 function loadFromCache(): Message[] {
@@ -111,21 +117,26 @@ function loadFromCache(): Message[] {
     if (cached) {
       return JSON.parse(cached)
     }
-  } catch {}
+  } catch (e: any) {
+    console.error('[ChatWorkspace] loadFromCache error:', e)
+    ElMessage.error('读取对话缓存失败: ' + (e?.message || '未知错误'))
+  }
   return []
 }
 
 function clearCache() {
   try {
     localStorage.removeItem(CACHE_KEY)
-  } catch {}
+  } catch (e) {
+    console.error('[ChatWorkspace] clearCache error:', e)
+  }
 }
 
 async function loadFromBackend() {
   try {
     const res = await fetch(`${API_BASE}/api/chat/history?page=1&page_size=20`, { headers: authHeaders() })
-    if (!res.ok) return
     const json = await res.json()
+    if (!json.ok) return
     const list = json.data?.list || json.data || []
     if (Array.isArray(list) && list.length > 0) {
       messages.value = list.map((m: any) => ({
@@ -135,7 +146,10 @@ async function loadFromBackend() {
       }))
       saveToCache()
     }
-  } catch {}
+  } catch (e) {
+    console.error('[ChatWorkspace] loadFromBackend error:', e)
+    ElMessage.error('加载聊天记录失败: ' + (e as Error).message)
+  }
 }
 
 // chat_add_message 是本地操作：消息已通过 messages.value 维护，无需调用后端
@@ -146,14 +160,17 @@ async function saveMessage(_role: 'user' | 'assistant', _content: string) {
 async function loadModel() {
   try {
     const res = await fetch(`${API_BASE}/api/llm/strategies`, { headers: authHeaders() })
-    if (!res.ok) return
     const json = await res.json()
+    if (!json.ok) return
     const strategies = json.data || []
     const active = strategies.find((s: any) => s.active)
     if (active?.options?.length) {
       currentModel.value = active.options[0].model_id || ''
     }
-  } catch {}
+  } catch (e) {
+    console.error('[ChatWorkspace] loadModel error:', e)
+    ElMessage.error('加载模型信息失败: ' + (e as Error).message)
+  }
 }
 
 function scrollToBottom() {
@@ -479,11 +496,17 @@ async function clearChat() {
     messages.value = []
     clearCache()
     try {
-      await fetch(`${API_BASE}/api/chat/clear`, {
+      const res = await fetch(`${API_BASE}/api/chat/clear`, {
         method: 'POST',
         headers: authHeaders(true)
       })
-    } catch {}
+      const data = await res.json()
+      if (!data.ok) {
+        ElMessage.error(data.error || '清空失败')
+      }
+    } catch (e: any) {
+      ElMessage.error('清空失败: ' + e.message)
+    }
   }
 }
 

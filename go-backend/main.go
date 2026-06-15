@@ -94,6 +94,11 @@ func main() {
 		r.Post("/api/voice/delete", handler.VoiceDeleteCommand)
 		r.Post("/api/voice/set-enabled", handler.VoiceSetEnabled)
 
+		// RAG 知识库
+		r.Get("/api/rag/status", handler.RagStatus)
+		r.Post("/api/rag/test-embed", handler.RagTestEmbed)
+		r.Post("/api/rag/search", handler.RagSearch)
+
 		// 统计
 		r.Get("/api/stats/summary", handler.GetStatsSummary)
 		r.Get("/api/stats/errors", handler.GetRecentErrors)

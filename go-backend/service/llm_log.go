@@ -4,6 +4,7 @@ import (
 	"ai-os-server/model"
 	"database/sql"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -55,11 +56,14 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 	// 总览
 	var totalReqs, totalTokens, totalPrompt, totalCompletion, successCount int
 	var avgLatency float64
-	conn.QueryRow(`SELECT COUNT(*), COALESCE(SUM(total_tokens),0), COALESCE(SUM(prompt_tokens),0),
+	if err := conn.QueryRow(`SELECT COUNT(*), COALESCE(SUM(total_tokens),0), COALESCE(SUM(prompt_tokens),0),
 		COALESCE(SUM(completion_tokens),0), COALESCE(AVG(CASE WHEN success=1 THEN latency_ms END),0),
 		COALESCE(SUM(success),0)
 		FROM sys_llm_stats WHERE ts >= ?`, cutoff).Scan(
-		&totalReqs, &totalTokens, &totalPrompt, &totalCompletion, &avgLatency, &successCount)
+		&totalReqs, &totalTokens, &totalPrompt, &totalCompletion, &avgLatency, &successCount); err != nil {
+		log.Printf("[stat] 查询总览失败: %v", err)
+		return nil, err
+	}
 
 	successRate := 0.0
 	if totalReqs > 0 {
@@ -83,7 +87,10 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 			var vid, reqs, tokens, pt, ct, sc, errs int
 			var name string
 			var al float64
-			vRows.Scan(&vid, &name, &reqs, &tokens, &pt, &ct, &al, &sc, &errs)
+			if err := vRows.Scan(&vid, &name, &reqs, &tokens, &pt, &ct, &al, &sc, &errs); err != nil {
+				log.Printf("[stats] scan vendor 失败: %v", err)
+				continue
+			}
 			byVendor[fmt.Sprintf("%d", vid)] = map[string]interface{}{
 				"name": name, "requests": reqs, "tokens": tokens,
 				"prompt_tokens": pt, "completion_tokens": ct,
@@ -249,7 +256,9 @@ func ClearLogs() {
 	if err != nil {
 		return
 	}
-	conn.Exec("TRUNCATE TABLE sys_llm_log")
+	if _, err := conn.Exec("TRUNCATE TABLE sys_llm_log"); err != nil {
+		log.Printf("[log] TRUNCATE sys_llm_log 失败: %v", err)
+	}
 }
 
 // ── 聊天历史（MySQL） ──
@@ -306,9 +315,12 @@ func GetChatHistory(limit int) ([]map[string]interface{}, error) {
 func ClearChatHistory() {
 	conn, err := GetDB()
 	if err != nil {
+		log.Printf("[chat] DB连接失败: %v", err)
 		return
 	}
-	conn.Exec("TRUNCATE TABLE sys_chat_history")
+	if _, err := conn.Exec("TRUNCATE TABLE sys_chat_history"); err != nil {
+		log.Printf("[chat] TRUNCATE 失败: %v", err)
+	}
 }
 
 func GetChatMaxID() int {
@@ -317,6 +329,8 @@ func GetChatMaxID() int {
 		return 0
 	}
 	var maxID int
-	conn.QueryRow("SELECT COALESCE(MAX(id), 0) FROM sys_chat_history").Scan(&maxID)
+	if err := conn.QueryRow("SELECT COALESCE(MAX(id), 0) FROM sys_chat_history").Scan(&maxID); err != nil {
+		log.Printf("[chat] 查询 maxID 失败: %v", err)
+	}
 	return maxID
 }

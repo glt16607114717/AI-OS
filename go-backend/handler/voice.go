@@ -22,11 +22,10 @@ func VoiceGetStatus(w http.ResponseWriter, r *http.Request) {
 	enabled := service.GetVoiceEnabled(session.UserID)
 
 	okResponse(w, map[string]interface{}{
-		"ok":        true,
-		"enabled":   enabled,
-		"listening": false,   // 本地 Python 才有
+		"enabled":     enabled,
+		"listening":   false,  // 本地 Python 才有
 		"model_ready": false,  // 本地 Python 才有
-		"commands":  commands,
+		"commands":    commands,
 	})
 }
 

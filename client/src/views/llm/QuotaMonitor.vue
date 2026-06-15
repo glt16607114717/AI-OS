@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
+import { ElMessage } from 'element-plus'
 import { API_BASE } from '../../api'
 
 function authHeaders() {
@@ -20,8 +21,9 @@ async function fetchKeys() {
     if (result.ok) {
       keys.value = result.data?.records || []
     }
-  } catch (e) {
+  } catch (e: any) {
     console.error('[QuotaMonitor] fetchKeys error:', e)
+    ElMessage.error('加载用量数据失败: ' + (e?.message || '未知错误'))
   }
   loading.value = false
 }
@@ -29,16 +31,23 @@ async function fetchKeys() {
 async function refreshNow() {
   refreshing.value = true
   try {
-    await fetch(`${API_BASE}/api/quota/force-check`, {
+    const res = await fetch(`${API_BASE}/api/quota/force-check`, {
       method: 'POST',
       headers: authHeaders(),
       body: JSON.stringify({}),
     })
+    const data = await res.json()
+    if (data.ok) {
+      ElMessage.success('已触发刷新')
+    } else {
+      ElMessage.error(data.error || '刷新失败')
+    }
     // 等待一小段时间让检查完成
     await new Promise((resolve) => setTimeout(resolve, 1000))
     await fetchKeys()
   } catch (e) {
     console.error('[QuotaMonitor] refreshNow error:', e)
+    ElMessage.error('刷新失败: ' + (e as Error).message)
   }
   refreshing.value = false
 }

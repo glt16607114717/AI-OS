@@ -100,10 +100,16 @@ router.beforeEach(async (to) => {
         })
         const data = await res.json()
         if (data.ok) {
+          // Token 有效，跳转到首页
           return '/voice'
+        } else {
+          // Token 无效，清除缓存
+          console.warn('[Router] Token 验证失败:', data.error)
+          localStorage.removeItem('aios_token')
         }
-      } catch {
-        // 验证失败，清除无效 token，留在登录页
+      } catch (e: any) {
+        // 网络错误，清除无效 token
+        console.error('[Router] Token 验证异常:', e)
         localStorage.removeItem('aios_token')
       }
     }
@@ -112,6 +118,23 @@ router.beforeEach(async (to) => {
 
   // 非 /login 页面，需要 token
   if (!token) {
+    console.warn('[Router] 未登录，跳转到登录页')
+    return '/login'
+  }
+
+  // 验证 token 是否有效
+  try {
+    const res = await fetch(`${API_BASE}/api/system/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    const data = await res.json()
+    if (!data.ok) {
+      console.warn('[Router] Token 已失效，跳转到登录页:', data.error)
+      localStorage.removeItem('aios_token')
+      return '/login'
+    }
+  } catch (e: any) {
+    console.error('[Router] 验证 token 时发生错误:', e)
     return '/login'
   }
 

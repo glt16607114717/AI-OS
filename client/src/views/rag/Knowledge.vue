@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
 
 interface DocItem {
   id: string
@@ -47,8 +48,9 @@ async function loadDocs() {
       documents.value = res.documents || []
       total.value = res.total || 0
     }
-  } catch (e) {
+  } catch (e: any) {
     console.error('Failed to load docs:', e)
+    ElMessage.error('加载知识库失败: ' + e.message)
   }
   loading.value = false
 }
@@ -67,8 +69,9 @@ async function doSearch() {
     if (res.ok) {
       searchResults.value = res.results || []
     }
-  } catch (e) {
-    console.error(e)
+  } catch (e: any) {
+    console.error('Search failed:', e)
+    ElMessage.error('搜索失败: ' + e.message)
   }
   searching.value = false
 }
