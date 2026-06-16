@@ -4,6 +4,7 @@ import (
 	"ai-os-server/middleware"
 	"ai-os-server/service"
 	"bufio"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,57 @@ import (
 
 // ── LLM 代理核心 ──
 
+// ConversationContext 累积一个对话的完整上下文信息
+type ConversationContext struct {
+	ID               string
+	UserID           int
+	Username         string
+	UserMessage      string   // 用户提问摘要
+	Models           []string // 使用的模型列表
+	FailoverCount    int      // 故障转移次数
+	TotalPrompt      int
+	TotalCompletion  int
+	ToolCallCount    int
+	Errors           []string
+	AssistantContent string // 最终助手回复
+	Source           string // proxy / workspace
+	StartTime        time.Time
+}
+
+// SummarizeAndLog 写一条对话汇总日志
+func (c *ConversationContext) SummarizeAndLog() {
+	latency := int(time.Since(c.StartTime).Milliseconds())
+	models := strings.Join(c.Models, ",")
+	level := "info"
+	if c.AssistantContent == "" {
+		level = "error"
+	}
+	detail := map[string]interface{}{
+		"conversation_id":  c.ID,
+		"user_id":          c.UserID,
+		"username":         c.Username,
+		"models":           c.Models,
+		"failover_count":   c.FailoverCount,
+		"prompt_tokens":    c.TotalPrompt,
+		"completion_tokens": c.TotalCompletion,
+		"tool_calls":       c.ToolCallCount,
+		"errors":           c.Errors,
+		"user_message":     c.UserMessage,
+		"latency_ms":       latency,
+	}
+	detailJSON, _ := json.Marshal(detail)
+	service.WriteLog("conversation",
+		fmt.Sprintf("对话完成 | %s | 输入%d/输出%d/耗时%dms", models, c.TotalPrompt, c.TotalCompletion, latency),
+		level, string(detailJSON))
+}
+
+// generateConversationID 生成对话唯一标识
+func generateConversationID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return fmt.Sprintf("%x", b)
+}
+
 // ProxyChatCompletions LLM 代理转发
 func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
@@ -25,6 +77,8 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 		userID = session.UserID
 		username = session.Username
 	}
+
+	conversationID := generateConversationID()
 
 	// 解析请求
 	var req map[string]interface{}
@@ -43,21 +97,44 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 		req["messages"] = msgMaps
 	}
 
+	// 提取用户消息摘要（用于日志和 embedding）
+	userMsgSummary := ""
+	if messages, ok := req["messages"].([]interface{}); ok {
+		for _, m := range messages {
+			if msg, ok := m.(map[string]interface{}); ok {
+				if role, _ := msg["role"].(string); role == "user" {
+					userMsgSummary = extractContent(msg["content"])
+				}
+			}
+		}
+	}
+	if len(userMsgSummary) > 200 {
+		userMsgSummary = userMsgSummary[:200]
+	}
+
+	convCtx := &ConversationContext{
+		ID:          conversationID,
+		UserID:      userID,
+		Username:    username,
+		UserMessage: userMsgSummary,
+		Source:      "proxy",
+		StartTime:   startTime,
+	}
+
 	// 获取路由
 	route := service.GetRouteByStrategy()
 	if route != nil {
 		// Fix 1: 无条件用策略的 model_id 覆盖客户端传的 model
 		req["model"] = route.ModelID
-		service.WriteLog("route", fmt.Sprintf("策略路由选中 %s（%s）→ %s", route.VendorName, keyPrefix8(route.KeyID), route.ModelID), "info", fmt.Sprintf("vendor=%d", route.VendorID))
 	} else {
 		route = service.GetDefaultRoute()
 		if route != nil {
 			req["model"] = route.ModelID
-			service.WriteLog("route", fmt.Sprintf("默认路由到 %s → %s", route.VendorName, route.ModelID), "info", fmt.Sprintf("vendor=%d", route.VendorID))
 		}
 	}
 	if route == nil {
-		service.WriteLog("error", "无可用厂商（无策略、无可用选项）", "error", "")
+		convCtx.Errors = append(convCtx.Errors, "无可用厂商（无策略、无可用选项）")
+		convCtx.SummarizeAndLog()
 		errResponse(w, "请先配置 API Key 和模型", 400)
 		return
 	}
@@ -71,25 +148,7 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 	downgraded := service.ShouldDowngradeModel(route.KeyID, modelID)
 	if downgraded != modelID {
 		req["model"] = downgraded
-		service.WriteLog("downgrade", fmt.Sprintf("%s → %s（Key %s 用量偏高）", modelID, downgraded, keyPrefix8(route.KeyID)), "warn", fmt.Sprintf("key_id=%s", route.KeyID))
 		modelID = downgraded
-	}
-
-	// 提取用户消息摘要（用于日志）
-	userMsgSummary := ""
-	if messages, ok := req["messages"].([]interface{}); ok {
-		for _, m := range messages {
-			if msg, ok := m.(map[string]interface{}); ok {
-				if role, _ := msg["role"].(string); role == "user" {
-					if content, _ := msg["content"].(string); content != "" {
-						userMsgSummary = content
-					}
-				}
-			}
-		}
-	}
-	if len(userMsgSummary) > 200 {
-		userMsgSummary = userMsgSummary[:200]
 	}
 
 	// 检查是否流式
@@ -98,17 +157,13 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 		isStream = true
 	}
 
-	service.WriteLog("request",
-		fmt.Sprintf("%s → %s（%s）%s", modelID, route.VendorName, keyPrefix8(route.KeyID), ternary(isStream, "流式", "非流式")),
-		"info", fmt.Sprintf("model=%s,stream=%v,user_msg=%s", modelID, isStream, userMsgSummary))
-
 	// Fix 3: 构建故障转移路由列表
 	attempts := buildFailoverAttempts(route)
 
 	if isStream {
-		handleStreamWithFailover(w, req, attempts, startTime, modelID, userID, username, userMsgSummary)
+		handleStreamWithFailover(w, req, attempts, startTime, modelID, userID, username, userMsgSummary, convCtx)
 	} else {
-		handleNormalWithFailover(w, req, attempts, startTime, modelID, userID, username, userMsgSummary)
+		handleNormalWithFailover(w, req, attempts, startTime, modelID, userID, username, userMsgSummary, convCtx)
 	}
 }
 
@@ -132,7 +187,7 @@ func ternary(cond bool, a, b string) string {
 }
 
 // handleNormalWithFailover 非流式响应（支持故障转移）
-func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{}, attempts []*service.RouteInfoType, startTime time.Time, modelID string, userID int, username string, userMsgSummary string) {
+func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{}, attempts []*service.RouteInfoType, startTime time.Time, modelID string, userID int, username string, userMsgSummary string, convCtx *ConversationContext) {
 	failedVendors := make(map[int]bool)
 	var lastError string
 
@@ -144,7 +199,9 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 		source := "策略路由"
 		if idx > 0 {
 			source = "故障转移"
+			convCtx.FailoverCount++
 		}
+		convCtx.Models = append(convCtx.Models, route.ModelID)
 
 		// 每个路由用自己的 model_id
 		fwdReq := copyMap(req)
@@ -161,11 +218,12 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 		if err != nil {
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
+				ConversationID: convCtx.ID,
+				UserID:         userID, Username: username,
 				VendorID: route.VendorID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: err.Error(),
 			})
-			service.WriteLog("failover", fmt.Sprintf("%s 请求失败（网络错误）", route.VendorName), "error", fmt.Sprintf("source=%s,error=%s", source, err.Error()))
+			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 网络错误: %s", route.VendorName, err.Error()))
 			failedVendors[route.VendorID] = true
 			lastError = err.Error()
 			continue
@@ -181,11 +239,12 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 				errMsg = errMsg[:500]
 			}
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
+				ConversationID: convCtx.ID,
+				UserID:         userID, Username: username,
 				VendorID: route.VendorID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: errMsg,
 			})
-			service.WriteLog("failover", fmt.Sprintf("%s 请求失败（HTTP %d）", route.VendorName, resp.StatusCode), "error", fmt.Sprintf("source=%s,error=%s", source, errMsg))
+			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
 			failedVendors[route.VendorID] = true
 			lastError = errMsg
 			continue
@@ -201,17 +260,20 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 			totalTokens := intFloat(usage["total_tokens"])
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
-				VendorID: route.VendorID, ModelID: route.ModelID,
+				ConversationID:   convCtx.ID,
+				UserID:           userID, Username: username,
+				VendorID:         route.VendorID, ModelID: route.ModelID,
 				PromptTokens: promptTokens, CompletionTokens: completionTokens,
 				TotalTokens: totalTokens, LatencyMs: latency, Success: true,
 			})
-			service.WriteLog("request", fmt.Sprintf("响应成功: %s（%s）输入 %d / 输出 %d / 耗时 %dms", route.ModelID, source, promptTokens, completionTokens, latency), "info", "")
+			convCtx.TotalPrompt += promptTokens
+			convCtx.TotalCompletion += completionTokens
 		} else {
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
-				VendorID: route.VendorID, ModelID: route.ModelID,
+				ConversationID: convCtx.ID,
+				UserID:         userID, Username: username,
+				VendorID:       route.VendorID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: true,
 			})
 		}
@@ -222,14 +284,10 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 				if msg, ok := choice["message"].(map[string]interface{}); ok {
 					if content, ok := msg["content"].(string); ok && content != "" {
 						go service.AddChatMessage("assistant", content)
-						go service.StoreEmbedding(userID, content, "proxy")
+						convCtx.AssistantContent = content
 					}
 				}
 			}
-		}
-
-		if source == "故障转移" {
-			service.WriteLog("failover", fmt.Sprintf("故障转移成功: %s", route.VendorName), "info", fmt.Sprintf("model=%s", route.ModelID))
 		}
 
 		// 透传
@@ -243,18 +301,24 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 		w.WriteHeader(resp.StatusCode)
 		w.Write(body)
 
-		log.Printf("[proxy] normal %s vendor=%d key=%s user=%s latency=%dms source=%s",
-			route.ModelID, route.VendorID, keyPrefix8(route.KeyID), username, time.Since(startTime).Milliseconds(), source)
+		log.Printf("[proxy] normal %s vendor=%d key=%s user=%s latency=%dms source=%s conv=%s",
+			route.ModelID, route.VendorID, keyPrefix8(route.KeyID), username, time.Since(startTime).Milliseconds(), source, convCtx.ID)
+
+		// 对话完成：合并存储 embedding + 写汇总日志
+		if convCtx.AssistantContent != "" {
+			go service.StoreEmbedding(userID, userMsgSummary+"\n\n"+convCtx.AssistantContent, convCtx.Source)
+		}
+		convCtx.SummarizeAndLog()
 		return
 	}
 
 	// 所有厂商都失败
-	service.WriteLog("failover", "所有厂商均失败", "error", fmt.Sprintf("last_error=%s", lastError))
+	convCtx.SummarizeAndLog()
 	errResponse(w, fmt.Sprintf("所有厂商均失败: %s", lastError), 502)
 }
 
 // handleStreamWithFailover 流式响应（支持故障转移）
-func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{}, attempts []*service.RouteInfoType, startTime time.Time, modelID string, userID int, username string, userMsgSummary string) {
+func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{}, attempts []*service.RouteInfoType, startTime time.Time, modelID string, userID int, username string, userMsgSummary string, convCtx *ConversationContext) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -277,7 +341,9 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 		source := "策略路由"
 		if idx > 0 {
 			source = "故障转移"
+			convCtx.FailoverCount++
 		}
+		convCtx.Models = append(convCtx.Models, route.ModelID)
 
 		// 每个路由用自己的 model_id
 		fwdReq := copyMap(req)
@@ -294,11 +360,12 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 		if err != nil {
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
+				ConversationID: convCtx.ID,
+				UserID:         userID, Username: username,
 				VendorID: route.VendorID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: err.Error(),
 			})
-			service.WriteLog("error", fmt.Sprintf("流式中断: %s", route.VendorName), "error", fmt.Sprintf("error=%s", err.Error()))
+			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 流式中断: %s", route.VendorName, err.Error()))
 			failedVendors[route.VendorID] = true
 			lastError = err.Error()
 			continue
@@ -313,21 +380,18 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 			}
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
+				ConversationID: convCtx.ID,
+				UserID:         userID, Username: username,
 				VendorID: route.VendorID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: errMsg,
 			})
-			service.WriteLog("error", fmt.Sprintf("上游返回错误: HTTP %d（%s）", resp.StatusCode, route.VendorName), "error", fmt.Sprintf("error=%s", errMsg))
+			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
 			failedVendors[route.VendorID] = true
 			lastError = errMsg
 			continue
 		}
 
 		// 连接成功，开始流式输出（不能再故障转移）
-		if source == "故障转移" {
-			service.WriteLog("failover", fmt.Sprintf("故障转移成功: %s（%s）", route.VendorName, source), "info", fmt.Sprintf("model=%s", route.ModelID))
-		}
-
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
@@ -367,12 +431,14 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 					totalTokens := intFloat(usage["total_tokens"])
 					latency := int(time.Since(startTime).Milliseconds())
 					service.RecordStat(&service.LLMStatType{
-						UserID: userID, Username: username,
-						VendorID: route.VendorID, ModelID: route.ModelID,
+						ConversationID:   convCtx.ID,
+						UserID:           userID, Username: username,
+						VendorID:         route.VendorID, ModelID: route.ModelID,
 						PromptTokens: promptTokens, CompletionTokens: completionTokens,
 						TotalTokens: totalTokens, LatencyMs: latency, Success: true,
 					})
-					service.WriteLog("request", fmt.Sprintf("流式完成: %s（%d+%d tokens）", route.VendorName, promptTokens, completionTokens), "info", fmt.Sprintf("latency=%dms,model=%s", latency, route.ModelID))
+					convCtx.TotalPrompt += promptTokens
+					convCtx.TotalCompletion += completionTokens
 					success = true
 				}
 				// 提取内容
@@ -398,26 +464,32 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 		if !success && totalContent != "" {
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
-				VendorID: route.VendorID, ModelID: route.ModelID,
+				ConversationID: convCtx.ID,
+				UserID:         userID, Username: username,
+				VendorID:       route.VendorID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: true,
 			})
-			service.WriteLog("request", fmt.Sprintf("流式完成（无 usage）: %s", route.VendorName), "info", fmt.Sprintf("latency=%dms", latency))
 		}
 
 		// 记录聊天
 		if totalContent != "" {
 			go service.AddChatMessage("assistant", totalContent)
-			go service.StoreEmbedding(userID, totalContent, "proxy")
+			convCtx.AssistantContent = totalContent
 		}
 
-		log.Printf("[proxy] stream %s vendor=%d key=%s user=%s latency=%dms source=%s",
-			route.ModelID, route.VendorID, keyPrefix8(route.KeyID), username, time.Since(startTime).Milliseconds(), source)
+		log.Printf("[proxy] stream %s vendor=%d key=%s user=%s latency=%dms source=%s conv=%s",
+			route.ModelID, route.VendorID, keyPrefix8(route.KeyID), username, time.Since(startTime).Milliseconds(), source, convCtx.ID)
+
+		// 对话完成：合并存储 embedding + 写汇总日志
+		if convCtx.AssistantContent != "" {
+			go service.StoreEmbedding(userID, userMsgSummary+"\n\n"+convCtx.AssistantContent, convCtx.Source)
+		}
+		convCtx.SummarizeAndLog()
 		return
 	}
 
 	// 所有路由都失败
-	service.WriteLog("failover", "所有厂商均失败（流式）", "error", fmt.Sprintf("last_error=%s", lastError))
+	convCtx.SummarizeAndLog()
 	fmt.Fprintf(w, "data: {\"error\":{\"message\":\"所有厂商均失败: %s\",\"type\":\"all_vendors_failed\"}}\n\n", lastError)
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
@@ -429,6 +501,27 @@ func copyMap(src map[string]interface{}) map[string]interface{} {
 		dst[k] = v
 	}
 	return dst
+}
+
+// extractContent 兼容提取 content：string 或 [{"type":"text","text":"..."}] 数组格式
+func extractContent(content interface{}) string {
+	if s, ok := content.(string); ok {
+		return s
+	}
+	if arr, ok := content.([]interface{}); ok {
+		var sb strings.Builder
+		for _, item := range arr {
+			if m, ok := item.(map[string]interface{}); ok {
+				if t, _ := m["type"].(string); t == "text" {
+					if text, _ := m["text"].(string); text != "" {
+						sb.WriteString(text)
+					}
+				}
+			}
+		}
+		return sb.String()
+	}
+	return ""
 }
 
 func handleStreamResponse(w http.ResponseWriter, resp *http.Response, startTime time.Time, route *service.RouteInfoType, modelID string, userID int, username string) {
@@ -612,6 +705,8 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 		username = session.Username
 	}
 
+	conversationID := generateConversationID()
+
 	var req map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errResponse(w, "请求体解析失败", 400)
@@ -634,12 +729,40 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 		req["tools"] = tools
 	}
 
+	// 提取用户消息摘要
+	userMsgSummary := ""
+	if messages, ok := req["messages"].([]interface{}); ok {
+		for _, m := range messages {
+			if msg, ok := m.(map[string]interface{}); ok {
+				if role, _ := msg["role"].(string); role == "user" {
+					if content, _ := msg["content"].(string); content != "" {
+						userMsgSummary = content
+					}
+				}
+			}
+		}
+	}
+	if len(userMsgSummary) > 200 {
+		userMsgSummary = userMsgSummary[:200]
+	}
+
+	convCtx := &ConversationContext{
+		ID:          conversationID,
+		UserID:      userID,
+		Username:    username,
+		UserMessage: userMsgSummary,
+		Source:      "workspace",
+		StartTime:   startTime,
+	}
+
 	// 获取路由
 	route := service.GetRouteByStrategy()
 	if route == nil {
 		route = service.GetDefaultRoute()
 	}
 	if route == nil {
+		convCtx.Errors = append(convCtx.Errors, "无可用厂商（无策略、无可用选项）")
+		convCtx.SummarizeAndLog()
 		errResponse(w, "请先配置 API Key 和模型", 400)
 		return
 	}
@@ -649,8 +772,6 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 
 	// 请求转储（只保留最近20个文件）
 	service.DumpRequest(req)
-
-	service.WriteLog("workspace", fmt.Sprintf("工作台聊天开始: %s", route.ModelID), "info", fmt.Sprintf("user=%s", username))
 
 	// 构建故障转移路由列表
 	attempts := buildFailoverAttempts(route)
@@ -662,9 +783,9 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if isStream {
-		handleWorkspaceStreamWithFailover(w, req, attempts, startTime, modelID, userID, username)
+		handleWorkspaceStreamWithFailover(w, req, attempts, startTime, modelID, userID, username, userMsgSummary, convCtx)
 	} else {
-		handleWorkspaceNormalWithFailover(w, req, attempts, startTime, modelID, userID, username)
+		handleWorkspaceNormalWithFailover(w, req, attempts, startTime, modelID, userID, username, userMsgSummary, convCtx)
 	}
 }
 
@@ -676,7 +797,7 @@ func keyPrefix8(s string) string {
 }
 
 // handleWorkspaceNormalWithFailover WorkspaceChat 非流式响应（支持故障转移和工具调用）
-func handleWorkspaceNormalWithFailover(w http.ResponseWriter, req map[string]interface{}, attempts []*service.RouteInfoType, startTime time.Time, modelID string, userID int, username string) {
+func handleWorkspaceNormalWithFailover(w http.ResponseWriter, req map[string]interface{}, attempts []*service.RouteInfoType, startTime time.Time, modelID string, userID int, username string, userMsgSummary string, convCtx *ConversationContext) {
 	failedVendors := make(map[int]bool)
 	var lastError string
 
@@ -688,7 +809,9 @@ func handleWorkspaceNormalWithFailover(w http.ResponseWriter, req map[string]int
 		source := "策略路由"
 		if idx > 0 {
 			source = "故障转移"
+			convCtx.FailoverCount++
 		}
+		convCtx.Models = append(convCtx.Models, route.ModelID)
 
 		fwdReq := copyMap(req)
 		fwdReq["model"] = route.ModelID
@@ -704,11 +827,12 @@ func handleWorkspaceNormalWithFailover(w http.ResponseWriter, req map[string]int
 		if err != nil {
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
+				ConversationID: convCtx.ID,
+				UserID:         userID, Username: username,
 				VendorID: route.VendorID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: err.Error(),
 			})
-			service.WriteLog("failover", fmt.Sprintf("WorkspaceChat %s 请求失败（网络错误）", route.VendorName), "error", fmt.Sprintf("source=%s,error=%s", source, err.Error()))
+			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 网络错误: %s", route.VendorName, err.Error()))
 			failedVendors[route.VendorID] = true
 			lastError = err.Error()
 			continue
@@ -724,11 +848,12 @@ func handleWorkspaceNormalWithFailover(w http.ResponseWriter, req map[string]int
 				errMsg = errMsg[:500]
 			}
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
+				ConversationID: convCtx.ID,
+				UserID:         userID, Username: username,
 				VendorID: route.VendorID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: errMsg,
 			})
-			service.WriteLog("failover", fmt.Sprintf("WorkspaceChat %s 请求失败（HTTP %d）", route.VendorName, resp.StatusCode), "error", fmt.Sprintf("source=%s,error=%s", source, errMsg))
+			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
 			failedVendors[route.VendorID] = true
 			lastError = errMsg
 			continue
@@ -743,12 +868,13 @@ func handleWorkspaceNormalWithFailover(w http.ResponseWriter, req map[string]int
 				if msg, ok := choice["message"].(map[string]interface{}); ok {
 					if toolCalls, ok := msg["tool_calls"].([]interface{}); ok && len(toolCalls) > 0 {
 						// 执行技能调用（带故障转移）
-						handleToolCallsWithFailover(w, req, attempts[idx:], toolCalls, username, startTime, userID)
+						convCtx.ToolCallCount++
+						handleToolCallsWithFailover(w, req, attempts[idx:], toolCalls, username, startTime, userID, userMsgSummary, convCtx)
 						return
 					}
 					if content, ok := msg["content"].(string); ok && content != "" {
 						go service.AddChatMessage("assistant", content)
-						go service.StoreEmbedding(userID, content, "workspace")
+						convCtx.AssistantContent = content
 					}
 				}
 			}
@@ -760,16 +886,14 @@ func handleWorkspaceNormalWithFailover(w http.ResponseWriter, req map[string]int
 			totalTokens := intFloat(usage["total_tokens"])
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
-				VendorID: route.VendorID, ModelID: route.ModelID,
+				ConversationID:   convCtx.ID,
+				UserID:           userID, Username: username,
+				VendorID:         route.VendorID, ModelID: route.ModelID,
 				PromptTokens: promptTokens, CompletionTokens: completionTokens,
 				TotalTokens: totalTokens, LatencyMs: latency, Success: true,
 			})
-			service.WriteLog("workspace", fmt.Sprintf("响应成功: %s（%s）输入 %d / 输出 %d / 耗时 %dms", route.ModelID, source, promptTokens, completionTokens, latency), "info", "")
-		}
-
-		if source == "故障转移" {
-			service.WriteLog("failover", fmt.Sprintf("WorkspaceChat 故障转移成功: %s", route.VendorName), "info", fmt.Sprintf("model=%s", route.ModelID))
+			convCtx.TotalPrompt += promptTokens
+			convCtx.TotalCompletion += completionTokens
 		}
 
 		for k, v := range resp.Header {
@@ -782,17 +906,24 @@ func handleWorkspaceNormalWithFailover(w http.ResponseWriter, req map[string]int
 		w.WriteHeader(resp.StatusCode)
 		w.Write(body)
 
-		log.Printf("[workspace] normal %s vendor=%d key=%s user=%s latency=%dms source=%s",
-			route.ModelID, route.VendorID, keyPrefix8(route.KeyID), username, time.Since(startTime).Milliseconds(), source)
+		log.Printf("[workspace] normal %s vendor=%d key=%s user=%s latency=%dms source=%s conv=%s",
+			route.ModelID, route.VendorID, keyPrefix8(route.KeyID), username, time.Since(startTime).Milliseconds(), source, convCtx.ID)
+
+		// 对话完成：合并存储 embedding + 写汇总日志
+		if convCtx.AssistantContent != "" {
+			go service.StoreEmbedding(userID, userMsgSummary+"\n\n"+convCtx.AssistantContent, convCtx.Source)
+		}
+		convCtx.SummarizeAndLog()
 		return
 	}
 
-	service.WriteLog("failover", "WorkspaceChat 所有厂商均失败", "error", fmt.Sprintf("last_error=%s", lastError))
+	// 所有厂商都失败
+	convCtx.SummarizeAndLog()
 	errResponse(w, fmt.Sprintf("所有厂商均失败: %s", lastError), 502)
 }
 
 // handleWorkspaceStreamWithFailover WorkspaceChat 流式响应（支持故障转移）
-func handleWorkspaceStreamWithFailover(w http.ResponseWriter, req map[string]interface{}, attempts []*service.RouteInfoType, startTime time.Time, modelID string, userID int, username string) {
+func handleWorkspaceStreamWithFailover(w http.ResponseWriter, req map[string]interface{}, attempts []*service.RouteInfoType, startTime time.Time, modelID string, userID int, username string, userMsgSummary string, convCtx *ConversationContext) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -815,7 +946,9 @@ func handleWorkspaceStreamWithFailover(w http.ResponseWriter, req map[string]int
 		source := "策略路由"
 		if idx > 0 {
 			source = "故障转移"
+			convCtx.FailoverCount++
 		}
+		convCtx.Models = append(convCtx.Models, route.ModelID)
 
 		fwdReq := copyMap(req)
 		fwdReq["model"] = route.ModelID
@@ -831,11 +964,12 @@ func handleWorkspaceStreamWithFailover(w http.ResponseWriter, req map[string]int
 		if err != nil {
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
+				ConversationID: convCtx.ID,
+				UserID:         userID, Username: username,
 				VendorID: route.VendorID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: err.Error(),
 			})
-			service.WriteLog("error", fmt.Sprintf("WorkspaceChat 流式中断: %s", route.VendorName), "error", fmt.Sprintf("error=%s", err.Error()))
+			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 流式中断: %s", route.VendorName, err.Error()))
 			failedVendors[route.VendorID] = true
 			lastError = err.Error()
 			continue
@@ -850,18 +984,15 @@ func handleWorkspaceStreamWithFailover(w http.ResponseWriter, req map[string]int
 			}
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
+				ConversationID: convCtx.ID,
+				UserID:         userID, Username: username,
 				VendorID: route.VendorID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: errMsg,
 			})
-			service.WriteLog("error", fmt.Sprintf("WorkspaceChat 上游返回错误: HTTP %d（%s）", resp.StatusCode, route.VendorName), "error", fmt.Sprintf("error=%s", errMsg))
+			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
 			failedVendors[route.VendorID] = true
 			lastError = errMsg
 			continue
-		}
-
-		if source == "故障转移" {
-			service.WriteLog("failover", fmt.Sprintf("WorkspaceChat 故障转移成功: %s", route.VendorName), "info", fmt.Sprintf("model=%s", route.ModelID))
 		}
 
 		scanner := bufio.NewScanner(resp.Body)
@@ -901,12 +1032,14 @@ func handleWorkspaceStreamWithFailover(w http.ResponseWriter, req map[string]int
 					totalTokens := intFloat(usage["total_tokens"])
 					latency := int(time.Since(startTime).Milliseconds())
 					service.RecordStat(&service.LLMStatType{
-						UserID: userID, Username: username,
-						VendorID: route.VendorID, ModelID: route.ModelID,
+						ConversationID:   convCtx.ID,
+						UserID:           userID, Username: username,
+						VendorID:         route.VendorID, ModelID: route.ModelID,
 						PromptTokens: promptTokens, CompletionTokens: completionTokens,
 						TotalTokens: totalTokens, LatencyMs: latency, Success: true,
 					})
-					service.WriteLog("workspace", fmt.Sprintf("流式完成: %s（%d+%d tokens）", route.VendorName, promptTokens, completionTokens), "info", fmt.Sprintf("latency=%dms,model=%s", latency, route.ModelID))
+					convCtx.TotalPrompt += promptTokens
+					convCtx.TotalCompletion += completionTokens
 					success = true
 				}
 				if choices, ok := sseData["choices"].([]interface{}); ok && len(choices) > 0 {
@@ -929,31 +1062,38 @@ func handleWorkspaceStreamWithFailover(w http.ResponseWriter, req map[string]int
 		if !success && totalContent != "" {
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
-				VendorID: route.VendorID, ModelID: route.ModelID,
+				ConversationID: convCtx.ID,
+				UserID:         userID, Username: username,
+				VendorID:       route.VendorID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: true,
 			})
-			service.WriteLog("workspace", fmt.Sprintf("流式完成（无 usage）: %s", route.VendorName), "info", fmt.Sprintf("latency=%dms", latency))
 		}
 
 		if totalContent != "" {
 			go service.AddChatMessage("assistant", totalContent)
-			go service.StoreEmbedding(userID, totalContent, "workspace")
+			convCtx.AssistantContent = totalContent
 		}
 
-		log.Printf("[workspace] stream %s vendor=%d key=%s user=%s latency=%dms source=%s",
-			route.ModelID, route.VendorID, keyPrefix8(route.KeyID), username, time.Since(startTime).Milliseconds(), source)
+		log.Printf("[workspace] stream %s vendor=%d key=%s user=%s latency=%dms source=%s conv=%s",
+			route.ModelID, route.VendorID, keyPrefix8(route.KeyID), username, time.Since(startTime).Milliseconds(), source, convCtx.ID)
+
+		// 对话完成：合并存储 embedding + 写汇总日志
+		if convCtx.AssistantContent != "" {
+			go service.StoreEmbedding(userID, userMsgSummary+"\n\n"+convCtx.AssistantContent, convCtx.Source)
+		}
+		convCtx.SummarizeAndLog()
 		return
 	}
 
-	service.WriteLog("failover", "WorkspaceChat 所有厂商均失败（流式）", "error", fmt.Sprintf("last_error=%s", lastError))
+	// 所有路由都失败
+	convCtx.SummarizeAndLog()
 	fmt.Fprintf(w, "data: {\"error\":{\"message\":\"所有厂商均失败: %s\",\"type\":\"all_vendors_failed\"}}\n\n", lastError)
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
 }
 
 // handleToolCallsWithFailover 工具调用（支持故障转移）
-func handleToolCallsWithFailover(w http.ResponseWriter, originalReq map[string]interface{}, attempts []*service.RouteInfoType, toolCalls []interface{}, username string, startTime time.Time, userID int) {
+func handleToolCallsWithFailover(w http.ResponseWriter, originalReq map[string]interface{}, attempts []*service.RouteInfoType, toolCalls []interface{}, username string, startTime time.Time, userID int, userMsgSummary string, convCtx *ConversationContext) {
 	tc, _ := toolCalls[0].(map[string]interface{})
 	fn, _ := tc["function"].(map[string]interface{})
 	fnName, _ := fn["name"].(string)
@@ -962,6 +1102,8 @@ func handleToolCallsWithFailover(w http.ResponseWriter, originalReq map[string]i
 		skillID := strings.TrimPrefix(fnName, "skill_")
 		result, err := service.ExecuteSkill(skillID)
 		if err != nil {
+			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("技能执行失败 %s: %s", skillID, err.Error()))
+			convCtx.SummarizeAndLog()
 			errResponse(w, err.Error(), 500)
 			return
 		}
@@ -991,7 +1133,9 @@ func handleToolCallsWithFailover(w http.ResponseWriter, originalReq map[string]i
 			source := "策略路由"
 			if idx > 0 {
 				source = "故障转移"
+				convCtx.FailoverCount++
 			}
+			convCtx.Models = append(convCtx.Models, route.ModelID)
 
 			secondReq := map[string]interface{}{
 				"model":    route.ModelID,
@@ -1007,6 +1151,7 @@ func handleToolCallsWithFailover(w http.ResponseWriter, originalReq map[string]i
 			client := &http.Client{Timeout: 120 * time.Second}
 			resp2, err := client.Do(upstreamReq)
 			if err != nil {
+				convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 工具总结网络错误: %s", route.VendorName, err.Error()))
 				failedVendors[route.VendorID] = true
 				lastError = err.Error()
 				continue
@@ -1016,8 +1161,13 @@ func handleToolCallsWithFailover(w http.ResponseWriter, originalReq map[string]i
 			resp2.Body.Close()
 
 			if resp2.StatusCode != 200 {
+				errMsg := string(body2)
+				if len(errMsg) > 500 {
+					errMsg = errMsg[:500]
+				}
+				convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 工具总结 HTTP %d: %s", route.VendorName, resp2.StatusCode, errMsg))
 				failedVendors[route.VendorID] = true
-				lastError = string(body2)
+				lastError = errMsg
 				continue
 			}
 
@@ -1033,23 +1183,48 @@ func handleToolCallsWithFailover(w http.ResponseWriter, originalReq map[string]i
 
 			var respData2 map[string]interface{}
 			if json.Unmarshal(body2, &respData2) == nil {
+				if usage, ok := respData2["usage"].(map[string]interface{}); ok {
+					promptTokens := intFloat(usage["prompt_tokens"])
+					completionTokens := intFloat(usage["completion_tokens"])
+					totalTokens := intFloat(usage["total_tokens"])
+					latency := int(time.Since(startTime).Milliseconds())
+					service.RecordStat(&service.LLMStatType{
+						ConversationID:   convCtx.ID,
+						UserID:           userID, Username: username,
+						VendorID:         route.VendorID, ModelID: route.ModelID,
+						PromptTokens: promptTokens, CompletionTokens: completionTokens,
+						TotalTokens: totalTokens, LatencyMs: latency, Success: true,
+					})
+					convCtx.TotalPrompt += promptTokens
+					convCtx.TotalCompletion += completionTokens
+				}
 				if choices, ok := respData2["choices"].([]interface{}); ok && len(choices) > 0 {
 					if choice, ok := choices[0].(map[string]interface{}); ok {
 						if msg, ok := choice["message"].(map[string]interface{}); ok {
 							if content, ok := msg["content"].(string); ok && content != "" {
 								go service.AddChatMessage("assistant", content)
-								go service.StoreEmbedding(userID, content, "workspace")
+								convCtx.AssistantContent = content
 							}
 						}
 					}
 				}
 			}
-			log.Printf("[workspace] skill=%s user=%s latency=%dms source=%s", skillID, username, time.Since(startTime).Milliseconds(), source)
+			log.Printf("[workspace] skill=%s user=%s latency=%dms source=%s conv=%s", skillID, username, time.Since(startTime).Milliseconds(), source, convCtx.ID)
+
+			// 对话完成：合并存储 embedding + 写汇总日志
+			if convCtx.AssistantContent != "" {
+				go service.StoreEmbedding(userID, userMsgSummary+"\n\n"+convCtx.AssistantContent, convCtx.Source)
+			}
+			convCtx.SummarizeAndLog()
 			return
 		}
 
+		// 工具调用后总结全部失败
+		convCtx.SummarizeAndLog()
 		errResponse(w, fmt.Sprintf("工具调用后总结失败: %s", lastError), 502)
 	} else {
+		convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("未知工具: %s", fnName))
+		convCtx.SummarizeAndLog()
 		errResponse(w, fmt.Sprintf("未知工具: %s", fnName), 400)
 	}
 }

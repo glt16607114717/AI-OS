@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ── 向量存储（MySQL）──
@@ -134,12 +135,92 @@ func GetEmbeddings(texts []string) ([][]float64, error) {
 	return vectors, nil
 }
 
+// ── 知识提炼（GLM-4-Flash 免费模型）──
+
+// summarizeForKnowledge 用 GLM-4-Flash 提炼对话核心知识
+func summarizeForKnowledge(content string) (string, error) {
+	if len(content) < 50 {
+		return content, nil // 太短不提炼
+	}
+
+	prompt := fmt.Sprintf(`请从以下对话内容中提炼核心知识点，要求：
+1. 只保留有价值的技术知识、解决方案、最佳实践
+2. 去除寒暄、重复、无关内容
+3. 保留关键代码片段、配置、命令
+4. 尽可能详细完整，宁可冗余也不要丢失重要信息，最多1000字
+
+对话内容：
+%s`, content)
+
+	body := map[string]interface{}{
+		"model": "glm-4-flash",
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
+		},
+		"temperature": 0.3,
+	}
+	bodyJSON, _ := json.Marshal(body)
+
+	// 获取智谱 key
+	conn, err := GetDB()
+	if err != nil {
+		return content, nil
+	}
+	var apiKey string
+	if err := conn.QueryRow(`SELECT k.api_key FROM sys_api_key k
+		JOIN sys_vendor v ON k.vendor_id = v.id
+		WHERE v.code = 'zhipu' AND k.enabled = 1 AND k.api_key != ''
+		LIMIT 1`).Scan(&apiKey); err != nil || apiKey == "" {
+		return content, nil // 没 key 直接用原文
+	}
+
+	req, _ := http.NewRequest("POST",
+		"https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
+		bytes.NewReader(bodyJSON))
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[embedding] 知识提炼失败: %v，使用原文", err)
+		return content, nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		log.Printf("[embedding] 知识提炼 HTTP %d: %s，使用原文", resp.StatusCode, string(respBody)[:200])
+		return content, nil
+	}
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if choices, ok := result["choices"].([]interface{}); ok && len(choices) > 0 {
+		if choice, ok := choices[0].(map[string]interface{}); ok {
+			if msg, ok := choice["message"].(map[string]interface{}); ok {
+				if summary, ok := msg["content"].(string); ok && summary != "" {
+					return summary, nil
+				}
+			}
+		}
+	}
+	return content, nil
+}
+
 // ── 向量存储 ──
 
 func StoreEmbedding(userID int, content, source string) error {
 	conn, err := GetDB()
 	if err != nil {
 		return err
+	}
+
+	// 先用 GLM-4-Flash 提炼核心知识（异步场景下可接受延迟）
+	summarized, err := summarizeForKnowledge(content)
+	if err == nil && summarized != "" {
+		content = summarized
 	}
 
 	// 计算内容 hash 去重（按用户隔离）

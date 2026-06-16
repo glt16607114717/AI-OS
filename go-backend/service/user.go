@@ -388,15 +388,15 @@ func RunAIAnalysis() error {
 %s`, docsContent)
 
 		body := map[string]interface{}{
-			"model": "glm-5.1",
-			"messages": []map[string]string{
-				{"role": "user", "content": prompt},
-			},
-			"temperature": 0.7,
-		}
-		bodyJSON, _ := json.Marshal(body)
+		"model": "glm-5.1",
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
+		},
+		"temperature": 0.7,
+	}
+	bodyJSON, _ := json.Marshal(body)
 
-		req, _ := http.NewRequest("POST", "https://open.bigmodel.cn/api/paas/v4/chat/completions", strings.NewReader(string(bodyJSON)))
+	req, _ := http.NewRequest("POST", "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions", strings.NewReader(string(bodyJSON)))
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 		req.Header.Set("Content-Type", "application/json")
 

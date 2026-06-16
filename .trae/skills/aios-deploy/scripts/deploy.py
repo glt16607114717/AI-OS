@@ -29,7 +29,7 @@ def main():
     if len(sys.argv) > 1:
         action = sys.argv[1].lower()
     
-    go_dir = r'd:\wwwroot\AI\AI-OS\go-backend'
+    go_dir = r'd:\wwwroot\ai-os\go-backend'
     output_file = 'ai-os-server'
     server_host = 'ubuntu@124.221.220.89'
     deploy_port = '18731'

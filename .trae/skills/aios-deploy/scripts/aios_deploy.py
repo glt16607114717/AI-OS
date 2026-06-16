@@ -33,25 +33,40 @@ def run(cmd, cwd=None, check=True, shell=False):
     return result
 
 
+# SSH 公共参数：重试 + 保活，对抗丢包
+SSH_OPTS = [
+    "-o", "ConnectTimeout=30",
+    "-o", "ServerAliveInterval=10",
+    "-o", "ServerAliveCountMax=6",
+    "-o", "ConnectionAttempts=5",
+]
+
+
 def ssh_run(cmd, check=True):
-    """在远程服务器执行命令"""
+    """在远程服务器执行命令（带重试保活）"""
     return run(
-        ["ssh", "-o", "ConnectTimeout=15", f"{SERVER_USER}@{SERVER_HOST}", cmd],
+        ["ssh"] + SSH_OPTS + [f"{SERVER_USER}@{SERVER_HOST}", cmd],
         check=check,
     )
 
 
-def scp_upload(local, remote):
-    """SCP 上传文件"""
-    return run(
-        [
-            "scp",
-            "-o",
-            "ConnectTimeout=15",
-            local,
-            f"{SERVER_USER}@{SERVER_HOST}:{remote}",
-        ]
-    )
+def scp_upload(local, remote, max_retries=5):
+    """SCP 上传文件（自动重试，对抗丢包）"""
+    for attempt in range(1, max_retries + 1):
+        result = run(
+            ["scp"] + SSH_OPTS + [local, f"{SERVER_USER}@{SERVER_HOST}:{remote}"],
+            check=False,
+        )
+        if result.returncode == 0:
+            if attempt > 1:
+                print(f"[成功] 上传完成（第{attempt}次重试成功）")
+            return result
+        if attempt < max_retries:
+            wait = attempt * 3
+            print(f"[重试] 上传失败，{wait}秒后第{attempt+1}次尝试（共{max_retries}次）...")
+            time.sleep(wait)
+    print(f"[错误] 上传失败，已重试{max_retries}次")
+    sys.exit(1)
 
 
 def build():

@@ -24,12 +24,12 @@ func RecordStat(stat *model.LLMStat) {
 		errMsg = errMsg[:512]
 	}
 	conn.Exec(`INSERT INTO sys_llm_stats (ts, user_id, username, vendor_id, model_id,
-		prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error, conversation_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		time.Now().Format("2006-01-02 15:04:05"),
 		stat.UserID, stat.Username, stat.VendorID, stat.ModelID,
 		stat.PromptTokens, stat.CompletionTokens, stat.TotalTokens,
-		stat.LatencyMs, success, errMsg)
+		stat.LatencyMs, success, errMsg, stat.ConversationID)
 }
 
 func CleanupStats() int {
@@ -54,13 +54,14 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 	cutoff := time.Now().AddDate(0, 0, -days).Format("2006-01-02 15:04:05")
 
 	// 总览
-	var totalReqs, totalTokens, totalPrompt, totalCompletion, successCount int
+	var totalReqs, totalConvs, totalTokens, totalPrompt, totalCompletion, successCount int
 	var avgLatency float64
-	if err := conn.QueryRow(`SELECT COUNT(*), COALESCE(SUM(total_tokens),0), COALESCE(SUM(prompt_tokens),0),
+	if err := conn.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT NULLIF(conversation_id, '')),
+		COALESCE(SUM(total_tokens),0), COALESCE(SUM(prompt_tokens),0),
 		COALESCE(SUM(completion_tokens),0), COALESCE(AVG(CASE WHEN success=1 THEN latency_ms END),0),
 		COALESCE(SUM(success),0)
 		FROM sys_llm_stats WHERE ts >= ?`, cutoff).Scan(
-		&totalReqs, &totalTokens, &totalPrompt, &totalCompletion, &avgLatency, &successCount); err != nil {
+		&totalReqs, &totalConvs, &totalTokens, &totalPrompt, &totalCompletion, &avgLatency, &successCount); err != nil {
 		log.Printf("[stat] 查询总览失败: %v", err)
 		return nil, err
 	}
@@ -73,7 +74,8 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 	// 按厂商
 	byVendor := map[string]interface{}{}
 	vRows, _ := conn.Query(`SELECT s.vendor_id, COALESCE(v.name, CONCAT('vendor_', s.vendor_id)) as name,
-		COUNT(*) as requests, COALESCE(SUM(s.total_tokens),0) as tokens,
+		COUNT(*) as requests, COUNT(DISTINCT NULLIF(s.conversation_id, '')) as conversations,
+		COALESCE(SUM(s.total_tokens),0) as tokens,
 		COALESCE(SUM(s.prompt_tokens),0) as prompt_tokens,
 		COALESCE(SUM(s.completion_tokens),0) as completion_tokens,
 		COALESCE(AVG(CASE WHEN s.success=1 THEN s.latency_ms END),0) as avg_latency_ms,
@@ -84,15 +86,15 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 	if vRows != nil {
 		defer vRows.Close()
 		for vRows.Next() {
-			var vid, reqs, tokens, pt, ct, sc, errs int
+			var vid, reqs, convs, tokens, pt, ct, sc, errs int
 			var name string
 			var al float64
-			if err := vRows.Scan(&vid, &name, &reqs, &tokens, &pt, &ct, &al, &sc, &errs); err != nil {
+			if err := vRows.Scan(&vid, &name, &reqs, &convs, &tokens, &pt, &ct, &al, &sc, &errs); err != nil {
 				log.Printf("[stats] scan vendor 失败: %v", err)
 				continue
 			}
 			byVendor[fmt.Sprintf("%d", vid)] = map[string]interface{}{
-				"name": name, "requests": reqs, "tokens": tokens,
+				"name": name, "requests": reqs, "conversations": convs, "tokens": tokens,
 				"prompt_tokens": pt, "completion_tokens": ct,
 				"avg_latency_ms": int(al), "success_count": sc, "errors": errs,
 			}
@@ -101,7 +103,8 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 
 	// 按模型
 	byModel := map[string]interface{}{}
-	mRows, _ := conn.Query(`SELECT model_id, COUNT(*), COALESCE(SUM(total_tokens),0),
+	mRows, _ := conn.Query(`SELECT model_id, COUNT(*), COUNT(DISTINCT NULLIF(conversation_id, '')),
+		COALESCE(SUM(total_tokens),0),
 		COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
 		COALESCE(AVG(CASE WHEN success=1 THEN latency_ms END),0),
 		SUM(success), SUM(CASE WHEN success=0 THEN 1 ELSE 0 END)
@@ -110,11 +113,11 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 		defer mRows.Close()
 		for mRows.Next() {
 			var mid string
-			var reqs, tokens, pt, ct, sc, errs int
+			var reqs, convs, tokens, pt, ct, sc, errs int
 			var al float64
-			mRows.Scan(&mid, &reqs, &tokens, &pt, &ct, &al, &sc, &errs)
+			mRows.Scan(&mid, &reqs, &convs, &tokens, &pt, &ct, &al, &sc, &errs)
 			byModel[mid] = map[string]interface{}{
-				"requests": reqs, "tokens": tokens,
+				"requests": reqs, "conversations": convs, "tokens": tokens,
 				"prompt_tokens": pt, "completion_tokens": ct,
 				"avg_latency_ms": int(al), "success_count": sc, "errors": errs,
 			}
@@ -144,7 +147,8 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 	// 按用户
 	byUser := map[string]interface{}{}
 	uRows, _ := conn.Query(`SELECT user_id, COALESCE(username, CONCAT('user_', user_id)) as username,
-		COUNT(*) as requests, COALESCE(SUM(total_tokens),0) as tokens,
+		COUNT(*) as requests, COUNT(DISTINCT NULLIF(conversation_id, '')) as conversations,
+		COALESCE(SUM(total_tokens),0) as tokens,
 		COALESCE(SUM(prompt_tokens),0) as prompt_tokens,
 		COALESCE(SUM(completion_tokens),0) as completion_tokens,
 		COALESCE(AVG(CASE WHEN success=1 THEN latency_ms END),0) as avg_latency_ms,
@@ -154,14 +158,14 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 	if uRows != nil {
 		defer uRows.Close()
 		for uRows.Next() {
-			var uid, reqs, tokens, pt, ct, sc, errs int
+			var uid, reqs, convs, tokens, pt, ct, sc, errs int
 			var name string
 			var al float64
-			if err := uRows.Scan(&uid, &name, &reqs, &tokens, &pt, &ct, &al, &sc, &errs); err != nil {
+			if err := uRows.Scan(&uid, &name, &reqs, &convs, &tokens, &pt, &ct, &al, &sc, &errs); err != nil {
 				continue
 			}
 			byUser[fmt.Sprintf("%d", uid)] = map[string]interface{}{
-				"username": name, "requests": reqs, "tokens": tokens,
+				"username": name, "requests": reqs, "conversations": convs, "tokens": tokens,
 				"prompt_tokens": pt, "completion_tokens": ct,
 				"avg_latency_ms": int(al), "success_count": sc, "errors": errs,
 			}
@@ -169,7 +173,8 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 	}
 
 	return map[string]interface{}{
-		"total_requests": totalReqs, "total_tokens": totalTokens,
+		"total_requests": totalReqs, "total_conversations": totalConvs,
+		"total_tokens": totalTokens,
 		"total_prompt_tokens": totalPrompt, "total_completion_tokens": totalCompletion,
 		"avg_latency_ms": int(avgLatency), "success_rate": successRate,
 		"by_vendor": byVendor, "by_model": byModel, "daily": daily,

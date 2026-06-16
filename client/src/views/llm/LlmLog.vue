@@ -20,7 +20,7 @@ interface LogEntry {
 const logs = ref<LogEntry[]>([])
 const loading = ref(true)
 const maxId = ref(0)
-const activeCategory = ref('')
+const activeCategory = ref('conversation')
 const paused = ref(false)
 const expandedIds = ref<Set<number>>(new Set())
 const autoScroll = ref(true)
@@ -40,13 +40,8 @@ function goLogPage(page: number) {
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 const categories = [
+  { key: 'conversation', label: '对话' },
   { key: '', label: '全部' },
-  { key: 'request', label: '请求' },
-  { key: 'route', label: '路由' },
-  { key: 'downgrade', label: '降级' },
-  { key: 'quota', label: '用量' },
-  { key: 'failover', label: '故障' },
-  { key: 'error', label: '错误' },
 ]
 
 async function fetchLogs(incremental = false) {
@@ -121,6 +116,7 @@ function togglePause() {
 }
 
 const categoryColorMap: Record<string, string> = {
+  conversation: '#6366f1',
   request: '#3b82f6',
   route: '#8b5cf6',
   downgrade: '#f59e0b',

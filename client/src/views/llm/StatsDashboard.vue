@@ -14,6 +14,7 @@ function authHeaders() {
 interface VendorStat {
   name: string
   requests: number
+  conversations: number
   tokens: number
   avg_latency_ms: number
   success_count: number
@@ -22,6 +23,7 @@ interface VendorStat {
 
 interface ModelStat {
   requests: number
+  conversations: number
   tokens: number
   avg_latency_ms: number
   success_count: number
@@ -31,6 +33,7 @@ interface ModelStat {
 interface UserStat {
   username: string
   requests: number
+  conversations: number
   tokens: number
   prompt_tokens: number
   completion_tokens: number
@@ -50,6 +53,7 @@ interface DailyStat {
 
 interface Stats {
   total_requests: number
+  total_conversations: number
   total_tokens: number
   total_prompt_tokens: number
   total_completion_tokens: number
@@ -368,6 +372,10 @@ onUnmounted(() => {
           <div class="card-label">总请求数</div>
         </div>
         <div class="overview-card">
+          <div class="card-value">{{ formatNumber(stats.total_conversations) }}</div>
+          <div class="card-label">总对话数</div>
+        </div>
+        <div class="overview-card">
           <div class="card-value">{{ formatNumber(stats.total_tokens) }}</div>
           <div class="card-label">总 Token 数</div>
           <div class="card-sub">Prompt: {{ formatNumber(stats.total_prompt_tokens) }} / Completion: {{ formatNumber(stats.total_completion_tokens) }}</div>
@@ -426,12 +434,13 @@ onUnmounted(() => {
         <div v-if="modelEntries.length === 0" class="table-empty">暂无数据</div>
         <table v-else class="stats-table">
           <thead>
-            <tr><th>模型</th><th>请求数</th><th>Token 数</th><th>平均延迟</th><th>成功率</th><th>错误数</th></tr>
+            <tr><th>模型</th><th>请求数</th><th>对话数</th><th>Token 数</th><th>平均延迟</th><th>成功率</th><th>错误数</th></tr>
           </thead>
           <tbody>
             <tr v-for="m in modelEntries" :key="m.id">
               <td class="cell-model">{{ m.id }}</td>
               <td>{{ m.requests }}</td>
+              <td>{{ m.conversations }}</td>
               <td>{{ formatNumber(m.tokens) }}</td>
               <td>{{ formatLatency(m.avg_latency_ms) }}</td>
               <td>{{ m.success_count + m.errors > 0 ? (m.success_count / (m.success_count + m.errors) * 100).toFixed(1) + '%' : '—' }}</td>
@@ -447,12 +456,13 @@ onUnmounted(() => {
         <div v-if="userEntries.length === 0" class="table-empty">暂无数据</div>
         <table v-else class="stats-table">
           <thead>
-            <tr><th>用户</th><th>请求数</th><th>Token 数</th><th>Prompt</th><th>Completion</th><th>平均延迟</th><th>成功率</th></tr>
+            <tr><th>用户</th><th>请求数</th><th>对话数</th><th>Token 数</th><th>Prompt</th><th>Completion</th><th>平均延迟</th><th>成功率</th></tr>
           </thead>
           <tbody>
             <tr v-for="u in userEntries" :key="u.id" :class="{ 'my-row': u.username === currentUsername }">
               <td class="cell-name" :class="{ 'cell-name-red': u.username === currentUsername }">{{ u.username || u.id }}</td>
               <td>{{ u.requests }}</td>
+              <td>{{ u.conversations }}</td>
               <td>{{ formatNumber(u.tokens) }}</td>
               <td>{{ formatNumber(u.prompt_tokens) }}</td>
               <td>{{ formatNumber(u.completion_tokens) }}</td>

@@ -106,8 +106,8 @@ function resolveOptionLabel(val: string) {
   const vendorId = parts[0]
   const keyId = parts[1]
   const modelId = parts[2]
-  const vendor = groupedOptions.value.find(v => v.vendor_id === vendorId)
-  const keyGroup = vendor?.keys.find(k => k.key_id === keyId)
+  const vendor = groupedOptions.value.find(v => String(v.vendor_id) === vendorId)
+  const keyGroup = vendor?.keys.find(k => String(k.key_id) === keyId)
   const model = keyGroup?.models.find(m => m.model_id === modelId)
   if (vendor && keyGroup && model) {
     return `${vendor.vendor_name} / ${keyGroup.key_name} / ${model.display_name}`

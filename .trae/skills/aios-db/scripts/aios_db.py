@@ -19,7 +19,7 @@ DB_CONFIG = {
 # 危险关键词
 WRITE_KEYWORDS = ["INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "TRUNCATE", "GRANT", "REVOKE"]
 # 敏感字段（结果中脱敏）
-SENSITIVE_FIELDS = {"password_hash", "password", "api_key", "secret"}
+SENSITIVE_FIELDS = {"password_hash", "password", "secret"}
 
 
 def read_input():

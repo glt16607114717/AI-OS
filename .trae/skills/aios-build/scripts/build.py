@@ -2,7 +2,7 @@ import subprocess
 import os
 
 def main():
-    client_dir = r'd:\wwwroot\AI\AI-OS\client'
+    client_dir = r'd:\wwwroot\ai-os\client'
     
     if not os.path.exists(client_dir):
         print(f"错误：客户端目录不存在: {client_dir}")

@@ -23,10 +23,6 @@ func main() {
 		port = "18731"
 	}
 
-	// 初始化数据库表
-	log.Println("[init] 正在初始化数据库表...")
-	log.Println("[init] 数据库表初始化完成")
-
 	// 注入 API Key 查询函数（避免循环依赖）
 	middleware.APIKeyLookup = service.GetUserByAPIKey
 
