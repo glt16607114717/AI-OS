@@ -361,9 +361,13 @@ func ForceQuotaCheck(w http.ResponseWriter, r *http.Request) {
 // ── AI 建议 ──
 
 func GetSuggestions(w http.ResponseWriter, r *http.Request) {
+	userID := 0
+	if session := middleware.GetSessionFromCtx(r); session != nil {
+		userID = session.UserID
+	}
 	status := r.URL.Query().Get("status")
 	date := r.URL.Query().Get("date")
-	suggestions, err := service.GetSuggestions(status, date)
+	suggestions, err := service.GetSuggestions(userID, status, date)
 	if err != nil {
 		errResponse(w, err.Error(), 500)
 		return

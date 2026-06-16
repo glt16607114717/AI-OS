@@ -76,12 +76,15 @@ async function checkAgent() {
         agentListening.value = status.listening ?? false
         modelReady.value = status.model_ready ?? false
         voiceEnabled.value = status.enabled ?? false
-        commands.value = (status.commands ?? []).map((c: any) => ({
-          phrase: c.phrase ?? '',
-          position: c.position ?? null,
-          actions: c.actions ?? null,
-          enabled: c.enabled ?? true,
-        }))
+        // 只在首次加载（commands为空时）拉取指令列表，避免轮询覆盖用户编辑
+        if (commands.value.length === 0 && status.commands) {
+          commands.value = status.commands.map((c: any) => ({
+            phrase: c.phrase ?? '',
+            position: c.position ?? null,
+            actions: c.actions ?? null,
+            enabled: c.enabled ?? true,
+          }))
+        }
         // 如果开关已开但监听未启动，自动触发一次
         if (status.enabled && !status.listening && status.model_ready) {
           await safeAgent(() =>

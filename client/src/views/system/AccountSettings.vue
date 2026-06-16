@@ -343,7 +343,7 @@ onMounted(() => {
 
 <style scoped>
 .account-settings {
-  max-width: 900px;
+  max-width: 1200px;
 }
 
 .page-header {

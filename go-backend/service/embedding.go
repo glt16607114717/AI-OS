@@ -27,10 +27,12 @@ func EnsureEmbeddingTable() {
 		content_hash VARCHAR(64) NOT NULL,
 		vector BLOB NOT NULL,
 		source VARCHAR(100) DEFAULT '',
+		analyzed TINYINT DEFAULT 0,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		INDEX idx_content_hash (content_hash),
 		INDEX idx_user_id (user_id),
-		INDEX idx_source (source)
+		INDEX idx_source (source),
+		INDEX idx_analyzed (analyzed)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`); err != nil {
 		log.Printf("[embedding] 建表失败: %v", err)
 	}
@@ -140,10 +142,10 @@ func StoreEmbedding(userID int, content, source string) error {
 		return err
 	}
 
-	// 计算内容 hash 去重
+	// 计算内容 hash 去重（按用户隔离）
 	hash := contentHash(content)
 	var exists int
-	if err := conn.QueryRow("SELECT 1 FROM sys_embedding WHERE content_hash = ?", hash).Scan(&exists); err != nil && err != sql.ErrNoRows {
+	if err := conn.QueryRow("SELECT 1 FROM sys_embedding WHERE content_hash = ? AND user_id = ?", hash, userID).Scan(&exists); err != nil && err != sql.ErrNoRows {
 		log.Printf("[embedding] 查询去重失败: %v", err)
 	}
 	if exists == 1 {
@@ -188,7 +190,7 @@ func StoreEmbeddings(userID int, contents []string, source string) error {
 	for _, c := range contents {
 		hash := contentHash(c)
 		var exists int
-		if err := conn.QueryRow("SELECT 1 FROM sys_embedding WHERE content_hash = ?", hash).Scan(&exists); err != nil && err != sql.ErrNoRows {
+		if err := conn.QueryRow("SELECT 1 FROM sys_embedding WHERE content_hash = ? AND user_id = ?", hash, userID).Scan(&exists); err != nil && err != sql.ErrNoRows {
 			log.Printf("[embedding] 查询去重失败: %v", err)
 		}
 		if exists == 0 {

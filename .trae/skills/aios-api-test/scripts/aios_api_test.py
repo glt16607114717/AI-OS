@@ -8,7 +8,7 @@ import requests
 
 BASE_URL = "http://124.221.220.89:18731"
 DEFAULT_USERNAME = "桂良涛"
-DEFAULT_PASSWORD = "admin123"
+DEFAULT_PASSWORD = "123456"
 
 
 def read_input():

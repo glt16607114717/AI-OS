@@ -13,6 +13,15 @@ const refreshing = ref(false)
 const keys = ref<any[]>([])
 const autoRefreshInterval = ref<number | null>(null)
 
+function statusLabel(status: string) {
+  const map: Record<string, string> = {
+    normal: '正常',
+    degraded: '降级中',
+    exhausted: '已耗尽',
+  }
+  return map[status] || status || '—'
+}
+
 async function fetchKeys() {
   loading.value = true
   try {
@@ -89,38 +98,32 @@ onUnmounted(() => {
     <div v-else class="keys-grid">
       <div
         v-for="k in keys"
-        :key="`${k.vendor_id}-${k.key_id}`"
+        :key="`${k.key_id}`"
         class="key-card"
-        :class="{ 'no-auto-query': !k.supports_auto_query }"
       >
         <div class="key-header">
-          <div class="vendor-name">{{ k.vendor_name }}</div>
+          <div class="vendor-name">智谱 AI</div>
           <div class="key-name">{{ k.key_name }}</div>
         </div>
         <div class="key-body">
-          <div v-if="!k.supports_auto_query" class="no-support">
-            不支持自动查询
+          <div class="pct-bar">
+            <div class="bar-bg"></div>
+            <div class="bar-fill" :style="{ width: `${k.pct * 100}%` }"></div>
           </div>
-          <template v-else>
-            <div class="pct-bar">
-              <div class="bar-bg"></div>
-              <div class="bar-fill" :style="{ width: `${k.pct * 100}%` }"></div>
-            </div>
-            <div class="pct-text">
-              {{ (k.pct * 100).toFixed(1) }}%
-              <span v-if="k.level_tier && k.level_tier !== ''" class="level">({{ k.level_tier }})</span>
-            </div>
-            <div class="status-text">{{ k.status_text }}</div>
-            <div v-if="k.next_reset" class="reset-time">重置时间：{{ k.next_reset }}</div>
-            <div v-if="k.updated_at" class="updated-at">最后更新：{{ k.updated_at }}</div>
-            <div v-if="k.error" class="error">{{ k.error }}</div>
-          </template>
+          <div class="pct-text">
+            {{ (k.pct * 100).toFixed(1) }}%
+            <span v-if="k.level_tier && k.level_tier !== ''" class="level">({{ k.level_tier }})</span>
+          </div>
+          <div class="status-text">{{ statusLabel(k.status) }}</div>
+          <div v-if="k.next_reset" class="reset-time">重置时间：{{ k.next_reset }}</div>
+          <div v-if="k.updated_at" class="updated-at">最后更新：{{ k.updated_at }}</div>
+          <div v-if="k.error" class="error">{{ k.error }}</div>
         </div>
       </div>
     </div>
 
     <div class="footer">
-      <p>说明：仅智谱 AI 支持自动用量查询，小米 MiMo 需要手动在网页控制台查看。</p>
+      <p>说明：自动用量查询当前仅支持智谱 AI。</p>
     </div>
   </div>
 </template>
@@ -192,10 +195,6 @@ onUnmounted(() => {
   border-color: #5a5a5a;
 }
 
-.key-card.no-auto-query {
-  opacity: 0.6;
-}
-
 .key-header {
   padding: 16px;
   background: #333;
@@ -215,11 +214,6 @@ onUnmounted(() => {
 
 .key-body {
   padding: 16px;
-}
-
-.no-support {
-  color: #999;
-  font-size: 14px;
 }
 
 .pct-bar {

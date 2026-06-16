@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { API_BASE } from '../../api'
 
@@ -25,6 +25,23 @@ interface Strategy {
   active: boolean
 }
 
+interface VendorGroup {
+  vendor_id: string
+  vendor_name: string
+  keys: KeyGroup[]
+}
+
+interface KeyGroup {
+  key_id: string
+  key_name: string
+  models: ModelGroup[]
+}
+
+interface ModelGroup {
+  model_id: string
+  display_name: string
+}
+
 const availableOptions = ref<Option[]>([])
 const strategies = ref<Strategy[]>([])
 const loading = ref(false)
@@ -37,19 +54,92 @@ const editForm = ref<{ name: string; type: 'fixed' | 'round_robin'; options: str
 })
 const showAddOption = ref(false)
 
+// 三级级联选择状态
+const cascadeVendor = ref('')
+const cascadeKey = ref('')
+const cascadeModel = ref('')
+
 const selectedStrategy = () => strategies.value.find(s => s.id === selectedId.value)
 
-function optionLabel(opt: Option) {
-  return `${opt.vendor_name} / ${opt.key_name} / ${opt.display_name}`
-}
+// 按厂商→密钥→模型三级分组
+const groupedOptions = computed<VendorGroup[]>(() => {
+  const vendorMap = new Map<string, VendorGroup>()
+  for (const opt of availableOptions.value) {
+    if (!vendorMap.has(opt.vendor_id)) {
+      vendorMap.set(opt.vendor_id, {
+        vendor_id: opt.vendor_id,
+        vendor_name: opt.vendor_name,
+        keys: [],
+      })
+    }
+    const vendor = vendorMap.get(opt.vendor_id)!
+    let keyGroup = vendor.keys.find(k => k.key_id === opt.key_id)
+    if (!keyGroup) {
+      keyGroup = { key_id: opt.key_id, key_name: opt.key_name, models: [] }
+      vendor.keys.push(keyGroup)
+    }
+    if (!keyGroup.models.find(m => m.model_id === opt.model_id)) {
+      keyGroup.models.push({ model_id: opt.model_id, display_name: opt.display_name })
+    }
+  }
+  return Array.from(vendorMap.values())
+})
 
-function optionValue(opt: Option) {
-  return `${opt.vendor_id}|${opt.key_id}|${opt.model_id}`
+// 当前选中厂商下的密钥列表
+const cascadeKeys = computed<KeyGroup[]>(() => {
+  const vendor = groupedOptions.value.find(v => v.vendor_id === cascadeVendor.value)
+  return vendor ? vendor.keys : []
+})
+
+// 当前选中密钥下的模型列表
+const cascadeModels = computed<ModelGroup[]>(() => {
+  const keyGroup = cascadeKeys.value.find(k => k.key_id === cascadeKey.value)
+  return keyGroup ? keyGroup.models : []
+})
+
+function optionValue(vendorId: string, keyId: string, modelId: string) {
+  return `${vendorId}|${keyId}|${modelId}`
 }
 
 function resolveOptionLabel(val: string) {
-  const opt = availableOptions.value.find(o => optionValue(o) === val)
-  return opt ? optionLabel(opt) : val
+  const parts = val.split('|')
+  const vendorId = parts[0]
+  const keyId = parts[1]
+  const modelId = parts[2]
+  const vendor = groupedOptions.value.find(v => v.vendor_id === vendorId)
+  const keyGroup = vendor?.keys.find(k => k.key_id === keyId)
+  const model = keyGroup?.models.find(m => m.model_id === modelId)
+  if (vendor && keyGroup && model) {
+    return `${vendor.vendor_name} / ${keyGroup.key_name} / ${model.display_name}`
+  }
+  return val
+}
+
+// 级联选择变化时重置下级
+function onVendorChange() {
+  cascadeKey.value = ''
+  cascadeModel.value = ''
+}
+
+function onKeyChange() {
+  cascadeModel.value = ''
+}
+
+// 当模型选中后，自动添加选项
+function onModelChange(modelId: string) {
+  if (!modelId || !cascadeVendor.value || !cascadeKey.value) return
+  const val = optionValue(cascadeVendor.value, cascadeKey.value, modelId)
+  if (editForm.value.type === 'fixed') {
+    editForm.value.options = [val]
+  } else {
+    if (!editForm.value.options.includes(val)) {
+      editForm.value.options.push(val)
+    }
+  }
+  showAddOption.value = false
+  cascadeVendor.value = ''
+  cascadeKey.value = ''
+  cascadeModel.value = ''
 }
 
 // ── 数据加载 ──
@@ -307,25 +397,66 @@ onMounted(async () => {
                 {{ resolveOptionLabel(opt) }}
               </el-tag>
 
-              <el-popover :visible="showAddOption" placement="bottom" :width="320" trigger="click">
+              <el-popover :visible="showAddOption" placement="bottom" :width="480" trigger="click">
                 <template #reference>
                   <el-button size="small" @click="showAddOption = true">+ 添加选项</el-button>
                 </template>
-                <el-select
-                  :model-value="''"
-                  placeholder="选择选项"
-                  filterable
-                  style="width: 100%;"
-                  @change="addOption"
-                >
-                  <el-option
-                    v-for="opt in availableOptions"
-                    :key="optionValue(opt)"
-                    :label="optionLabel(opt)"
-                    :value="optionValue(opt)"
-                    :disabled="editForm.options.includes(optionValue(opt))"
-                  />
-                </el-select>
+                <div class="cascade-selects">
+                  <div class="cascade-row">
+                    <span class="cascade-label">厂商</span>
+                    <el-select
+                      v-model="cascadeVendor"
+                      placeholder="选择厂商"
+                      filterable
+                      style="width: 100%;"
+                      @change="onVendorChange"
+                    >
+                      <el-option
+                        v-for="v in groupedOptions"
+                        :key="v.vendor_id"
+                        :label="v.vendor_name"
+                        :value="v.vendor_id"
+                      />
+                    </el-select>
+                  </div>
+                  <div class="cascade-row">
+                    <span class="cascade-label">密钥</span>
+                    <el-select
+                      v-model="cascadeKey"
+                      placeholder="选择密钥"
+                      filterable
+                      style="width: 100%;"
+                      :disabled="!cascadeVendor"
+                      @change="onKeyChange"
+                    >
+                      <el-option
+                        v-for="k in cascadeKeys"
+                        :key="k.key_id"
+                        :label="k.key_name"
+                        :value="k.key_id"
+                      />
+                    </el-select>
+                  </div>
+                  <div class="cascade-row">
+                    <span class="cascade-label">模型</span>
+                    <el-select
+                      v-model="cascadeModel"
+                      placeholder="选择模型"
+                      filterable
+                      style="width: 100%;"
+                      :disabled="!cascadeKey"
+                      @change="onModelChange"
+                    >
+                      <el-option
+                        v-for="m in cascadeModels"
+                        :key="m.model_id"
+                        :label="m.display_name"
+                        :value="m.model_id"
+                        :disabled="editForm.options.includes(optionValue(cascadeVendor, cascadeKey, m.model_id))"
+                      />
+                    </el-select>
+                  </div>
+                </div>
               </el-popover>
             </div>
 
@@ -511,5 +642,26 @@ onMounted(async () => {
   gap: 10px;
   padding-top: 16px;
   border-top: 1px solid #f0f0f0;
+}
+
+/* 三级级联选择 */
+.cascade-selects {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cascade-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cascade-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #606266;
+  white-space: nowrap;
+  min-width: 36px;
 }
 </style>

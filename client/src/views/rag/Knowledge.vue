@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
+import { API_BASE } from '../../api'
 
 interface DocItem {
-  id: string
+  id: number
   text: string
   metadata: {
     source?: string
-    type?: string
-    timestamp?: number
+    created_at?: string
   }
 }
 
@@ -28,6 +28,10 @@ const searchResults = ref<SearchResult[]>([])
 const searching = ref(false)
 const searchMode = ref(false)
 
+function getToken(): string {
+  return localStorage.getItem('aios_token') || ''
+}
+
 // 分页
 const pageSize = 20
 const currentPage = ref(1)
@@ -43,10 +47,13 @@ function goPage(page: number) {
 async function loadDocs() {
   loading.value = true
   try {
-    const res = await window.aiOS.agentRequest('rag_list', {})
-    if (res.ok) {
-      documents.value = res.documents || []
-      total.value = res.total || 0
+    const res = await fetch(`${API_BASE}/api/rag/list`, {
+      headers: { 'Authorization': `Bearer ${getToken()}` }
+    })
+    const data = await res.json()
+    if (data.ok) {
+      documents.value = data.data?.documents || []
+      total.value = data.data?.total || 0
     }
   } catch (e: any) {
     console.error('Failed to load docs:', e)
@@ -65,9 +72,19 @@ async function doSearch() {
   searching.value = true
   searchMode.value = true
   try {
-    const res = await window.aiOS.agentRequest('rag_search', { query: q, top_k: 10 })
-    if (res.ok) {
-      searchResults.value = res.results || []
+    const res = await fetch(`${API_BASE}/api/rag/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${getToken()}` },
+      body: JSON.stringify({ query: q, top_k: 10 })
+    })
+    const data = await res.json()
+    if (data.ok) {
+      searchResults.value = (data.data?.results || []).map((r: any) => ({
+        text: r.content || r.text,
+        metadata: { source: r.source },
+        distance: 1 - (r.score || 0),
+        similarity: r.score || 0,
+      }))
     }
   } catch (e: any) {
     console.error('Search failed:', e)
@@ -82,10 +99,9 @@ function clearSearch() {
   searchResults.value = []
 }
 
-function formatTime(ts: number | undefined): string {
+function formatTime(ts: string | undefined): string {
   if (!ts) return '-'
-  const d = new Date(ts * 1000)
-  return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  return ts
 }
 
 function sourceLabel(source: string | undefined): string {
@@ -162,8 +178,7 @@ onMounted(loadDocs)
         <div v-for="doc in pagedDocs" :key="doc.id" class="doc-card">
           <div class="doc-meta">
             <span class="tag source">{{ sourceLabel(doc.metadata?.source) }}</span>
-            <span class="tag type">{{ doc.metadata?.type || '-' }}</span>
-            <span class="tag time">{{ formatTime(doc.metadata?.timestamp) }}</span>
+            <span class="tag time">{{ formatTime(doc.metadata?.created_at) }}</span>
           </div>
           <div class="doc-text">{{ doc.text }}</div>
         </div>

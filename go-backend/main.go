@@ -25,14 +25,6 @@ func main() {
 
 	// 初始化数据库表
 	log.Println("[init] 正在初始化数据库表...")
-	service.EnsureUserTable()
-	service.EnsureLogTable()
-	service.EnsureChatTable()
-	service.EnsureSuggestionTable()
-	service.EnsureSkillTable()
-	service.EnsureStrategyTable()
-	service.EnsureGodRulesTable()
-	service.EnsureEmbeddingTable()
 	log.Println("[init] 数据库表初始化完成")
 
 	// 注入 API Key 查询函数（避免循环依赖）
@@ -91,6 +83,7 @@ func main() {
 
 		// RAG 知识库
 		r.Get("/api/rag/status", handler.RagStatus)
+		r.Get("/api/rag/list", handler.RagList)
 		r.Post("/api/rag/test-embed", handler.RagTestEmbed)
 		r.Post("/api/rag/search", handler.RagSearch)
 

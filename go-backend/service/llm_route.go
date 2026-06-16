@@ -187,7 +187,7 @@ func GetAvailableOptions() ([]map[string]interface{}, error) {
 		       m.model_id, m.name as display_name
 		FROM sys_vendor v
 		JOIN sys_api_key k ON k.vendor_id = v.id AND k.enabled = 1
-		JOIN sys_model m ON m.vendor_id = v.id AND m.enabled = 1
+		JOIN sys_model m ON m.vendor_id = v.id
 		WHERE v.enabled = 1 AND k.api_key != ''
 		ORDER BY v.id, m.id
 	`)

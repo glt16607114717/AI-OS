@@ -1,56 +1,48 @@
----
-name: aios-deploy
-description: AIOS Go后端打包部署。当用户要求"部署AIOS"、"打包Go后端"、"更新服务器"、"重启AIOS服务"、"部署后端"、"打包上传"、"go deploy"、"发布AIOS"时触发。自动完成Go交叉编译、SCP上传到服务器、重启systemd服务。
----
+# AI-OS Go 后端部署技能
 
-# AIOS Go 后端打包部署
+## 功能描述
 
-## 角色定位
+用于部署 AI-OS Go 后端服务到云服务器，包括编译、上传和重启服务。
 
-一键完成 Go 后端的交叉编译、上传、重启。
+## 使用场景
+
+- 更新 Go 后端代码后部署到服务器
+- 修复 Bug 后快速部署
+- 更新配置后重启服务
+
+## 参数说明
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| action | string | 否 | 操作类型：build（仅编译）、deploy（编译+部署）、restart（仅重启），默认 deploy |
+
+## 执行步骤
+
+### 完整部署（deploy）
+1. 交叉编译 Go 代码为 Linux 二进制
+2. 上传到服务器中转目录
+3. 替换生产环境二进制
+4. 重启 systemd 服务
+5. 验证服务状态
+
+### 仅编译（build）
+1. 交叉编译 Go 代码
+2. 输出二进制位置
+
+### 仅重启（restart）
+1. 通过 SSH 重启 systemd 服务
 
 ## 服务器信息
 
 | 项目 | 值 |
-|------|-----|
-| SSH 地址 | ubuntu@124.221.220.89 |
-| 服务名 | aios-server |
-| 二进制路径 | /home/ubuntu/aios-server/aios-server |
-| 服务端口 | 18731 |
-| Go 源码路径 | d:\wwwroot\ai-os\go-backend |
-
-## 部署流程
-
-执行以下命令，脚本自动完成 3 步：
-
-1. **本地交叉编译**：`GOOS=linux GOARCH=amd64 go build` → 生成 aios-server 二进制
-2. **SCP 上传**：上传到服务器 `/home/ubuntu/aios-server/`
-3. **重启服务**：`sudo systemctl restart aios-server`
-
-## 使用方式
-
-```bash
-# 完整部署（编译+上传+重启）
-python scripts/aios_deploy.py deploy
-
-# 仅编译（不上传）
-python scripts/aios_deploy.py build
-
-# 仅重启服务
-python scripts/aios_deploy.py restart
-
-# 查看服务状态
-python scripts/aios_deploy.py status
-
-# 查看服务日志（最近50行）
-python scripts/aios_deploy.py logs
-```
+|------|------|
+| 主机 | 124.221.220.89 |
+| 用户 | ubuntu |
+| 服务路径 | /opt/ai-os/ai-os-server |
+| systemd 服务 | ai-os.service |
 
 ## 注意事项
 
-1. 编译前会自动执行 `go mod tidy`
-2. 上传前会先停止服务，避免文件占用
-3. 部署完成后自动检查服务状态和健康检查
-4. 如果健康检查失败，会自动回滚到上一个版本（备份在 `.bak`）
-5. 本地需要安装 Go 1.21+ 和 Python 3
-6. SSH 免密登录需要已配置（公钥已上传到服务器）
+- 需要确保 Go 环境已配置
+- 部署前建议备份当前服务
+- 如果端口被占用，会自动强制释放

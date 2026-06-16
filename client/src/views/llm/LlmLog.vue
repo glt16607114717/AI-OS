@@ -203,7 +203,7 @@ onUnmounted(() => {
           :class="[`level-${log.level}`]"
         >
           <div class="log-row" @click="toggleDetail(log.id)">
-            <span class="log-time">{{ log.ts.split(' ')[1] || log.ts }}</span>
+            <span class="log-time">{{ log.ts }}</span>
             <span class="log-badge" :style="{ background: categoryColorMap[log.category] || '#6b7280' }">
               {{ categories.find(c => c.key === log.category)?.label || log.category }}
             </span>
@@ -383,7 +383,7 @@ onUnmounted(() => {
   font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace;
   color: #94a3b8;
   flex-shrink: 0;
-  width: 64px;
+  min-width: 160px;
 }
 
 .log-badge {
@@ -434,7 +434,7 @@ onUnmounted(() => {
 }
 
 .log-detail {
-  padding: 6px 12px 10px 84px;
+  padding: 6px 12px 10px 180px;
   font-size: 12px;
   color: #64748b;
   font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace;

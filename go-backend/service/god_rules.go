@@ -114,7 +114,7 @@ func runQuotaCheck() {
 	}
 	for _, v := range catalog {
 		code, _ := v["code"].(string)
-		if code != "zhipu" {
+		if strings.ToLower(code) != "zhipu" {
 			continue
 		}
 		enabled, _ := v["enabled"].(bool)

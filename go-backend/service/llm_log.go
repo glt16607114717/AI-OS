@@ -141,11 +141,39 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 		}
 	}
 
+	// 按用户
+	byUser := map[string]interface{}{}
+	uRows, _ := conn.Query(`SELECT user_id, COALESCE(username, CONCAT('user_', user_id)) as username,
+		COUNT(*) as requests, COALESCE(SUM(total_tokens),0) as tokens,
+		COALESCE(SUM(prompt_tokens),0) as prompt_tokens,
+		COALESCE(SUM(completion_tokens),0) as completion_tokens,
+		COALESCE(AVG(CASE WHEN success=1 THEN latency_ms END),0) as avg_latency_ms,
+		SUM(success) as success_count,
+		SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) as errors
+		FROM sys_llm_stats WHERE ts >= ? GROUP BY user_id, username ORDER BY requests DESC`, cutoff)
+	if uRows != nil {
+		defer uRows.Close()
+		for uRows.Next() {
+			var uid, reqs, tokens, pt, ct, sc, errs int
+			var name string
+			var al float64
+			if err := uRows.Scan(&uid, &name, &reqs, &tokens, &pt, &ct, &al, &sc, &errs); err != nil {
+				continue
+			}
+			byUser[fmt.Sprintf("%d", uid)] = map[string]interface{}{
+				"username": name, "requests": reqs, "tokens": tokens,
+				"prompt_tokens": pt, "completion_tokens": ct,
+				"avg_latency_ms": int(al), "success_count": sc, "errors": errs,
+			}
+		}
+	}
+
 	return map[string]interface{}{
 		"total_requests": totalReqs, "total_tokens": totalTokens,
 		"total_prompt_tokens": totalPrompt, "total_completion_tokens": totalCompletion,
 		"avg_latency_ms": int(avgLatency), "success_rate": successRate,
 		"by_vendor": byVendor, "by_model": byModel, "daily": daily,
+		"by_user": byUser,
 	}, nil
 }
 

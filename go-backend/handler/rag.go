@@ -56,6 +56,46 @@ func RagTestEmbed(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// RagList 知识库列表（按用户过滤）
+func RagList(w http.ResponseWriter, r *http.Request) {
+	session := middleware.GetSession(r)
+	if session == nil {
+		errResponse(w, "未登录", 401)
+		return
+	}
+
+	results, err := service.GetRecentEmbeddings(session.UserID, 1000)
+	if err != nil {
+		errResponse(w, "查询失败: "+err.Error(), 500)
+		return
+	}
+
+	// 转换为前端需要的格式
+	type DocItem struct {
+		ID       int64  `json:"id"`
+		Text     string `json:"text"`
+		Metadata struct {
+			Source    string `json:"source"`
+			CreatedAt string `json:"created_at"`
+		} `json:"metadata"`
+	}
+
+	docs := make([]DocItem, 0, len(results))
+	for _, r := range results {
+		var doc DocItem
+		doc.ID = r.ID
+		doc.Text = r.Content
+		doc.Metadata.Source = r.Source
+		doc.Metadata.CreatedAt = r.CreatedAt
+		docs = append(docs, doc)
+	}
+
+	okResponse(w, map[string]interface{}{
+		"documents": docs,
+		"total":     len(docs),
+	})
+}
+
 // RagSearch 语义搜索
 func RagSearch(w http.ResponseWriter, r *http.Request) {
 	session := middleware.GetSession(r)
