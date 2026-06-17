@@ -81,11 +81,21 @@ def main():
         print("\n3. 停止现有服务并释放端口...")
         stop_script = f"""
 sudo systemctl stop ai-os
-sleep 2
-sudo kill -9 $(sudo lsof -ti:{deploy_port}) 2>/dev/null
-sleep 1
+sudo systemctl disable ai-os
+sleep 3
+# 循环杀残留进程，最多重试5次
+for i in 1 2 3 4 5; do
+    PID=$(sudo lsof -ti:{deploy_port} 2>/dev/null)
+    if [ -z "$PID" ]; then
+        echo "端口已释放"
+        break
+    fi
+    echo "杀掉残留进程: $PID (第 $i 次)"
+    sudo kill -9 $PID 2>/dev/null
+    sleep 2
+done
 """
-        returncode, stdout, stderr = run_command(['ssh', server_host, stop_script], timeout=30)
+        returncode, stdout, stderr = run_command(['ssh', server_host, stop_script], timeout=60)
         print("STDOUT:", stdout)
         if stderr:
             print("STDERR:", stderr)
@@ -100,6 +110,7 @@ sudo cp /home/ubuntu/aios-server/{output_file} /opt/ai-os/{output_file}
 sudo chmod +x /opt/ai-os/{output_file}
 
 echo "启动服务..."
+sudo systemctl enable ai-os
 sudo systemctl start ai-os
 sleep 3
 

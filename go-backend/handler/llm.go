@@ -188,14 +188,9 @@ func ternary(cond bool, a, b string) string {
 
 // handleNormalWithFailover 非流式响应（支持故障转移）
 func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{}, attempts []*service.RouteInfoType, startTime time.Time, modelID string, userID int, username string, userMsgSummary string, convCtx *ConversationContext) {
-	failedVendors := make(map[int]bool)
 	var lastError string
 
 	for idx, route := range attempts {
-		if failedVendors[route.VendorID] {
-			continue
-		}
-
 		source := "策略路由"
 		if idx > 0 {
 			source = "故障转移"
@@ -224,7 +219,6 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 				LatencyMs: latency, Success: false, Error: err.Error(),
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 网络错误: %s", route.VendorName, err.Error()))
-			failedVendors[route.VendorID] = true
 			lastError = err.Error()
 			continue
 		}
@@ -245,7 +239,6 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 				LatencyMs: latency, Success: false, Error: errMsg,
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
-			failedVendors[route.VendorID] = true
 			lastError = errMsg
 			continue
 		}
@@ -330,14 +323,9 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 		return
 	}
 
-	failedVendors := make(map[int]bool)
 	var lastError string
 
 	for idx, route := range attempts {
-		if failedVendors[route.VendorID] {
-			continue
-		}
-
 		source := "策略路由"
 		if idx > 0 {
 			source = "故障转移"
@@ -366,7 +354,6 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 				LatencyMs: latency, Success: false, Error: err.Error(),
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 流式中断: %s", route.VendorName, err.Error()))
-			failedVendors[route.VendorID] = true
 			lastError = err.Error()
 			continue
 		}
@@ -386,7 +373,6 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 				LatencyMs: latency, Success: false, Error: errMsg,
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
-			failedVendors[route.VendorID] = true
 			lastError = errMsg
 			continue
 		}
@@ -397,11 +383,12 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 
 		totalContent := ""
 		success := false
+		// 保存最后一个非 null 的 usage（火山方舟只有最后一个 chunk 带 usage）
+		var lastUsage map[string]interface{}
 
 		for scanner.Scan() {
 			line := scanner.Text()
 
-			// Fix 2: 空行不跳过，输出保证 SSE 的 \n\n 格式
 			if line == "" {
 				fmt.Fprintf(w, "\n")
 				flusher.Flush()
@@ -422,52 +409,51 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 				break
 			}
 
-			// 解析 SSE 数据，提取 usage 和 content
+			// 解析 SSE 数据，提取 usage 和 content（不在此处记录统计）
 			var sseData map[string]interface{}
 			if json.Unmarshal([]byte(data), &sseData) == nil {
+				// usage 可能是 null（火山方舟中间 chunk），只保存非 null 的
 				if usage, ok := sseData["usage"].(map[string]interface{}); ok {
-					promptTokens := intFloat(usage["prompt_tokens"])
-					completionTokens := intFloat(usage["completion_tokens"])
-					totalTokens := intFloat(usage["total_tokens"])
-					latency := int(time.Since(startTime).Milliseconds())
-					service.RecordStat(&service.LLMStatType{
-						ConversationID:   convCtx.ID,
-						UserID:           userID, Username: username,
-						VendorID:         route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
-						PromptTokens: promptTokens, CompletionTokens: completionTokens,
-						TotalTokens: totalTokens, LatencyMs: latency, Success: true,
-					})
-					convCtx.TotalPrompt += promptTokens
-					convCtx.TotalCompletion += completionTokens
-					success = true
+					lastUsage = usage
 				}
-				// 提取内容
+				// 提取内容：同时支持 content 和 reasoning_content（推理模型）
 				if choices, ok := sseData["choices"].([]interface{}); ok && len(choices) > 0 {
 					if choice, ok := choices[0].(map[string]interface{}); ok {
 						if delta, ok := choice["delta"].(map[string]interface{}); ok {
-							if content, ok := delta["content"].(string); ok {
+							if content, ok := delta["content"].(string); ok && content != "" {
 								totalContent += content
+							}
+							if reasoning, ok := delta["reasoning_content"].(string); ok && reasoning != "" {
+								totalContent += reasoning
 							}
 						}
 					}
 				}
 			}
 
-			// Fix 2: 每行后跟 \n\n，保证 SSE 事件分隔
 			fmt.Fprintf(w, "%s\n\n", line)
 			flusher.Flush()
 		}
 
 		resp.Body.Close()
 
-		// 无 usage 但有内容的也记录
-		if !success && totalContent != "" {
+		// 流式结束后统一记录一条统计（无论 usage 是否存在）
+		if success || totalContent != "" {
 			latency := int(time.Since(startTime).Milliseconds())
+			promptTokens, completionTokens, totalTokens := 0, 0, 0
+			if lastUsage != nil {
+				promptTokens = intFloat(lastUsage["prompt_tokens"])
+				completionTokens = intFloat(lastUsage["completion_tokens"])
+				totalTokens = intFloat(lastUsage["total_tokens"])
+				convCtx.TotalPrompt += promptTokens
+				convCtx.TotalCompletion += completionTokens
+			}
 			service.RecordStat(&service.LLMStatType{
-				ConversationID: convCtx.ID,
-				UserID:         userID, Username: username,
-				VendorID:       route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
-				LatencyMs: latency, Success: true,
+				ConversationID:   convCtx.ID,
+				UserID:           userID, Username: username,
+				VendorID:         route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+				PromptTokens: promptTokens, CompletionTokens: completionTokens,
+				TotalTokens: totalTokens, LatencyMs: latency, Success: true,
 			})
 		}
 

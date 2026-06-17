@@ -42,6 +42,7 @@ const recognizeLogs = ref<any[]>([])
 const showLogPanel = ref(false)
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let recordingPollTimer: ReturnType<typeof setInterval> | null = null
 
 /** 判断 window.aiOS 是否可用（浏览器开发环境下不存在） */
 function hasAgent(): boolean {
@@ -227,17 +228,36 @@ async function startRecording(i: number) {
     window.aiOS.agentRequest('voice_start_recording', { index: i })
   )
 
-  if (result?.error) {
-    ElMessage.error(result.error)
+  // safeAgent 失败返回 null，需要一并处理
+  if (!result || result.error) {
+    ElMessage.error(result?.error || '启动录制失败')
     return
   }
 
   recording.value = true
   recordingIndex.value = i
   ElMessage.info('录制中，按 F9 停止')
+
+  // 轮询后台录制状态：F9 在 Python 端停止录制后，前端自动同步 UI 并拉取结果
+  recordingPollTimer = setInterval(async () => {
+    if (!recording.value) {
+      if (recordingPollTimer) { clearInterval(recordingPollTimer); recordingPollTimer = null }
+      return
+    }
+    const status = await safeAgent(() =>
+      window.aiOS.agentRequest('voice_recording_status', {})
+    )
+    if (status && !status.recording) {
+      if (recordingPollTimer) { clearInterval(recordingPollTimer); recordingPollTimer = null }
+      await stopRecording()
+    }
+  }, 500)
 }
 
 async function stopRecording() {
+  // 清除轮询定时器
+  if (recordingPollTimer) { clearInterval(recordingPollTimer); recordingPollTimer = null }
+
   const idx = recordingIndex.value
   const result = await safeAgent(() =>
     window.aiOS.agentRequest('voice_stop_recording', {})
@@ -246,8 +266,8 @@ async function stopRecording() {
   recording.value = false
   recordingIndex.value = -1
 
-  if (result?.error) {
-    ElMessage.error(result.error)
+  if (!result || result.error) {
+    ElMessage.error(result?.error || '停止录制失败')
     return
   }
 
@@ -338,6 +358,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
+  if (recordingPollTimer) clearInterval(recordingPollTimer)
 })
 </script>
 
