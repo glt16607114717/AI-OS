@@ -96,20 +96,22 @@ func GetCatalog() ([]map[string]interface{}, error) {
 	}
 
 	// 查密钥
-	keyRows, err := conn.Query("SELECT id, vendor_id, name, api_key, enabled FROM sys_api_key ORDER BY id")
+	keyRows, err := conn.Query("SELECT id, vendor_id, name, api_key, access_key, secret_key, enabled FROM sys_api_key ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
 	defer keyRows.Close()
 	for keyRows.Next() {
 		var k model.APIKey
-		if err := keyRows.Scan(&k.ID, &k.VendorID, &k.Name, &k.APIKey, &k.Enabled); err != nil {
+		if err := keyRows.Scan(&k.ID, &k.VendorID, &k.Name, &k.APIKey, &k.AccessKey, &k.SecretKey, &k.Enabled); err != nil {
 			continue
 		}
 		if vm, ok := vendorMap[k.VendorID]; ok {
 			keys := vm["keys"].([]map[string]interface{})
 			vm["keys"] = append(keys, map[string]interface{}{
-				"id": k.ID, "name": k.Name, "api_key": k.APIKey, "enabled": k.Enabled,
+				"id": k.ID, "name": k.Name, "api_key": k.APIKey,
+				"access_key": k.AccessKey, "secret_key": k.SecretKey,
+				"enabled": k.Enabled,
 			})
 		}
 	}
@@ -143,14 +145,16 @@ func SaveVendorKeys(vendorID int, keys []map[string]interface{}) error {
 	for _, k := range keys {
 		name, _ := k["name"].(string)
 		apiKey, _ := k["api_key"].(string)
+		accessKey, _ := k["access_key"].(string)
+		secretKey, _ := k["secret_key"].(string)
 		enabled := 1
 		if v, ok := k["enabled"]; ok {
 			if b, ok := v.(bool); ok && !b {
 				enabled = 0
 			}
 		}
-		if _, err := tx.Exec("INSERT INTO sys_api_key (vendor_id, name, api_key, enabled) VALUES (?, ?, ?, ?)",
-			vendorID, name, apiKey, enabled); err != nil {
+		if _, err := tx.Exec("INSERT INTO sys_api_key (vendor_id, name, api_key, access_key, secret_key, enabled) VALUES (?, ?, ?, ?, ?, ?)",
+			vendorID, name, apiKey, accessKey, secretKey, enabled); err != nil {
 			return err
 		}
 	}

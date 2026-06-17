@@ -44,9 +44,18 @@ interface UserStat {
 
 interface DailyStat {
   requests: number
+  conversations: number
   tokens: number
   prompt_tokens: number
   completion_tokens: number
+  success_count: number
+  errors: number
+}
+
+interface KeyStat {
+  name: string
+  requests: number
+  tokens: number
   success_count: number
   errors: number
 }
@@ -62,6 +71,7 @@ interface Stats {
   by_vendor: Record<string, VendorStat>
   by_model: Record<string, ModelStat>
   by_user: Record<string, UserStat>
+  by_key: Record<string, KeyStat>
   daily: Record<string, DailyStat>
 }
 
@@ -72,14 +82,18 @@ const currentUsername = ref('')
 
 // Chart refs
 const trendChartRef = ref<HTMLCanvasElement | null>(null)
-const tokenChartRef = ref<HTMLCanvasElement | null>(null)
+const tokenTrendRef = ref<HTMLCanvasElement | null>(null)
 const modelPieRef = ref<HTMLCanvasElement | null>(null)
 const userRankRef = ref<HTMLCanvasElement | null>(null)
+const userPieRef = ref<HTMLCanvasElement | null>(null)
+const keyPieRef = ref<HTMLCanvasElement | null>(null)
 
 let trendChart: Chart | null = null
-let tokenChart: Chart | null = null
+let tokenTrend: Chart | null = null
 let modelPie: Chart | null = null
 let userRank: Chart | null = null
+let userPie: Chart | null = null
+let keyPie: Chart | null = null
 
 // 获取当前用户名
 async function fetchCurrentUser() {
@@ -155,26 +169,28 @@ function renderCharts() {
   const dailyData = sortedDaily.value
   const labels = dailyData.map(d => d.date.slice(5)) // MM-DD
 
-  // ── 折线图：每日请求趋势 ──
+  // ── 折线图：每日请求趋势（请求数 + 对话数）──
   if (trendChartRef.value) {
     if (trendChart) trendChart.destroy()
-
-    const totalRequests = dailyData.map(d => d.requests)
-    const myRequests = dailyData.map(d => {
-      if (!currentUsername.value || !stats.value) return 0
-      // by_user 里没有按天分的数据，用全局的近似
-      return 0 // 暂时只有全局线
-    })
 
     trendChart = new Chart(trendChartRef.value, {
       type: 'line',
       data: {
         labels,
         datasets: [{
-          label: '总请求数',
-          data: totalRequests,
+          label: '请求数',
+          data: dailyData.map(d => d.requests),
           borderColor: '#409eff',
           backgroundColor: 'rgba(64,158,255,0.1)',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 3,
+          pointHoverRadius: 5,
+        }, {
+          label: '对话数',
+          data: dailyData.map(d => d.conversations || 0),
+          borderColor: '#67c23a',
+          backgroundColor: 'rgba(103,194,58,0.1)',
           fill: true,
           tension: 0.3,
           pointRadius: 3,
@@ -193,36 +209,32 @@ function renderCharts() {
     })
   }
 
-  // ── 柱状图：每日 Token 消耗（堆叠） ──
-  if (tokenChartRef.value) {
-    if (tokenChart) tokenChart.destroy()
+  // ── 折线图：每日 Token 消耗趋势 ──
+  if (tokenTrendRef.value) {
+    if (tokenTrend) tokenTrend.destroy()
 
-    tokenChart = new Chart(tokenChartRef.value, {
-      type: 'bar',
+    tokenTrend = new Chart(tokenTrendRef.value, {
+      type: 'line',
       data: {
         labels,
-        datasets: [
-          {
-            label: 'Prompt Tokens',
-            data: dailyData.map(d => d.prompt_tokens || 0),
-            backgroundColor: '#409eff',
-            borderRadius: 3,
-          },
-          {
-            label: 'Completion Tokens',
-            data: dailyData.map(d => d.completion_tokens || 0),
-            backgroundColor: '#67c23a',
-            borderRadius: 3,
-          },
-        ],
+        datasets: [{
+          label: 'Token 消耗',
+          data: dailyData.map(d => d.tokens),
+          borderColor: '#e6a23c',
+          backgroundColor: 'rgba(230,162,60,0.1)',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 3,
+          pointHoverRadius: 5,
+        }],
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
         plugins: { legend: { display: true, position: 'top', labels: { font: { size: 12 } } } },
         scales: {
-          x: { stacked: true, grid: { display: false }, ticks: { font: { size: 11 } } },
-          y: { stacked: true, beginAtZero: true, grid: { color: '#f0f0f0' }, ticks: { font: { size: 11 } } },
+          y: { beginAtZero: true, grid: { color: '#f0f0f0' }, ticks: { font: { size: 11 }, callback: (v: any) => formatNumber(v) } },
+          x: { grid: { display: false }, ticks: { font: { size: 11 } } },
         },
       },
     })
@@ -256,7 +268,7 @@ function renderCharts() {
     })
   }
 
-  // ── 柱状图：用户用量排行 ──
+  // ── 柱状图：用户用量排行（竖向）──
   if (userRankRef.value) {
     if (userRank) userRank.destroy()
 
@@ -277,19 +289,68 @@ function renderCharts() {
         }],
       },
       options: {
-        indexAxis: 'y',
         responsive: true,
         maintainAspectRatio: false,
         plugins: { legend: { display: false } },
         scales: {
-          x: { beginAtZero: true, grid: { color: '#f0f0f0' }, ticks: { font: { size: 11 } } },
-          y: { grid: { display: false }, ticks: {
-            font: { size: 12 },
-            color: (ctx: any) => {
-              const label = ctx.tick?.label as string
-              return label === currentUsername.value ? '#f56c6c' : '#606266'
-            },
-          }},
+          y: { beginAtZero: true, grid: { color: '#f0f0f0' }, ticks: { font: { size: 11 }, callback: (v: any) => formatNumber(v) } },
+          x: { grid: { display: false }, ticks: { font: { size: 11 } } },
+        },
+      },
+    })
+  }
+
+  // ── 饼图：用户 Token 占比 ──
+  if (userPieRef.value) {
+    if (userPie) userPie.destroy()
+    const users = userEntries.value.slice(0, 8)
+    const colors = ['#409eff', '#67c23a', '#e6a23c', '#f56c6c', '#909399', '#9b59b6', '#1abc9c', '#e74c3c']
+    userPie = new Chart(userPieRef.value, {
+      type: 'doughnut',
+      data: {
+        labels: users.map(u => u.username || u.id),
+        datasets: [{
+          data: users.map(u => u.tokens),
+          backgroundColor: colors.slice(0, users.length),
+          borderWidth: 2,
+          borderColor: '#fff',
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: true, position: 'right', labels: { font: { size: 11 }, boxWidth: 12, padding: 8 } },
+        },
+      },
+    })
+  }
+
+  // ── 饼图：API Key 请求次数占比 ──
+  if (keyPieRef.value && stats.value?.by_key) {
+    if (keyPie) keyPie.destroy()
+    const keys = Object.entries(stats.value.by_key)
+      .map(([id, k]) => ({ id, ...k }))
+      .filter(k => k.requests > 0)
+      .sort((a, b) => b.requests - a.requests)
+      .slice(0, 8)
+    const colors2 = ['#409eff', '#67c23a', '#e6a23c', '#f56c6c', '#909399', '#9b59b6', '#1abc9c', '#e74c3c']
+    keyPie = new Chart(keyPieRef.value, {
+      type: 'doughnut',
+      data: {
+        labels: keys.map(k => k.name || k.id),
+        datasets: [{
+          data: keys.map(k => k.requests),
+          backgroundColor: colors2.slice(0, keys.length),
+          borderWidth: 2,
+          borderColor: '#fff',
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: true, position: 'right', labels: { font: { size: 11 }, boxWidth: 12, padding: 8 } },
         },
       },
     })
@@ -333,9 +394,11 @@ onMounted(async () => {
 onUnmounted(() => {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null }
   trendChart?.destroy()
-  tokenChart?.destroy()
+  tokenTrend?.destroy()
   modelPie?.destroy()
   userRank?.destroy()
+  userPie?.destroy()
+  keyPie?.destroy()
 })
 </script>
 
@@ -409,10 +472,10 @@ onUnmounted(() => {
           <div class="chart-container"><canvas ref="trendChartRef"></canvas></div>
         </div>
 
-        <!-- 柱状图：每日 Token 消耗 -->
+        <!-- 折线图：每日 Token 消耗 -->
         <div class="chart-card">
           <div class="section-title">每日 Token 消耗</div>
-          <div class="chart-container"><canvas ref="tokenChartRef"></canvas></div>
+          <div class="chart-container"><canvas ref="tokenTrendRef"></canvas></div>
         </div>
 
         <!-- 饼图：模型请求占比 -->
@@ -424,7 +487,19 @@ onUnmounted(() => {
         <!-- 柱状图：用户用量排行 -->
         <div class="chart-card">
           <div class="section-title">用户用量排行</div>
-          <div class="chart-container chart-container-tall"><canvas ref="userRankRef"></canvas></div>
+          <div class="chart-container"><canvas ref="userRankRef"></canvas></div>
+        </div>
+
+        <!-- 饼图：用户 Token 占比 -->
+        <div class="chart-card">
+          <div class="section-title">用户 Token 占比</div>
+          <div class="chart-container"><canvas ref="userPieRef"></canvas></div>
+        </div>
+
+        <!-- 饼图：API Key 请求次数占比 -->
+        <div class="chart-card">
+          <div class="section-title">API Key 请求分布</div>
+          <div class="chart-container"><canvas ref="keyPieRef"></canvas></div>
         </div>
       </div>
 

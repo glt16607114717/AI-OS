@@ -29,21 +29,27 @@ def main():
     if len(sys.argv) > 1:
         action = sys.argv[1].lower()
     
-    go_dir = r'd:\wwwroot\ai-os\go-backend'
+    # 基于脚本位置自动推导项目根目录（跨机器兼容）
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # scripts/ -> aios-deploy/ -> skills/ -> .trae/ -> 项目根目录
+    project_root = os.path.abspath(os.path.join(script_dir, '..', '..', '..', '..'))
+    go_dir = os.path.join(project_root, 'go-backend')
     output_file = 'ai-os-server'
     server_host = 'ubuntu@124.221.220.89'
     deploy_port = '18731'
     
     print(f"=== AI-OS Go 后端部署 ===")
     print(f"操作类型: {action}")
+    print(f"项目根目录: {project_root}")
+    print(f"Go 目录: {go_dir}")
     
     if action in ['build', 'deploy']:
         os.chdir(go_dir)
         
         print("\n1. 交叉编译 Go 代码...")
-        env = os.environ.copy()
-        env['GOOS'] = 'linux'
-        env['GOARCH'] = 'amd64'
+        # 直接设置环境变量，确保 subprocess 继承
+        os.environ['GOOS'] = 'linux'
+        os.environ['GOARCH'] = 'amd64'
         
         returncode, stdout, stderr = run_command(['go', 'build', '-o', output_file, '.'], timeout=120)
         
@@ -84,8 +90,11 @@ sleep 1
         if stderr:
             print("STDERR:", stderr)
         
-        print("\n5. 部署到生产目录...")
+        print("\n4. 部署到生产目录...")
         deploy_script = f"""
+echo "备份旧版本..."
+sudo cp /opt/ai-os/{output_file} /opt/ai-os/{output_file}.bak 2>/dev/null
+
 echo "复制新代码到生产目录..."
 sudo cp /home/ubuntu/aios-server/{output_file} /opt/ai-os/{output_file}
 sudo chmod +x /opt/ai-os/{output_file}

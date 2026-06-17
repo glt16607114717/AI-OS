@@ -83,7 +83,7 @@ func LoginUser(username, password string) (map[string]interface{}, error) {
 	}
 
 	token := middleware.CreateSession(id, uname, isAdmin == 1)
-	expire := time.Now().Add(30 * 24 * time.Hour).Format("2006-01-02T15:04:05Z07:00")
+	expire := time.Now().Add(30 * 24 * time.Hour).Format("2006-01-02 15:04:05")
 
 	return map[string]interface{}{
 		"user_id": id, "username": uname, "is_admin": isAdmin == 1,

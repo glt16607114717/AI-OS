@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { API_BASE } from '../../api'
+import { marked } from 'marked'
 
 interface DocItem {
   id: number
@@ -101,6 +102,8 @@ function clearSearch() {
 
 function formatTime(ts: string | undefined): string {
   if (!ts) return '-'
+  // MySQL DATETIME: "2026-06-17 10:45:02" → "06-17 10:45"
+  if (ts.length >= 16) return ts.slice(5, 16)
   return ts
 }
 
@@ -108,6 +111,11 @@ function sourceLabel(source: string | undefined): string {
   if (!source) return '未知'
   const map: Record<string, string> = { workspace: '工作台', proxy: '代理', manual: '手动' }
   return map[source] || source
+}
+
+function renderMarkdown(text: string): string {
+  if (!text) return ''
+  return marked.parse(text) as string
 }
 
 onMounted(loadDocs)
@@ -164,7 +172,7 @@ onMounted(loadDocs)
             </span>
             <span class="tag source">{{ sourceLabel(r.metadata?.source) }}</span>
           </div>
-          <div class="doc-text">{{ r.text }}</div>
+          <div class="doc-text" v-html="renderMarkdown(r.text)"></div>
         </div>
       </div>
       <div v-else-if="!searching" class="empty-state">
@@ -180,7 +188,7 @@ onMounted(loadDocs)
             <span class="tag source">{{ sourceLabel(doc.metadata?.source) }}</span>
             <span class="tag time">{{ formatTime(doc.metadata?.created_at) }}</span>
           </div>
-          <div class="doc-text">{{ doc.text }}</div>
+          <div class="doc-text" v-html="renderMarkdown(doc.text)"></div>
         </div>
       </div>
       <!-- Pagination -->
@@ -421,6 +429,95 @@ onMounted(loadDocs)
   white-space: pre-wrap;
   max-height: 150px;
   overflow-y: auto;
+}
+
+/* Markdown 渲染样式 */
+.doc-text :deep(h1),
+.doc-text :deep(h2),
+.doc-text :deep(h3),
+.doc-text :deep(h4) {
+  margin: 8px 0 4px;
+  font-weight: 600;
+  color: #1e293b;
+}
+.doc-text :deep(h1) { font-size: 16px; }
+.doc-text :deep(h2) { font-size: 15px; }
+.doc-text :deep(h3) { font-size: 14px; }
+
+.doc-text :deep(p) {
+  margin: 4px 0;
+}
+
+.doc-text :deep(strong) {
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.doc-text :deep(code) {
+  background: #f1f5f9;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.doc-text :deep(pre) {
+  background: #1e293b;
+  color: #e2e8f0;
+  padding: 10px 14px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 6px 0;
+}
+
+.doc-text :deep(pre code) {
+  background: none;
+  padding: 0;
+  color: inherit;
+}
+
+.doc-text :deep(ul),
+.doc-text :deep(ol) {
+  padding-left: 20px;
+  margin: 4px 0;
+}
+
+.doc-text :deep(li) {
+  margin: 2px 0;
+}
+
+.doc-text :deep(blockquote) {
+  border-left: 3px solid #6366f1;
+  padding-left: 12px;
+  margin: 6px 0;
+  color: #64748b;
+}
+
+.doc-text :deep(table) {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 6px 0;
+  font-size: 12px;
+}
+
+.doc-text :deep(th),
+.doc-text :deep(td) {
+  border: 1px solid #e2e8f0;
+  padding: 4px 8px;
+  text-align: left;
+}
+
+.doc-text :deep(th) {
+  background: #f8fafc;
+  font-weight: 600;
+}
+
+.doc-text :deep(hr) {
+  border: none;
+  border-top: 1px solid #e2e8f0;
+  margin: 8px 0;
 }
 
 .doc-text::-webkit-scrollbar {

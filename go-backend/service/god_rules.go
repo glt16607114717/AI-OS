@@ -114,9 +114,6 @@ func runQuotaCheck() {
 	}
 	for _, v := range catalog {
 		code, _ := v["code"].(string)
-		if strings.ToLower(code) != "zhipu" {
-			continue
-		}
 		enabled, _ := v["enabled"].(bool)
 		if !enabled {
 			continue
@@ -133,7 +130,13 @@ func runQuotaCheck() {
 			if apiKey == "" {
 				continue
 			}
-			info := checkSingleKey(apiKey, keyID, keyName)
+			var info *QuotaInfo
+			switch strings.ToLower(code) {
+			case "zhipu":
+				info = checkZhipuKey(apiKey, keyID, keyName)
+			default:
+				continue
+			}
 			quotaLock.Lock()
 			quotaCache[keyID] = info
 			quotaLock.Unlock()
@@ -141,7 +144,7 @@ func runQuotaCheck() {
 	}
 }
 
-func checkSingleKey(apiKey, keyID, keyName string) *QuotaInfo {
+func checkZhipuKey(apiKey, keyID, keyName string) *QuotaInfo {
 	info := &QuotaInfo{KeyID: keyID, KeyName: keyName}
 	now := time.Now().Format("2006-01-02 15:04:05")
 	info.UpdatedAt = now

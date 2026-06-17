@@ -23,11 +23,11 @@ func RecordStat(stat *model.LLMStat) {
 	if len(errMsg) > 512 {
 		errMsg = errMsg[:512]
 	}
-	conn.Exec(`INSERT INTO sys_llm_stats (ts, user_id, username, vendor_id, model_id,
+	conn.Exec(`INSERT INTO sys_llm_stats (ts, user_id, username, vendor_id, key_id, model_id,
 		prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error, conversation_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		time.Now().Format("2006-01-02 15:04:05"),
-		stat.UserID, stat.Username, stat.VendorID, stat.ModelID,
+		stat.UserID, stat.Username, stat.VendorID, stat.KeyID, stat.ModelID,
 		stat.PromptTokens, stat.CompletionTokens, stat.TotalTokens,
 		stat.LatencyMs, success, errMsg, stat.ConversationID)
 }
@@ -126,7 +126,8 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 
 	// 按天
 	daily := map[string]interface{}{}
-	dRows, _ := conn.Query(`SELECT DATE(ts) as day, COUNT(*), COALESCE(SUM(total_tokens),0),
+	dRows, _ := conn.Query(`SELECT DATE(ts) as day, COUNT(*), COUNT(DISTINCT NULLIF(conversation_id, '')),
+		COALESCE(SUM(total_tokens),0),
 		COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
 		SUM(success), SUM(CASE WHEN success=0 THEN 1 ELSE 0 END)
 		FROM sys_llm_stats WHERE ts >= ? GROUP BY DATE(ts) ORDER BY day DESC`, cutoff)
@@ -134,10 +135,10 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 		defer dRows.Close()
 		for dRows.Next() {
 			var day string
-			var reqs, tokens, pt, ct, sc, errs int
-			dRows.Scan(&day, &reqs, &tokens, &pt, &ct, &sc, &errs)
+			var reqs, convs, tokens, pt, ct, sc, errs int
+			dRows.Scan(&day, &reqs, &convs, &tokens, &pt, &ct, &sc, &errs)
 			daily[day] = map[string]interface{}{
-				"requests": reqs, "tokens": tokens,
+				"requests": reqs, "conversations": convs, "tokens": tokens,
 				"prompt_tokens": pt, "completion_tokens": ct,
 				"success_count": sc, "errors": errs,
 			}
@@ -172,13 +173,34 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 		}
 	}
 
+	// 按 API Key
+	byKey := map[string]interface{}{}
+	kRows, _ := conn.Query(`SELECT COALESCE(s.key_id, ''), COALESCE(k.name, 'unknown'),
+		COUNT(*) as requests, COALESCE(SUM(s.total_tokens),0) as tokens,
+		SUM(s.success) as success_count,
+		SUM(CASE WHEN s.success=0 THEN 1 ELSE 0 END) as errors
+		FROM sys_llm_stats s LEFT JOIN sys_api_key k ON s.key_id = k.id
+		WHERE s.ts >= ? AND s.key_id != '' GROUP BY s.key_id ORDER BY requests DESC`, cutoff)
+	if kRows != nil {
+		defer kRows.Close()
+		for kRows.Next() {
+			var kid, name string
+			var reqs, tokens, sc, errs int
+			kRows.Scan(&kid, &name, &reqs, &tokens, &sc, &errs)
+			byKey[kid] = map[string]interface{}{
+				"name": name, "requests": reqs, "tokens": tokens,
+				"success_count": sc, "errors": errs,
+			}
+		}
+	}
+
 	return map[string]interface{}{
 		"total_requests": totalReqs, "total_conversations": totalConvs,
 		"total_tokens": totalTokens,
 		"total_prompt_tokens": totalPrompt, "total_completion_tokens": totalCompletion,
 		"avg_latency_ms": int(avgLatency), "success_rate": successRate,
 		"by_vendor": byVendor, "by_model": byModel, "daily": daily,
-		"by_user": byUser,
+		"by_user": byUser, "by_key": byKey,
 	}, nil
 }
 

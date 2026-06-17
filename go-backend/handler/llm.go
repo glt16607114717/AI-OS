@@ -38,7 +38,7 @@ func (c *ConversationContext) SummarizeAndLog() {
 	latency := int(time.Since(c.StartTime).Milliseconds())
 	models := strings.Join(c.Models, ",")
 	level := "info"
-	if c.AssistantContent == "" {
+	if len(c.Errors) > 0 {
 		level = "error"
 	}
 	detail := map[string]interface{}{
@@ -220,7 +220,7 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 			service.RecordStat(&service.LLMStatType{
 				ConversationID: convCtx.ID,
 				UserID:         userID, Username: username,
-				VendorID: route.VendorID, ModelID: route.ModelID,
+				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: err.Error(),
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 网络错误: %s", route.VendorName, err.Error()))
@@ -241,7 +241,7 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 			service.RecordStat(&service.LLMStatType{
 				ConversationID: convCtx.ID,
 				UserID:         userID, Username: username,
-				VendorID: route.VendorID, ModelID: route.ModelID,
+				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: errMsg,
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
@@ -262,7 +262,7 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 			service.RecordStat(&service.LLMStatType{
 				ConversationID:   convCtx.ID,
 				UserID:           userID, Username: username,
-				VendorID:         route.VendorID, ModelID: route.ModelID,
+				VendorID:         route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				PromptTokens: promptTokens, CompletionTokens: completionTokens,
 				TotalTokens: totalTokens, LatencyMs: latency, Success: true,
 			})
@@ -271,9 +271,9 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 		} else {
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				ConversationID: convCtx.ID,
-				UserID:         userID, Username: username,
-				VendorID:       route.VendorID, ModelID: route.ModelID,
+				ConversationID:   convCtx.ID,
+				UserID:           userID, Username: username,
+				VendorID:       route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: true,
 			})
 		}
@@ -362,7 +362,7 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 			service.RecordStat(&service.LLMStatType{
 				ConversationID: convCtx.ID,
 				UserID:         userID, Username: username,
-				VendorID: route.VendorID, ModelID: route.ModelID,
+				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: err.Error(),
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 流式中断: %s", route.VendorName, err.Error()))
@@ -382,7 +382,7 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 			service.RecordStat(&service.LLMStatType{
 				ConversationID: convCtx.ID,
 				UserID:         userID, Username: username,
-				VendorID: route.VendorID, ModelID: route.ModelID,
+				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: errMsg,
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
@@ -433,7 +433,7 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 					service.RecordStat(&service.LLMStatType{
 						ConversationID:   convCtx.ID,
 						UserID:           userID, Username: username,
-						VendorID:         route.VendorID, ModelID: route.ModelID,
+						VendorID:         route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 						PromptTokens: promptTokens, CompletionTokens: completionTokens,
 						TotalTokens: totalTokens, LatencyMs: latency, Success: true,
 					})
@@ -466,12 +466,12 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 			service.RecordStat(&service.LLMStatType{
 				ConversationID: convCtx.ID,
 				UserID:         userID, Username: username,
-				VendorID:       route.VendorID, ModelID: route.ModelID,
+				VendorID:       route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: true,
 			})
 		}
 
-		// 记录聊天
+	// 记录聊天
 		if totalContent != "" {
 			go service.AddChatMessage("assistant", totalContent)
 			convCtx.AssistantContent = totalContent
@@ -540,6 +540,7 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, startTime 
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	totalContent := ""
+	success := false
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
@@ -567,13 +568,14 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, startTime 
 				totalTokens := intFloat(usage["total_tokens"])
 				latency := int(time.Since(startTime).Milliseconds())
 				service.RecordStat(&service.LLMStatType{
-					UserID: userID, Username: username,
-					VendorID: route.VendorID, ModelID: modelID,
-					PromptTokens: promptTokens, CompletionTokens: completionTokens,
-					TotalTokens: totalTokens, LatencyMs: latency, Success: true,
-				})
-			}
-			// 提取内容
+				UserID: userID, Username: username,
+				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: modelID,
+				PromptTokens: promptTokens, CompletionTokens: completionTokens,
+				TotalTokens: totalTokens, LatencyMs: latency, Success: true,
+			})
+			success = true
+		}
+		// 提取内容
 			if choices, ok := sseData["choices"].([]interface{}); ok && len(choices) > 0 {
 				if choice, ok := choices[0].(map[string]interface{}); ok {
 					if delta, ok := choice["delta"].(map[string]interface{}); ok {
@@ -592,7 +594,16 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, startTime 
 	// 记录聊天
 	if totalContent != "" {
 		go service.AddChatMessage("assistant", totalContent)
-		go service.StoreEmbedding(userID, totalContent, "proxy")
+	}
+
+	// 兜底：如果 SSE 流没有返回 usage，流结束后补一条统计
+	if !success {
+		latency := int(time.Since(startTime).Milliseconds())
+		service.RecordStat(&service.LLMStatType{
+			UserID: userID, Username: username,
+			VendorID: route.VendorID, KeyID: route.KeyID, ModelID: modelID,
+			LatencyMs: latency, Success: true,
+		})
 	}
 
 	log.Printf("[proxy] stream %s vendor=%d key=%s user=%s latency=%dms",
@@ -611,7 +622,7 @@ func handleNormalResponse(w http.ResponseWriter, resp *http.Response, startTime 
 		latency := int(time.Since(startTime).Milliseconds())
 		service.RecordStat(&service.LLMStatType{
 			UserID: userID, Username: username,
-			VendorID: route.VendorID, ModelID: modelID,
+			VendorID: route.VendorID, KeyID: route.KeyID, ModelID: modelID,
 			LatencyMs: latency, Success: false, Error: string(body),
 		})
 		w.Header().Set("Content-Type", "application/json")
@@ -630,7 +641,7 @@ func handleNormalResponse(w http.ResponseWriter, resp *http.Response, startTime 
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
 				UserID: userID, Username: username,
-				VendorID: route.VendorID, ModelID: modelID,
+				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: modelID,
 				PromptTokens: promptTokens, CompletionTokens: completionTokens,
 				TotalTokens: totalTokens, LatencyMs: latency, Success: true,
 			})
@@ -642,7 +653,6 @@ func handleNormalResponse(w http.ResponseWriter, resp *http.Response, startTime 
 				if msg, ok := choice["message"].(map[string]interface{}); ok {
 					if content, ok := msg["content"].(string); ok && content != "" {
 						go service.AddChatMessage("assistant", content)
-						go service.StoreEmbedding(userID, content, "proxy")
 					}
 				}
 			}
@@ -829,7 +839,7 @@ func handleWorkspaceNormalWithFailover(w http.ResponseWriter, req map[string]int
 			service.RecordStat(&service.LLMStatType{
 				ConversationID: convCtx.ID,
 				UserID:         userID, Username: username,
-				VendorID: route.VendorID, ModelID: route.ModelID,
+				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: err.Error(),
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 网络错误: %s", route.VendorName, err.Error()))
@@ -850,7 +860,7 @@ func handleWorkspaceNormalWithFailover(w http.ResponseWriter, req map[string]int
 			service.RecordStat(&service.LLMStatType{
 				ConversationID: convCtx.ID,
 				UserID:         userID, Username: username,
-				VendorID: route.VendorID, ModelID: route.ModelID,
+				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: errMsg,
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
@@ -888,7 +898,7 @@ func handleWorkspaceNormalWithFailover(w http.ResponseWriter, req map[string]int
 			service.RecordStat(&service.LLMStatType{
 				ConversationID:   convCtx.ID,
 				UserID:           userID, Username: username,
-				VendorID:         route.VendorID, ModelID: route.ModelID,
+				VendorID:         route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				PromptTokens: promptTokens, CompletionTokens: completionTokens,
 				TotalTokens: totalTokens, LatencyMs: latency, Success: true,
 			})
@@ -966,7 +976,7 @@ func handleWorkspaceStreamWithFailover(w http.ResponseWriter, req map[string]int
 			service.RecordStat(&service.LLMStatType{
 				ConversationID: convCtx.ID,
 				UserID:         userID, Username: username,
-				VendorID: route.VendorID, ModelID: route.ModelID,
+				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: err.Error(),
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 流式中断: %s", route.VendorName, err.Error()))
@@ -986,7 +996,7 @@ func handleWorkspaceStreamWithFailover(w http.ResponseWriter, req map[string]int
 			service.RecordStat(&service.LLMStatType{
 				ConversationID: convCtx.ID,
 				UserID:         userID, Username: username,
-				VendorID: route.VendorID, ModelID: route.ModelID,
+				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: errMsg,
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
@@ -1032,42 +1042,42 @@ func handleWorkspaceStreamWithFailover(w http.ResponseWriter, req map[string]int
 					totalTokens := intFloat(usage["total_tokens"])
 					latency := int(time.Since(startTime).Milliseconds())
 					service.RecordStat(&service.LLMStatType{
-						ConversationID:   convCtx.ID,
-						UserID:           userID, Username: username,
-						VendorID:         route.VendorID, ModelID: route.ModelID,
-						PromptTokens: promptTokens, CompletionTokens: completionTokens,
-						TotalTokens: totalTokens, LatencyMs: latency, Success: true,
-					})
-					convCtx.TotalPrompt += promptTokens
-					convCtx.TotalCompletion += completionTokens
-					success = true
-				}
-				if choices, ok := sseData["choices"].([]interface{}); ok && len(choices) > 0 {
-					if choice, ok := choices[0].(map[string]interface{}); ok {
-						if delta, ok := choice["delta"].(map[string]interface{}); ok {
-							if content, ok := delta["content"].(string); ok {
-								totalContent += content
-							}
+					ConversationID:   convCtx.ID,
+					UserID:           userID, Username: username,
+					VendorID:         route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+					PromptTokens: promptTokens, CompletionTokens: completionTokens,
+					TotalTokens: totalTokens, LatencyMs: latency, Success: true,
+				})
+				convCtx.TotalPrompt += promptTokens
+				convCtx.TotalCompletion += completionTokens
+				success = true
+			}
+			if choices, ok := sseData["choices"].([]interface{}); ok && len(choices) > 0 {
+				if choice, ok := choices[0].(map[string]interface{}); ok {
+					if delta, ok := choice["delta"].(map[string]interface{}); ok {
+						if content, ok := delta["content"].(string); ok {
+							totalContent += content
 						}
 					}
 				}
 			}
-
-			fmt.Fprintf(w, "%s\n\n", line)
-			flusher.Flush()
 		}
 
-		resp.Body.Close()
+		fmt.Fprintf(w, "%s\n\n", line)
+		flusher.Flush()
+	}
 
-		if !success && totalContent != "" {
-			latency := int(time.Since(startTime).Milliseconds())
-			service.RecordStat(&service.LLMStatType{
-				ConversationID: convCtx.ID,
-				UserID:         userID, Username: username,
-				VendorID:       route.VendorID, ModelID: route.ModelID,
-				LatencyMs: latency, Success: true,
-			})
-		}
+	resp.Body.Close()
+
+	if !success && totalContent != "" {
+		latency := int(time.Since(startTime).Milliseconds())
+		service.RecordStat(&service.LLMStatType{
+			ConversationID: convCtx.ID,
+			UserID:         userID, Username: username,
+			VendorID:       route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+			LatencyMs: latency, Success: true,
+		})
+	}
 
 		if totalContent != "" {
 			go service.AddChatMessage("assistant", totalContent)
@@ -1189,14 +1199,14 @@ func handleToolCallsWithFailover(w http.ResponseWriter, originalReq map[string]i
 					totalTokens := intFloat(usage["total_tokens"])
 					latency := int(time.Since(startTime).Milliseconds())
 					service.RecordStat(&service.LLMStatType{
-						ConversationID:   convCtx.ID,
-						UserID:           userID, Username: username,
-						VendorID:         route.VendorID, ModelID: route.ModelID,
-						PromptTokens: promptTokens, CompletionTokens: completionTokens,
-						TotalTokens: totalTokens, LatencyMs: latency, Success: true,
-					})
-					convCtx.TotalPrompt += promptTokens
-					convCtx.TotalCompletion += completionTokens
+					ConversationID:   convCtx.ID,
+					UserID:           userID, Username: username,
+					VendorID:         route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+					PromptTokens: promptTokens, CompletionTokens: completionTokens,
+					TotalTokens: totalTokens, LatencyMs: latency, Success: true,
+				})
+				convCtx.TotalPrompt += promptTokens
+				convCtx.TotalCompletion += completionTokens
 				}
 				if choices, ok := respData2["choices"].([]interface{}); ok && len(choices) > 0 {
 					if choice, ok := choices[0].(map[string]interface{}); ok {

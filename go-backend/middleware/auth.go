@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,6 +67,10 @@ func CreateSession(userID int, username string, isAdmin bool) string {
 func GetSession(r *http.Request) *model.Session {
 	// 方式1: URL query ?key=xxx（API Key 认证）
 	if apiKey := r.URL.Query().Get("key"); apiKey != "" && APIKeyLookup != nil {
+		// 清理 key：去掉 / 及之后的内容（兼容外部客户端在 key 后拼接路径）
+		if idx := strings.IndexByte(apiKey, '/'); idx > 0 {
+			apiKey = apiKey[:idx]
+		}
 		uid, username, isAdmin, err := APIKeyLookup(apiKey)
 		if err == nil && uid > 0 {
 			return &model.Session{

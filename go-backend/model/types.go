@@ -72,21 +72,23 @@ type ModelEntry struct {
 }
 
 type APIKey struct {
-	ID      int    `json:"id"`
-	VendorID int   `json:"vendor_id"`
-	Name    string `json:"name"`
-	APIKey  string `json:"api_key"`
-	Enabled bool   `json:"enabled"`
+	ID        int    `json:"id"`
+	VendorID  int    `json:"vendor_id"`
+	Name      string `json:"name"`
+	APIKey    string `json:"api_key"`
+	AccessKey string `json:"access_key,omitempty"`
+	SecretKey string `json:"secret_key,omitempty"`
+	Enabled   bool   `json:"enabled"`
 }
 
 type User struct {
-	ID        int       `json:"id"`
-	Username  string    `json:"username"`
-	Password  string    `json:"-"`
-	Status    int       `json:"status"`
-	IsAdmin   bool      `json:"is_admin"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        int    `json:"id"`
+	Username  string `json:"username"`
+	Password  string `json:"-"`
+	Status    int    `json:"status"`
+	IsAdmin   bool   `json:"is_admin"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 type Session struct {
@@ -101,6 +103,7 @@ type LLMStat struct {
 	UserID          int    `json:"user_id"`
 	Username        string `json:"username"`
 	VendorID        int    `json:"vendor_id"`
+	KeyID           string `json:"key_id"`
 	ModelID         string `json:"model_id"`
 	PromptTokens    int    `json:"prompt_tokens"`
 	CompletionTokens int   `json:"completion_tokens"`
