@@ -1,25 +1,37 @@
 import sys
-import mysql.connector
-from mysql.connector import Error
+import pymysql
+import os
 
 def main():
     if len(sys.argv) < 2:
-        print("用法: python mysql_query.py \"SQL语句\"")
+        print("用法: python mysql_query.py \"SQL语句\" 或 python mysql_query.py --file sql文件路径")
         return
     
-    query = sys.argv[1]
+    query = ""
+    
+    # 检查是否是文件输入
+    if sys.argv[1] == "--file" and len(sys.argv) >= 3:
+        file_path = sys.argv[2]
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                query = f.read().strip()
+        except Exception as e:
+            print(f"读取文件失败: {e}")
+            return
+    else:
+        query = sys.argv[1]
     
     try:
-        connection = mysql.connector.connect(
-            host='124.221.220.89',
-            port=23306,
+        connection = pymysql.connect(
+            host='8.163.127.182',
+            port=3306,
             database='ai_os',
             user='root',
-            password='glt01054717@'
+            password='glt01054717@',
+            charset='utf8mb4'
         )
         
-        if connection.is_connected():
-            cursor = connection.cursor()
+        with connection.cursor() as cursor:
             cursor.execute(query)
             
             # 获取列名
@@ -45,17 +57,16 @@ def main():
             
             print(f"\n共 {len(results)} 条记录")
             
-            # 如果是更新/插入/删除，提交事务
+            # 如果是更新/插入/删除/CREATE，提交事务
             query_upper = query.strip().upper()
-            if query_upper.startswith('INSERT') or query_upper.startswith('UPDATE') or query_upper.startswith('DELETE'):
+            if query_upper.startswith('INSERT') or query_upper.startswith('UPDATE') or query_upper.startswith('DELETE') or query_upper.startswith('CREATE') or query_upper.startswith('ALTER') or query_upper.startswith('DROP'):
                 connection.commit()
-                print("事务已提交")
-            
-    except Error as e:
+                print("执行成功")
+                
+    except Exception as e:
         print(f"数据库错误: {e}")
     finally:
-        if connection.is_connected():
-            cursor.close()
+        if 'connection' in locals():
             connection.close()
 
 if __name__ == "__main__":

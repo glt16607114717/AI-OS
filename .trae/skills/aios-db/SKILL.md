@@ -1,6 +1,6 @@
 ---
 name: aios-db
-description: AIOS系统数据库查询。当用户要求"查AIOS数据库"、"查AIOS的用户"、"查AIOS的日志"、"查AIOS配置表"、"AIOS的聊天记录"、"看看ai_os库"时触发。通过Python脚本查询AIOS系统的MySQL数据库（124.221.220.89:23306/ai_os），支持读写操作。
+description: AIOS系统数据库查询。当用户要求"查AIOS数据库"、"查AIOS的用户"、"查AIOS的日志"、"查AIOS配置表"、"AIOS的聊天记录"、"看看ai_os库"时触发。通过Python脚本查询AIOS系统的MySQL数据库（8.163.127.182:3306/ai_os），支持读写操作。
 ---
 
 # AIOS 数据库查询
@@ -13,8 +13,8 @@ description: AIOS系统数据库查询。当用户要求"查AIOS数据库"、"�
 
 | 项目 | 值 |
 |------|-----|
-| Host | 124.221.220.89 |
-| Port | 23306 |
+| Host | 8.163.127.182 |
+| Port | 3306 |
 | Database | ai_os |
 | Username | root |
 | Password | glt01054717@ |

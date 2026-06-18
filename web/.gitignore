@@ -1,0 +1,10 @@
+node_modules/
+dist/
+dist-electron/
+release-v*/
+.temp-*
+*.log
+*.tsbuildinfo
+# ML model files (too large for git, user downloads manually)
+*.onnx
+backend/python/agent/data/

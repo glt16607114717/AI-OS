@@ -83,31 +83,52 @@ func ToggleVendor(w http.ResponseWriter, r *http.Request) {
 // ── 路由策略 ──
 
 func GetStrategies(w http.ResponseWriter, r *http.Request) {
-	okResponse(w, service.GetStrategies())
+	session := middleware.GetSessionFromCtx(r)
+	if session == nil {
+		errResponse(w, "未登录", http.StatusUnauthorized)
+		return
+	}
+	strategies := service.GetStrategies(session.UserID, session.IsAdmin)
+	okResponse(w, strategies)
 }
 
 func SaveStrategy(w http.ResponseWriter, r *http.Request) {
+	session := middleware.GetSessionFromCtx(r)
+	if session == nil {
+		errResponse(w, "未登录", http.StatusUnauthorized)
+		return
+	}
 	var s map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
 		errResponse(w, "请求体解析失败", 400)
 		return
 	}
 	strategy := ParseStrategy(s)
-	service.SaveStrategy(strategy)
+	service.SaveStrategy(strategy, session.UserID)
 	okResponse(w, strategy)
 }
 
 func DeleteStrategy(w http.ResponseWriter, r *http.Request) {
+	session := middleware.GetSessionFromCtx(r)
+	if session == nil {
+		errResponse(w, "未登录", http.StatusUnauthorized)
+		return
+	}
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		errResponse(w, "缺少 id", 400)
 		return
 	}
-	service.DeleteStrategy(id)
+	service.DeleteStrategy(id, session.UserID)
 	okResponse(w, "已删除")
 }
 
 func SetActiveStrategy(w http.ResponseWriter, r *http.Request) {
+	session := middleware.GetSessionFromCtx(r)
+	if session == nil {
+		errResponse(w, "未登录", http.StatusUnauthorized)
+		return
+	}
 	var body map[string]interface{}
 	json.NewDecoder(r.Body).Decode(&body)
 	id, _ := body["id"].(string)
@@ -115,7 +136,7 @@ func SetActiveStrategy(w http.ResponseWriter, r *http.Request) {
 		errResponse(w, "缺少 id", 400)
 		return
 	}
-	found := service.SetActiveStrategy(id)
+	found := service.SetActiveStrategy(id, session.UserID)
 	okResponse(w, map[string]interface{}{"found": found})
 }
 

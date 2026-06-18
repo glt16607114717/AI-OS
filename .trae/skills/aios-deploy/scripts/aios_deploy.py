@@ -10,9 +10,9 @@ import shutil
 # 配置
 GO_SOURCE = r"d:\wwwroot\ai-os\go-backend"
 BINARY_NAME = "aios-server"
-SERVER_USER = "ubuntu"
-SERVER_HOST = "124.221.220.89"
-SERVER_PATH = f"/home/ubuntu/aios-server"
+SERVER_USER = "root"
+SERVER_HOST = "8.163.127.182"
+SERVER_PATH = f"/opt/ai-os"
 SERVICE_NAME = "aios-server"
 HEALTH_URL = f"http://{SERVER_HOST}:18731/api/health"
 

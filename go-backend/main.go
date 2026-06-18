@@ -102,6 +102,9 @@ func main() {
 		r.Get("/api/llm/catalog", handler.GetCatalog)
 		r.Get("/api/llm/available-options", handler.GetAvailableOptions)
 		r.Get("/api/llm/strategies", handler.GetStrategies)
+		r.Post("/api/llm/save-strategy", handler.SaveStrategy)
+		r.Post("/api/llm/delete-strategy", handler.DeleteStrategy)
+		r.Post("/api/llm/set-active-strategy", handler.SetActiveStrategy)
 
 		// 退出
 		r.Post("/api/logout", handler.Logout)
@@ -114,9 +117,6 @@ func main() {
 		// LLM 配置管理
 		r.Post("/api/llm/vendor-keys", handler.SaveVendorKeys)
 		r.Post("/api/llm/toggle-vendor", handler.ToggleVendor)
-		r.Post("/api/llm/save-strategy", handler.SaveStrategy)
-		r.Post("/api/llm/delete-strategy", handler.DeleteStrategy)
-		r.Post("/api/llm/set-active-strategy", handler.SetActiveStrategy)
 
 		// 上帝指令
 		r.Post("/api/god-rules/save", handler.SaveGodRules)

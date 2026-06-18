@@ -235,45 +235,94 @@ func EnsureStrategyTable() {
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
 }
 
-func loadStrategiesFromDB() []model.Strategy {
+func loadStrategiesFromDB(userID int, isAdmin bool) []model.Strategy {
 	conn, err := GetDB()
 	if err != nil {
 		log.Printf("[strategy] DB连接失败: %v", err)
 		return nil
 	}
-	var data string
-	err = conn.QueryRow("SELECT data FROM sys_strategy ORDER BY id DESC LIMIT 1").Scan(&data)
-	if err != nil {
-		if err != sql.ErrNoRows {
-			log.Printf("[strategy] 加载失败: %v", err)
+
+	var rows *sql.Rows
+	var errQuery error
+
+	if isAdmin {
+		// 管理员查看所有策略，包含用户信息
+		rows, errQuery = conn.Query(`
+			SELECT s.id, s.user_id, s.data, u.username 
+			FROM sys_strategy s 
+			LEFT JOIN sys_user u ON u.id = s.user_id 
+			ORDER BY s.user_id, s.id DESC
+		`)
+	} else {
+		// 普通用户只查看自己的策略
+		rows, errQuery = conn.Query(`
+			SELECT s.id, s.user_id, s.data, u.username 
+			FROM sys_strategy s 
+			LEFT JOIN sys_user u ON u.id = s.user_id 
+			WHERE s.user_id = ? 
+			ORDER BY s.id DESC
+		`, userID)
+	}
+
+	if errQuery != nil {
+		if errQuery != sql.ErrNoRows {
+			log.Printf("[strategy] 加载失败: %v", errQuery)
 		}
 		return nil
 	}
+	defer rows.Close()
+
 	var strategies []model.Strategy
-	if err := parseJSON(data, &strategies); err != nil {
-		log.Printf("[strategy] 解析 JSON 失败: %v", err)
-		return nil
+	for rows.Next() {
+		var id int
+		var data string
+		var userID int
+		var username sql.NullString
+		
+		if err := rows.Scan(&id, &userID, &data, &username); err != nil {
+			log.Printf("[strategy] 扫描失败: %v", err)
+			continue
+		}
+
+		var userStrategies []model.Strategy
+		if err := parseJSON(data, &userStrategies); err != nil {
+			log.Printf("[strategy] 解析 JSON 失败: %v", err)
+			continue
+		}
+
+		// 为每个策略添加用户信息
+		for i := range userStrategies {
+			userStrategies[i].UserID = userID
+			if username.Valid {
+				userStrategies[i].Username = username.String
+			} else {
+				userStrategies[i].Username = fmt.Sprintf("用户%d", userID)
+			}
+		}
+		
+		strategies = append(strategies, userStrategies...)
 	}
+	
 	return strategies
 }
 
-func saveStrategiesToDB(strategies []model.Strategy) {
+func saveStrategiesToDB(strategies []model.Strategy, userID int) {
 	conn, _ := GetDB()
 	if conn == nil {
 		return
 	}
 	data := toJSON(strategies)
-	// 先清空再插入
-	conn.Exec("TRUNCATE TABLE sys_strategy")
-	conn.Exec("INSERT INTO sys_strategy (data) VALUES (?)", data)
+	// 先删除该用户的策略，再插入
+	conn.Exec("DELETE FROM sys_strategy WHERE user_id = ?", userID)
+	conn.Exec("INSERT INTO sys_strategy (user_id, data) VALUES (?, ?)", userID, data)
 }
 
-func GetStrategies() []model.Strategy {
-	return loadStrategiesFromDB()
+func GetStrategies(userID int, isAdmin bool) []model.Strategy {
+	return loadStrategiesFromDB(userID, isAdmin)
 }
 
-func SaveStrategy(s model.Strategy) {
-	strategies := loadStrategiesFromDB()
+func SaveStrategy(s model.Strategy, userID int) {
+	strategies := loadStrategiesFromDB(userID, false)
 
 	if s.Active {
 		for i := range strategies {
@@ -296,22 +345,22 @@ func SaveStrategy(s model.Strategy) {
 			strategies = append(strategies, s)
 		}
 	}
-	saveStrategiesToDB(strategies)
+	saveStrategiesToDB(strategies, userID)
 }
 
-func DeleteStrategy(id string) {
-	strategies := loadStrategiesFromDB()
+func DeleteStrategy(id string, userID int) {
+	strategies := loadStrategiesFromDB(userID, false)
 	var filtered []model.Strategy
 	for _, s := range strategies {
 		if s.ID != id {
 			filtered = append(filtered, s)
 		}
 	}
-	saveStrategiesToDB(filtered)
+	saveStrategiesToDB(filtered, userID)
 }
 
-func SetActiveStrategy(id string) bool {
-	strategies := loadStrategiesFromDB()
+func SetActiveStrategy(id string, userID int) bool {
+	strategies := loadStrategiesFromDB(userID, false)
 	found := false
 	for i := range strategies {
 		if strategies[i].ID == id {
@@ -321,12 +370,12 @@ func SetActiveStrategy(id string) bool {
 			strategies[i].Active = false
 		}
 	}
-	saveStrategiesToDB(strategies)
+	saveStrategiesToDB(strategies, userID)
 	return found
 }
 
-func GetRouteByStrategy() *model.RouteInfo {
-	strategies := loadStrategiesFromDB()
+func GetRouteByStrategy(userID int) *model.RouteInfo {
+	strategies := loadStrategiesFromDB(userID, false)
 
 	var active *model.Strategy
 	for i := range strategies {
@@ -361,8 +410,8 @@ func GetRouteByStrategy() *model.RouteInfo {
 	return enrichRouteInfo(selected)
 }
 
-func GetAllRoutesForFailover() []model.RouteInfo {
-	strategies := loadStrategiesFromDB()
+func GetAllRoutesForFailover(userID int) []model.RouteInfo {
+	strategies := loadStrategiesFromDB(userID, false)
 
 	var active *model.Strategy
 	for i := range strategies {

@@ -49,7 +49,7 @@
 |------|------|---------|------|
 | **18731** | Go 后端 | `0.0.0.0:18731` (公网) | 业务 API（登录、LLM 代理、RAG、统计） |
 | **18732** | Python Agent | `127.0.0.1:18732` (本地) | 语音指令、键鼠控制、健康检查 |
-| **23306** | MySQL | `124.221.220.89:23306` | ai_os 数据库 |
+| **3306** | MySQL | `127.0.0.1:3306` | ai_os 数据库 |
 | **5173** | Vite Dev | `localhost:5173` | 仅开发模式热更新 |
 
 ---
@@ -60,11 +60,11 @@
 
 | 项 | 值 |
 |----|-----|
-| IP | `124.221.220.89` |
-| 用户 | `ubuntu` |
+| IP | `8.163.127.182` |
+| 用户 | `root`（SSH端口 443） |
 | Go 二进制 | `/opt/ai-os/ai-os-server` |
 | systemd 服务 | `ai-os.service` |
-| MySQL | `124.221.220.89:23306`，库 `ai_os` |
+| MySQL | `127.0.0.1:3306`，库 `ai_os` |
 
 ### 2.2 systemd 服务配置
 
@@ -92,11 +92,11 @@ cd D:\wwwroot\AI\AI-OS\go-backend
 $env:GOOS="linux"; $env:GOARCH="amd64"
 go build -o ai-os-server .
 
-# 2. 上传到服务器中转目录
-scp ai-os-server ubuntu@124.221.220.89:/home/ubuntu/aios-server/
+# 2. 上传到服务器
+scp -P 443 ai-os-server root@8.163.127.182:/opt/ai-os/
 
 # 3. SSH 登录服务器，替换并重启
-ssh ubuntu@124.221.220.89
+ssh -p 443 root@8.163.127.182
 
 # 4. 在服务器上执行：
 sudo cp /home/ubuntu/aios-server/ai-os-server /opt/ai-os/ai-os-server
@@ -337,7 +337,7 @@ Setup Wizard 会通过 `icacls` 授予 `Users` 组完全控制权限。
 ### 7.1 MySQL 连接
 
 ```
-Host:     124.221.220.89
+Host:     8.163.127.182
 Port:     23306
 Database: ai_os
 User:     root

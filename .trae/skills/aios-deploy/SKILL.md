@@ -30,8 +30,9 @@ description: AIOS Go后端部署。当用户要求"部署后端"、"部署Go服�
 
 | 项目 | 值 |
 |------|-----|
-| 主机 | 124.221.220.89 |
-| 用户 | ubuntu |
+| 主机 | 8.163.127.182 |
+| SSH端口 | 443 |
+| 用户 | root |
 | 服务路径 | /opt/ai-os/ai-os-server |
 | systemd 服务 | ai-os.service |
 

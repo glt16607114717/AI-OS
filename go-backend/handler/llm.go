@@ -122,7 +122,7 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 获取路由
-	route := service.GetRouteByStrategy()
+	route := service.GetRouteByStrategy(userID)
 	if route != nil {
 		// Fix 1: 无条件用策略的 model_id 覆盖客户端传的 model
 		req["model"] = route.ModelID
@@ -158,7 +158,7 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fix 3: 构建故障转移路由列表
-	attempts := buildFailoverAttempts(route)
+	attempts := buildFailoverAttempts(route, userID)
 
 	if isStream {
 		handleStreamWithFailover(w, req, attempts, startTime, modelID, userID, username, userMsgSummary, convCtx)
@@ -168,9 +168,9 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildFailoverAttempts 构建故障转移路由列表（策略路由优先 + 轮询其他可用路由）
-func buildFailoverAttempts(primary *service.RouteInfoType) []*service.RouteInfoType {
+func buildFailoverAttempts(primary *service.RouteInfoType, userID int) []*service.RouteInfoType {
 	attempts := []*service.RouteInfoType{primary}
-	failoverRoutes := service.GetAllRoutesForFailover()
+	failoverRoutes := service.GetAllRoutesForFailover(userID)
 	for i := range failoverRoutes {
 		if failoverRoutes[i].KeyID != primary.KeyID {
 			attempts = append(attempts, &failoverRoutes[i])
@@ -676,7 +676,12 @@ func handleNormalResponse(w http.ResponseWriter, resp *http.Response, startTime 
 
 // ProxyModels 模型列表代理
 func ProxyModels(w http.ResponseWriter, r *http.Request) {
-	route := service.GetRouteByStrategy()
+	session := middleware.GetSessionFromCtx(r)
+	userID := 0
+	if session != nil {
+		userID = session.UserID
+	}
+	route := service.GetRouteByStrategy(userID)
 	if route == nil {
 		route = service.GetDefaultRoute()
 	}
@@ -766,7 +771,7 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 获取路由
-	route := service.GetRouteByStrategy()
+	route := service.GetRouteByStrategy(userID)
 	if route == nil {
 		route = service.GetDefaultRoute()
 	}
@@ -784,7 +789,7 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 	service.DumpRequest(req)
 
 	// 构建故障转移路由列表
-	attempts := buildFailoverAttempts(route)
+	attempts := buildFailoverAttempts(route, userID)
 
 	// 检查是否流式
 	isStream := false

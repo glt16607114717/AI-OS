@@ -27,13 +27,13 @@ After=network.target mysql.service
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/aios-server
-ExecStart=/home/ubuntu/aios-server/aios-server
+User=root
+WorkingDirectory=/opt/ai-os
+ExecStart=/opt/ai-os/ai-os-server
 Restart=always
 RestartSec=5
-Environment=DB_HOST=124.221.220.89
-Environment=DB_PORT=23306
+Environment=DB_HOST=127.0.0.1
+Environment=DB_PORT=3306
 Environment=DB_USER=root
 Environment=DB_PASS=glt01054717@
 Environment=DB_NAME=ai_os

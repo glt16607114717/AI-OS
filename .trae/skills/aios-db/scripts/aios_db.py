@@ -9,8 +9,8 @@ import time
 
 # 数据库配置
 DB_CONFIG = {
-    "host": "124.221.220.89",
-    "port": 23306,
+    "host": "8.163.127.182",
+    "port": 3306,
     "database": "ai_os",
     "username": "root",
     "password": "glt01054717@",

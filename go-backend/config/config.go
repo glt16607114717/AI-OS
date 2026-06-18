@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 )
 
 type MySQLConfig struct {
@@ -25,9 +26,15 @@ type EmbeddingConfig struct {
 var Embedding EmbeddingConfig
 
 func Init() {
+	dbPort := 3306
+	if v := os.Getenv("DB_PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			dbPort = p
+		}
+	}
 	DB = MySQLConfig{
-		Host:     envOrDefault("DB_HOST", "124.221.220.89"),
-		Port:     23306,
+		Host:     envOrDefault("DB_HOST", "8.163.127.182"),
+		Port:     dbPort,
 		User:     envOrDefault("DB_USER", "root"),
 		Password: envOrDefault("DB_PASS", "glt01054717@"),
 		Database: envOrDefault("DB_NAME", "ai_os"),
