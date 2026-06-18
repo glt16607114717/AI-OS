@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"database/sql"
+	"time"
+)
 
 // ── 请求体 ──
 
@@ -61,14 +64,14 @@ type Vendor struct {
 }
 
 type ModelEntry struct {
-	ID          int    `json:"id"`
-	VendorID    int    `json:"vendor_id"`
-	ModelID     string `json:"model_id"`
-	Name        string `json:"name"`
-	ModelType   string `json:"model_type"`
-	Enabled     bool   `json:"enabled"`
-	MaxTokens   int    `json:"max_tokens"`
-	DisplayName string `json:"display_name"`
+	ID          int           `json:"id"`
+	VendorID    int           `json:"vendor_id"`
+	ModelID     string        `json:"model_id"`
+	Name        string        `json:"name"`
+	ModelType   sql.NullString `json:"model_type"`
+	Enabled     bool          `json:"enabled"`
+	MaxTokens   int           `json:"max_tokens"`
+	DisplayName string        `json:"display_name"`
 }
 
 type APIKey struct {
@@ -111,7 +114,6 @@ type LLMStat struct {
 	LatencyMs       int    `json:"latency_ms"`
 	Success         bool   `json:"success"`
 	Error           string `json:"error,omitempty"`
-	ConversationID  string `json:"conversation_id,omitempty"`
 }
 
 type RouteInfo struct {
@@ -120,6 +122,7 @@ type RouteInfo struct {
 	BaseURL      string `json:"base_url"`
 	APIKey       string `json:"api_key"`
 	KeyID        string `json:"key_id"`
+	KeyName      string `json:"key_name,omitempty"`
 	ModelID      string `json:"model_id"`
 	QuotaExhausted bool  `json:"_quota_exhausted,omitempty"`
 }

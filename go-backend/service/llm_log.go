@@ -24,12 +24,12 @@ func RecordStat(stat *model.LLMStat) {
 		errMsg = errMsg[:512]
 	}
 	conn.Exec(`INSERT INTO sys_llm_stats (ts, user_id, username, vendor_id, key_id, model_id,
-		prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error, conversation_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		time.Now().Format("2006-01-02 15:04:05"),
 		stat.UserID, stat.Username, stat.VendorID, stat.KeyID, stat.ModelID,
 		stat.PromptTokens, stat.CompletionTokens, stat.TotalTokens,
-		stat.LatencyMs, success, errMsg, stat.ConversationID)
+		stat.LatencyMs, success, errMsg)
 }
 
 func CleanupStats() int {
@@ -54,14 +54,14 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 	cutoff := time.Now().AddDate(0, 0, -days).Format("2006-01-02 15:04:05")
 
 	// 总览
-	var totalReqs, totalConvs, totalTokens, totalPrompt, totalCompletion, successCount int
+	var totalReqs, totalTokens, totalPrompt, totalCompletion, successCount int
 	var avgLatency float64
-	if err := conn.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT NULLIF(conversation_id, '')),
+	if err := conn.QueryRow(`SELECT COUNT(*),
 		COALESCE(SUM(total_tokens),0), COALESCE(SUM(prompt_tokens),0),
 		COALESCE(SUM(completion_tokens),0), COALESCE(AVG(CASE WHEN success=1 THEN latency_ms END),0),
 		COALESCE(SUM(success),0)
 		FROM sys_llm_stats WHERE ts >= ?`, cutoff).Scan(
-		&totalReqs, &totalConvs, &totalTokens, &totalPrompt, &totalCompletion, &avgLatency, &successCount); err != nil {
+		&totalReqs, &totalTokens, &totalPrompt, &totalCompletion, &avgLatency, &successCount); err != nil {
 		log.Printf("[stat] 查询总览失败: %v", err)
 		return nil, err
 	}
@@ -74,7 +74,7 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 	// 按厂商
 	byVendor := map[string]interface{}{}
 	vRows, _ := conn.Query(`SELECT s.vendor_id, COALESCE(v.name, CONCAT('vendor_', s.vendor_id)) as name,
-		COUNT(*) as requests, COUNT(DISTINCT NULLIF(s.conversation_id, '')) as conversations,
+		COUNT(*) as requests,
 		COALESCE(SUM(s.total_tokens),0) as tokens,
 		COALESCE(SUM(s.prompt_tokens),0) as prompt_tokens,
 		COALESCE(SUM(s.completion_tokens),0) as completion_tokens,
@@ -86,15 +86,15 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 	if vRows != nil {
 		defer vRows.Close()
 		for vRows.Next() {
-			var vid, reqs, convs, tokens, pt, ct, sc, errs int
+			var vid, reqs, tokens, pt, ct, sc, errs int
 			var name string
 			var al float64
-			if err := vRows.Scan(&vid, &name, &reqs, &convs, &tokens, &pt, &ct, &al, &sc, &errs); err != nil {
+			if err := vRows.Scan(&vid, &name, &reqs, &tokens, &pt, &ct, &al, &sc, &errs); err != nil {
 				log.Printf("[stats] scan vendor 失败: %v", err)
 				continue
 			}
 			byVendor[fmt.Sprintf("%d", vid)] = map[string]interface{}{
-				"name": name, "requests": reqs, "conversations": convs, "tokens": tokens,
+				"name": name, "requests": reqs, "tokens": tokens,
 				"prompt_tokens": pt, "completion_tokens": ct,
 				"avg_latency_ms": int(al), "success_count": sc, "errors": errs,
 			}
@@ -103,7 +103,7 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 
 	// 按模型
 	byModel := map[string]interface{}{}
-	mRows, _ := conn.Query(`SELECT model_id, COUNT(*), COUNT(DISTINCT NULLIF(conversation_id, '')),
+	mRows, _ := conn.Query(`SELECT model_id, COUNT(*),
 		COALESCE(SUM(total_tokens),0),
 		COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
 		COALESCE(AVG(CASE WHEN success=1 THEN latency_ms END),0),
@@ -113,11 +113,11 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 		defer mRows.Close()
 		for mRows.Next() {
 			var mid string
-			var reqs, convs, tokens, pt, ct, sc, errs int
+			var reqs, tokens, pt, ct, sc, errs int
 			var al float64
-			mRows.Scan(&mid, &reqs, &convs, &tokens, &pt, &ct, &al, &sc, &errs)
+			mRows.Scan(&mid, &reqs, &tokens, &pt, &ct, &al, &sc, &errs)
 			byModel[mid] = map[string]interface{}{
-				"requests": reqs, "conversations": convs, "tokens": tokens,
+				"requests": reqs, "tokens": tokens,
 				"prompt_tokens": pt, "completion_tokens": ct,
 				"avg_latency_ms": int(al), "success_count": sc, "errors": errs,
 			}
@@ -126,19 +126,19 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 
 	// 按天
 	daily := map[string]interface{}{}
-	dRows, _ := conn.Query(`SELECT DATE(ts) as day, COUNT(*), COUNT(DISTINCT NULLIF(conversation_id, '')),
+	dRows, _ := conn.Query(`SELECT DATE_FORMAT(ts, '%Y-%m-%d') as day, COUNT(*),
 		COALESCE(SUM(total_tokens),0),
 		COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),
 		SUM(success), SUM(CASE WHEN success=0 THEN 1 ELSE 0 END)
-		FROM sys_llm_stats WHERE ts >= ? GROUP BY DATE(ts) ORDER BY day DESC`, cutoff)
+		FROM sys_llm_stats WHERE ts >= ? GROUP BY DATE_FORMAT(ts, '%Y-%m-%d') ORDER BY day DESC`, cutoff)
 	if dRows != nil {
 		defer dRows.Close()
 		for dRows.Next() {
 			var day string
-			var reqs, convs, tokens, pt, ct, sc, errs int
-			dRows.Scan(&day, &reqs, &convs, &tokens, &pt, &ct, &sc, &errs)
+			var reqs, tokens, pt, ct, sc, errs int
+			dRows.Scan(&day, &reqs, &tokens, &pt, &ct, &sc, &errs)
 			daily[day] = map[string]interface{}{
-				"requests": reqs, "conversations": convs, "tokens": tokens,
+				"requests": reqs, "tokens": tokens,
 				"prompt_tokens": pt, "completion_tokens": ct,
 				"success_count": sc, "errors": errs,
 			}
@@ -148,7 +148,7 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 	// 按用户
 	byUser := map[string]interface{}{}
 	uRows, _ := conn.Query(`SELECT user_id, COALESCE(username, CONCAT('user_', user_id)) as username,
-		COUNT(*) as requests, COUNT(DISTINCT NULLIF(conversation_id, '')) as conversations,
+		COUNT(*) as requests,
 		COALESCE(SUM(total_tokens),0) as tokens,
 		COALESCE(SUM(prompt_tokens),0) as prompt_tokens,
 		COALESCE(SUM(completion_tokens),0) as completion_tokens,
@@ -159,14 +159,14 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 	if uRows != nil {
 		defer uRows.Close()
 		for uRows.Next() {
-			var uid, reqs, convs, tokens, pt, ct, sc, errs int
+			var uid, reqs, tokens, pt, ct, sc, errs int
 			var name string
 			var al float64
-			if err := uRows.Scan(&uid, &name, &reqs, &convs, &tokens, &pt, &ct, &al, &sc, &errs); err != nil {
+			if err := uRows.Scan(&uid, &name, &reqs, &tokens, &pt, &ct, &al, &sc, &errs); err != nil {
 				continue
 			}
 			byUser[fmt.Sprintf("%d", uid)] = map[string]interface{}{
-				"username": name, "requests": reqs, "conversations": convs, "tokens": tokens,
+				"username": name, "requests": reqs, "tokens": tokens,
 				"prompt_tokens": pt, "completion_tokens": ct,
 				"avg_latency_ms": int(al), "success_count": sc, "errors": errs,
 			}
@@ -195,7 +195,7 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 	}
 
 	return map[string]interface{}{
-		"total_requests": totalReqs, "total_conversations": totalConvs,
+		"total_requests": totalReqs,
 		"total_tokens": totalTokens,
 		"total_prompt_tokens": totalPrompt, "total_completion_tokens": totalCompletion,
 		"avg_latency_ms": int(avgLatency), "success_rate": successRate,
@@ -248,11 +248,13 @@ func EnsureLogTable() {
 		level VARCHAR(20) NOT NULL DEFAULT 'info',
 		message TEXT NOT NULL,
 		detail TEXT,
-		INDEX idx_ts (ts DESC)
+		user_id INT NOT NULL DEFAULT 0,
+		INDEX idx_ts (ts DESC),
+		INDEX idx_user (user_id)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
 }
 
-func WriteLog(category, message, level, detail string) {
+func WriteLog(category, message, level, detail string, userID int) {
 	conn, err := GetDB()
 	if err != nil {
 		return
@@ -260,28 +262,42 @@ func WriteLog(category, message, level, detail string) {
 	if level == "" {
 		level = "info"
 	}
-	conn.Exec("INSERT INTO sys_llm_log (category, level, message, detail) VALUES (?, ?, ?, ?)",
-		category, level, message, detail)
+	conn.Exec("INSERT INTO sys_llm_log (category, level, message, detail, user_id) VALUES (?, ?, ?, ?, ?)",
+		category, level, message, detail, userID)
 
 	// 自动清理超过 1000 条
 	conn.Exec("DELETE FROM sys_llm_log WHERE id IN (SELECT id FROM (SELECT id FROM sys_llm_log ORDER BY ts ASC LIMIT 999) t) AND (SELECT COUNT(*) FROM sys_llm_log) > 1000")
 }
 
-func GetLogs(limit int, category string, afterID int) ([]map[string]interface{}, int, error) {
+func GetLogs(limit int, category string, afterID int, userID int, isAdmin bool) ([]map[string]interface{}, int, error) {
 	conn, err := GetDB()
 	if err != nil {
 		return nil, 0, err
 	}
 
 	var rows *sql.Rows
-	if afterID > 0 && category != "" {
-		rows, err = conn.Query("SELECT id, ts, category, level, message, detail FROM sys_llm_log WHERE id > ? AND category = ? ORDER BY id DESC LIMIT ?", afterID, category, limit)
-	} else if afterID > 0 {
-		rows, err = conn.Query("SELECT id, ts, category, level, message, detail FROM sys_llm_log WHERE id > ? ORDER BY id DESC LIMIT ?", afterID, limit)
-	} else if category != "" {
-		rows, err = conn.Query("SELECT id, ts, category, level, message, detail FROM sys_llm_log WHERE category = ? ORDER BY id DESC LIMIT ?", category, limit)
+	if isAdmin {
+		// 管理员看全部
+		if afterID > 0 && category != "" {
+			rows, err = conn.Query("SELECT id, ts, category, level, message, detail FROM sys_llm_log WHERE id > ? AND category = ? ORDER BY id DESC LIMIT ?", afterID, category, limit)
+		} else if afterID > 0 {
+			rows, err = conn.Query("SELECT id, ts, category, level, message, detail FROM sys_llm_log WHERE id > ? ORDER BY id DESC LIMIT ?", afterID, limit)
+		} else if category != "" {
+			rows, err = conn.Query("SELECT id, ts, category, level, message, detail FROM sys_llm_log WHERE category = ? ORDER BY id DESC LIMIT ?", category, limit)
+		} else {
+			rows, err = conn.Query("SELECT id, ts, category, level, message, detail FROM sys_llm_log ORDER BY id DESC LIMIT ?", limit)
+		}
 	} else {
-		rows, err = conn.Query("SELECT id, ts, category, level, message, detail FROM sys_llm_log ORDER BY id DESC LIMIT ?", limit)
+		// 普通用户只看自己
+		if afterID > 0 && category != "" {
+			rows, err = conn.Query("SELECT id, ts, category, level, message, detail FROM sys_llm_log WHERE id > ? AND category = ? AND user_id = ? ORDER BY id DESC LIMIT ?", afterID, category, userID, limit)
+		} else if afterID > 0 {
+			rows, err = conn.Query("SELECT id, ts, category, level, message, detail FROM sys_llm_log WHERE id > ? AND user_id = ? ORDER BY id DESC LIMIT ?", afterID, userID, limit)
+		} else if category != "" {
+			rows, err = conn.Query("SELECT id, ts, category, level, message, detail FROM sys_llm_log WHERE category = ? AND user_id = ? ORDER BY id DESC LIMIT ?", category, userID, limit)
+		} else {
+			rows, err = conn.Query("SELECT id, ts, category, level, message, detail FROM sys_llm_log WHERE user_id = ? ORDER BY id DESC LIMIT ?", userID, limit)
+		}
 	}
 	if err != nil {
 		return nil, 0, err

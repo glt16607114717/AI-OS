@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
+import { formatTimeShort as formatTime } from '../../utils/time'
 
 interface Suggestion {
   id: number
@@ -75,12 +76,7 @@ function toggleExpand(id: number) {
   }
 }
 
-function formatTime(dateStr: string | null): string {
-  if (!dateStr) return ''
-  const d = new Date(dateStr)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
+// formatTime 已从 '../../utils/time' 全局引入（用短格式，不含秒）
 
 async function fetchSuggestions() {
   loading.value = true

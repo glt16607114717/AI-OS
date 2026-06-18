@@ -4,7 +4,6 @@ import (
 	"ai-os-server/middleware"
 	"ai-os-server/service"
 	"bufio"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,13 +15,13 @@ import (
 
 // ── LLM 代理核心 ──
 
-// ConversationContext 累积一个对话的完整上下文信息
+// ConversationContext 累积一个请求的完整上下文信息
 type ConversationContext struct {
-	ID               string
 	UserID           int
 	Username         string
 	UserMessage      string   // 用户提问摘要
 	Models           []string // 使用的模型列表
+	KeyNames         []string // 使用的 API Key 名称列表
 	FailoverCount    int      // 故障转移次数
 	TotalPrompt      int
 	TotalCompletion  int
@@ -42,29 +41,22 @@ func (c *ConversationContext) SummarizeAndLog() {
 		level = "error"
 	}
 	detail := map[string]interface{}{
-		"conversation_id":  c.ID,
-		"user_id":          c.UserID,
-		"username":         c.Username,
-		"models":           c.Models,
-		"failover_count":   c.FailoverCount,
-		"prompt_tokens":    c.TotalPrompt,
+		"user_id":           c.UserID,
+		"username":          c.Username,
+		"models":            c.Models,
+		"key_names":         c.KeyNames,
+		"failover_count":    c.FailoverCount,
+		"prompt_tokens":     c.TotalPrompt,
 		"completion_tokens": c.TotalCompletion,
-		"tool_calls":       c.ToolCallCount,
-		"errors":           c.Errors,
-		"user_message":     c.UserMessage,
-		"latency_ms":       latency,
+		"tool_calls":        c.ToolCallCount,
+		"errors":            c.Errors,
+		"user_message":      c.UserMessage,
+		"latency_ms":        latency,
 	}
 	detailJSON, _ := json.Marshal(detail)
 	service.WriteLog("conversation",
 		fmt.Sprintf("对话完成 | %s | 输入%d/输出%d/耗时%dms", models, c.TotalPrompt, c.TotalCompletion, latency),
-		level, string(detailJSON))
-}
-
-// generateConversationID 生成对话唯一标识
-func generateConversationID() string {
-	b := make([]byte, 16)
-	rand.Read(b)
-	return fmt.Sprintf("%x", b)
+		level, string(detailJSON), c.UserID)
 }
 
 // ProxyChatCompletions LLM 代理转发
@@ -77,8 +69,6 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 		userID = session.UserID
 		username = session.Username
 	}
-
-	conversationID := generateConversationID()
 
 	// 解析请求
 	var req map[string]interface{}
@@ -113,7 +103,6 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	convCtx := &ConversationContext{
-		ID:          conversationID,
 		UserID:      userID,
 		Username:    username,
 		UserMessage: userMsgSummary,
@@ -197,6 +186,7 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 			convCtx.FailoverCount++
 		}
 		convCtx.Models = append(convCtx.Models, route.ModelID)
+		convCtx.KeyNames = append(convCtx.KeyNames, route.KeyName)
 
 		// 每个路由用自己的 model_id
 		fwdReq := copyMap(req)
@@ -213,7 +203,6 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 		if err != nil {
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				ConversationID: convCtx.ID,
 				UserID:         userID, Username: username,
 				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: err.Error(),
@@ -233,7 +222,6 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 				errMsg = errMsg[:500]
 			}
 			service.RecordStat(&service.LLMStatType{
-				ConversationID: convCtx.ID,
 				UserID:         userID, Username: username,
 				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: errMsg,
@@ -253,7 +241,6 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 			totalTokens := intFloat(usage["total_tokens"])
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				ConversationID:   convCtx.ID,
 				UserID:           userID, Username: username,
 				VendorID:         route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				PromptTokens: promptTokens, CompletionTokens: completionTokens,
@@ -264,7 +251,6 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 		} else {
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				ConversationID:   convCtx.ID,
 				UserID:           userID, Username: username,
 				VendorID:       route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: true,
@@ -295,7 +281,7 @@ func handleNormalWithFailover(w http.ResponseWriter, req map[string]interface{},
 		w.Write(body)
 
 		log.Printf("[proxy] normal %s vendor=%d key=%s user=%s latency=%dms source=%s conv=%s",
-			route.ModelID, route.VendorID, keyPrefix8(route.KeyID), username, time.Since(startTime).Milliseconds(), source, convCtx.ID)
+			route.ModelID, route.VendorID, keyPrefix8(route.KeyID), username, time.Since(startTime).Milliseconds(), source)
 
 		// 对话完成：合并存储 embedding + 写汇总日志
 		if convCtx.AssistantContent != "" {
@@ -332,6 +318,7 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 			convCtx.FailoverCount++
 		}
 		convCtx.Models = append(convCtx.Models, route.ModelID)
+		convCtx.KeyNames = append(convCtx.KeyNames, route.KeyName)
 
 		// 每个路由用自己的 model_id
 		fwdReq := copyMap(req)
@@ -348,7 +335,6 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 		if err != nil {
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				ConversationID: convCtx.ID,
 				UserID:         userID, Username: username,
 				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: err.Error(),
@@ -367,7 +353,6 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 			}
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				ConversationID: convCtx.ID,
 				UserID:         userID, Username: username,
 				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: errMsg,
@@ -449,7 +434,6 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 				convCtx.TotalCompletion += completionTokens
 			}
 			service.RecordStat(&service.LLMStatType{
-				ConversationID:   convCtx.ID,
 				UserID:           userID, Username: username,
 				VendorID:         route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				PromptTokens: promptTokens, CompletionTokens: completionTokens,
@@ -464,7 +448,7 @@ func handleStreamWithFailover(w http.ResponseWriter, req map[string]interface{},
 		}
 
 		log.Printf("[proxy] stream %s vendor=%d key=%s user=%s latency=%dms source=%s conv=%s",
-			route.ModelID, route.VendorID, keyPrefix8(route.KeyID), username, time.Since(startTime).Milliseconds(), source, convCtx.ID)
+			route.ModelID, route.VendorID, keyPrefix8(route.KeyID), username, time.Since(startTime).Milliseconds(), source)
 
 		// 对话完成：合并存储 embedding + 写汇总日志
 		if convCtx.AssistantContent != "" {
@@ -706,7 +690,6 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 		username = session.Username
 	}
 
-	conversationID := generateConversationID()
 
 	var req map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -748,7 +731,6 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	convCtx := &ConversationContext{
-		ID:          conversationID,
 		UserID:      userID,
 		Username:    username,
 		UserMessage: userMsgSummary,
@@ -813,6 +795,7 @@ func handleWorkspaceNormalWithFailover(w http.ResponseWriter, req map[string]int
 			convCtx.FailoverCount++
 		}
 		convCtx.Models = append(convCtx.Models, route.ModelID)
+		convCtx.KeyNames = append(convCtx.KeyNames, route.KeyName)
 
 		fwdReq := copyMap(req)
 		fwdReq["model"] = route.ModelID
@@ -828,7 +811,6 @@ func handleWorkspaceNormalWithFailover(w http.ResponseWriter, req map[string]int
 		if err != nil {
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				ConversationID: convCtx.ID,
 				UserID:         userID, Username: username,
 				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: err.Error(),
@@ -849,7 +831,6 @@ func handleWorkspaceNormalWithFailover(w http.ResponseWriter, req map[string]int
 				errMsg = errMsg[:500]
 			}
 			service.RecordStat(&service.LLMStatType{
-				ConversationID: convCtx.ID,
 				UserID:         userID, Username: username,
 				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: errMsg,
@@ -887,7 +868,6 @@ func handleWorkspaceNormalWithFailover(w http.ResponseWriter, req map[string]int
 			totalTokens := intFloat(usage["total_tokens"])
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				ConversationID:   convCtx.ID,
 				UserID:           userID, Username: username,
 				VendorID:         route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				PromptTokens: promptTokens, CompletionTokens: completionTokens,
@@ -908,7 +888,7 @@ func handleWorkspaceNormalWithFailover(w http.ResponseWriter, req map[string]int
 		w.Write(body)
 
 		log.Printf("[workspace] normal %s vendor=%d key=%s user=%s latency=%dms source=%s conv=%s",
-			route.ModelID, route.VendorID, keyPrefix8(route.KeyID), username, time.Since(startTime).Milliseconds(), source, convCtx.ID)
+			route.ModelID, route.VendorID, keyPrefix8(route.KeyID), username, time.Since(startTime).Milliseconds(), source)
 
 		// 对话完成：合并存储 embedding + 写汇总日志
 		if convCtx.AssistantContent != "" {
@@ -950,6 +930,7 @@ func handleWorkspaceStreamWithFailover(w http.ResponseWriter, req map[string]int
 			convCtx.FailoverCount++
 		}
 		convCtx.Models = append(convCtx.Models, route.ModelID)
+		convCtx.KeyNames = append(convCtx.KeyNames, route.KeyName)
 
 		fwdReq := copyMap(req)
 		fwdReq["model"] = route.ModelID
@@ -965,7 +946,6 @@ func handleWorkspaceStreamWithFailover(w http.ResponseWriter, req map[string]int
 		if err != nil {
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				ConversationID: convCtx.ID,
 				UserID:         userID, Username: username,
 				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: err.Error(),
@@ -985,7 +965,6 @@ func handleWorkspaceStreamWithFailover(w http.ResponseWriter, req map[string]int
 			}
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				ConversationID: convCtx.ID,
 				UserID:         userID, Username: username,
 				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				LatencyMs: latency, Success: false, Error: errMsg,
@@ -1033,7 +1012,6 @@ func handleWorkspaceStreamWithFailover(w http.ResponseWriter, req map[string]int
 					totalTokens := intFloat(usage["total_tokens"])
 					latency := int(time.Since(startTime).Milliseconds())
 					service.RecordStat(&service.LLMStatType{
-					ConversationID:   convCtx.ID,
 					UserID:           userID, Username: username,
 					VendorID:         route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 					PromptTokens: promptTokens, CompletionTokens: completionTokens,
@@ -1063,7 +1041,6 @@ func handleWorkspaceStreamWithFailover(w http.ResponseWriter, req map[string]int
 	if !success && totalContent != "" {
 		latency := int(time.Since(startTime).Milliseconds())
 		service.RecordStat(&service.LLMStatType{
-			ConversationID: convCtx.ID,
 			UserID:         userID, Username: username,
 			VendorID:       route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 			LatencyMs: latency, Success: true,
@@ -1076,7 +1053,7 @@ func handleWorkspaceStreamWithFailover(w http.ResponseWriter, req map[string]int
 		}
 
 		log.Printf("[workspace] stream %s vendor=%d key=%s user=%s latency=%dms source=%s conv=%s",
-			route.ModelID, route.VendorID, keyPrefix8(route.KeyID), username, time.Since(startTime).Milliseconds(), source, convCtx.ID)
+			route.ModelID, route.VendorID, keyPrefix8(route.KeyID), username, time.Since(startTime).Milliseconds(), source)
 
 		// 对话完成：合并存储 embedding + 写汇总日志
 		if convCtx.AssistantContent != "" {
@@ -1137,6 +1114,7 @@ func handleToolCallsWithFailover(w http.ResponseWriter, originalReq map[string]i
 				convCtx.FailoverCount++
 			}
 			convCtx.Models = append(convCtx.Models, route.ModelID)
+		convCtx.KeyNames = append(convCtx.KeyNames, route.KeyName)
 
 			secondReq := map[string]interface{}{
 				"model":    route.ModelID,
@@ -1190,7 +1168,6 @@ func handleToolCallsWithFailover(w http.ResponseWriter, originalReq map[string]i
 					totalTokens := intFloat(usage["total_tokens"])
 					latency := int(time.Since(startTime).Milliseconds())
 					service.RecordStat(&service.LLMStatType{
-					ConversationID:   convCtx.ID,
 					UserID:           userID, Username: username,
 					VendorID:         route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 					PromptTokens: promptTokens, CompletionTokens: completionTokens,
@@ -1210,7 +1187,7 @@ func handleToolCallsWithFailover(w http.ResponseWriter, originalReq map[string]i
 					}
 				}
 			}
-			log.Printf("[workspace] skill=%s user=%s latency=%dms source=%s conv=%s", skillID, username, time.Since(startTime).Milliseconds(), source, convCtx.ID)
+			log.Printf("[workspace] skill=%s user=%s latency=%dms source=%s conv=%s", skillID, username, time.Since(startTime).Milliseconds(), source)
 
 			// 对话完成：合并存储 embedding + 写汇总日志
 			if convCtx.AssistantContent != "" {

@@ -22,9 +22,11 @@ AIOS Go 后端的接口测试工具。自动登录获取 Token，然后调用目
 **唯一方式**：文件传参。
 
 ```
-1. Write → D:\wwwroot\ai-os\ai_cache\temp\aios_test_{时间戳}.json
-2. RunCommand → python scripts/aios_api_test.py D:\wwwroot\ai-os\ai_cache\temp\aios_test_{时间戳}.json
+1. Write → D:\wwwroot\AI\AI-OS\.tmp_api_test.json
+2. RunCommand → python D:\wwwroot\AI\AI-OS\.trae\skills\aios-api-test\scripts\aios_api_test.py D:\wwwroot\AI\AI-OS\.tmp_api_test.json
 ```
+
+> 注意：脚本默认账号已内置为 `桂良涛 / glt01054717`，无需在参数里重复填写，除非要切换到其他用户。
 
 ### 参数说明
 
@@ -33,10 +35,9 @@ AIOS Go 后端的接口测试工具。自动登录获取 Token，然后调用目
 | url | 是 | 接口路径，如 `/api/users` |
 | method | 否 | GET/POST，默认 GET |
 | params | 否 | 请求参数（JSON 对象），默认 {} |
-| username | 否 | 登录账号，默认 admin |
-| password | 否 | 登录密码，默认 admin123 |
+| username | 否 | 登录账号，默认 `桂良涛` |
+| password | 否 | 登录密码，默认 `glt01054717` |
 | no_auth | 否 | 设为 true 时跳过登录（用于 /api/health 等公开接口） |
-| raw_body | 否 | 设为 true 时 params 作为 raw body 发送（非 JSON） |
 
 ### 参数文件示例
 

@@ -235,7 +235,7 @@ onBeforeUnmount(() => {
               </router-link>
               <router-link to="/llm/log" class="nav-sub-item" active-class="active">
                 <span class="sub-dot"></span>
-                操作日志
+                对话记录
               </router-link>
               <router-link to="/llm/quota" class="nav-sub-item" active-class="active">
                 <span class="sub-dot"></span>

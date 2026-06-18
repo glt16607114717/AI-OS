@@ -310,7 +310,15 @@ func GetLogs(w http.ResponseWriter, r *http.Request) {
 	afterIDStr := r.URL.Query().Get("after_id")
 	afterID, _ := strconv.Atoi(afterIDStr)
 
-	logs, maxID, err := service.GetLogs(limit, category, afterID)
+	session := middleware.GetSessionFromCtx(r)
+	userID := 0
+	isAdmin := false
+	if session != nil {
+		userID = session.UserID
+		isAdmin = session.IsAdmin
+	}
+
+	logs, maxID, err := service.GetLogs(limit, category, afterID, userID, isAdmin)
 	if err != nil {
 		errResponse(w, err.Error(), 500)
 		return

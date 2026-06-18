@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { API_BASE } from '../../api'
+import { formatTime } from '../../utils/time'
 
 function authHeaders() {
   const token = localStorage.getItem('aios_token')
@@ -116,7 +117,7 @@ onUnmounted(() => {
           </div>
           <div class="status-text">{{ statusLabel(k.status) }}</div>
           <div v-if="k.next_reset" class="reset-time">重置时间：{{ k.next_reset }}</div>
-          <div v-if="k.updated_at" class="updated-at">最后更新：{{ k.updated_at }}</div>
+          <div v-if="k.updated_at" class="updated-at">最后更新：{{ formatTime(k.updated_at) }}</div>
           <div v-if="k.error" class="error">{{ k.error }}</div>
         </div>
       </div>

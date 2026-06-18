@@ -4,6 +4,7 @@ import { CirclePlus, Delete, Edit, CopyDocument, Link } from '@element-plus/icon
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import { API_BASE as BASE_URL } from '../../api'
+import { formatTime } from '../../utils/time'
 
 interface User {
   id: number
@@ -81,7 +82,7 @@ const proxyUrl = computed(() => {
 async function copyApiKey() {
   if (!myApiKey.value) return
   try {
-    await navigator.clipboard.writeText(myApiKey.value)
+    await copyText(myApiKey.value)
     ElMessage.success('API Key 已复制')
   } catch {
     ElMessage.error('复制失败')
@@ -92,11 +93,31 @@ async function copyApiKey() {
 async function copyProxyUrl() {
   if (!proxyUrl.value) return
   try {
-    await navigator.clipboard.writeText(proxyUrl.value)
+    await copyText(proxyUrl.value)
     ElMessage.success('代理链接已复制，可直接粘贴到第三方工具')
   } catch {
     ElMessage.error('复制失败')
   }
+}
+
+// 兼容 HTTP 环境的复制函数
+async function copyText(text: string) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  // HTTP 降级方案
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.select()
+  if (!document.execCommand('copy')) {
+    document.body.removeChild(textarea)
+    throw new Error('复制失败')
+  }
+  document.body.removeChild(textarea)
 }
 
 // ── 新增用户 ──
@@ -225,10 +246,7 @@ async function doDelete(user: User) {
   } catch { /* 取消 */ }
 }
 
-function formatTime(t: string) {
-  if (!t) return '-'
-  return t.replace('T', ' ').slice(0, 19)
-}
+// formatTime 已从 '../../utils/time' 全局引入
 
 onMounted(() => {
   fetchMyInfo()

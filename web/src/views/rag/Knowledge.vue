@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { API_BASE } from '../../api'
+import { formatTimeShort as formatTime } from '../../utils/time'
 import { marked } from 'marked'
 
 interface DocItem {
@@ -100,12 +101,7 @@ function clearSearch() {
   searchResults.value = []
 }
 
-function formatTime(ts: string | undefined): string {
-  if (!ts) return '-'
-  // MySQL DATETIME: "2026-06-17 10:45:02" → "06-17 10:45"
-  if (ts.length >= 16) return ts.slice(5, 16)
-  return ts
-}
+// formatTime 已从 '../../utils/time' 全局引入
 
 function sourceLabel(source: string | undefined): string {
   if (!source) return '未知'

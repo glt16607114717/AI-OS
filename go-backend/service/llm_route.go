@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/big"
+	"sync"
 	"sync/atomic"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -90,7 +92,7 @@ func GetCatalog() ([]map[string]interface{}, error) {
 			models := vm["models"].([]map[string]interface{})
 			vm["models"] = append(models, map[string]interface{}{
 				"id": m.ID, "model_id": m.ModelID, "display_name": m.Name,
-				"model_type": m.ModelType, "enabled": m.Enabled, "max_tokens": m.MaxTokens,
+				"model_type": m.ModelType.String, "enabled": m.Enabled, "max_tokens": m.MaxTokens,
 			})
 		}
 	}
@@ -221,7 +223,32 @@ func GetAvailableOptions() ([]map[string]interface{}, error) {
 
 // ── 策略路由（持久化到 MySQL）──
 
-var rrCounter int64
+// 用户独立的轮询计数器：避免多用户共享导致顺序错乱
+// key=userID, value=*int64（按用户定义顺序严格轮询）
+var userRRCounters sync.Map
+
+// getUserRRCounter 获取（或初始化）指定用户的轮询计数器
+func getUserRRCounter(userID int) *int64 {
+	key := fmt.Sprintf("%d", userID)
+	if v, ok := userRRCounters.Load(key); ok {
+		return v.(*int64)
+	}
+	newCounter := int64(0)
+	actual, _ := userRRCounters.LoadOrStore(key, &newCounter)
+	return actual.(*int64)
+}
+
+// randIntn 密码学安全的随机整数 [0, n)
+func randIntn(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	bigN, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
+	if err != nil {
+		return 0
+	}
+	return int(bigN.Int64())
+}
 
 func EnsureStrategyTable() {
 	conn, _ := GetDB()
@@ -391,8 +418,10 @@ func GetRouteByStrategy(userID int) *model.RouteInfo {
 	var selected *model.StrategyOption
 	if active.Type == "round_robin" {
 		total := len(active.Options)
+		userCounter := getUserRRCounter(userID)
 		for i := 0; i < total; i++ {
-			idx := int(atomic.AddInt64(&rrCounter, 1)) % total
+			// 按用户独立计数，严格按定义顺序轮询 A→B→C→A→B→C
+			idx := int(atomic.AddInt64(userCounter, 1)-1) % total
 			opt := active.Options[idx]
 			if !IsKeyExhausted(opt.KeyID) {
 				s := opt
@@ -410,6 +439,11 @@ func GetRouteByStrategy(userID int) *model.RouteInfo {
 	return enrichRouteInfo(selected)
 }
 
+// GetAllRoutesForFailover 通用故障转移机制（非策略类型本身）
+//   - fixed：排除当前已选，从剩余可用模型中【随机】挑兜底，避免单点压力
+//   - round_robin：按用户定义顺序输出剩余可用，自然衔接"跳到下一个"的语义
+//
+// 策略类型决定选路方式，故障转移是所有策略都具备的通用兜底机制
 func GetAllRoutesForFailover(userID int) []model.RouteInfo {
 	strategies := loadStrategiesFromDB(userID, false)
 
@@ -420,15 +454,40 @@ func GetAllRoutesForFailover(userID int) []model.RouteInfo {
 			break
 		}
 	}
-	if active == nil || active.Type != "round_robin" {
+	// 任何策略都应支持故障转移；无策略则无兜底
+	if active == nil {
 		return nil
 	}
 
-	var routes []model.RouteInfo
+	// 收集所有可用模型
+	var available []model.StrategyOption
 	for _, opt := range active.Options {
 		if IsKeyExhausted(opt.KeyID) {
 			continue
 		}
+		available = append(available, opt)
+	}
+
+	switch active.Type {
+	case "fixed":
+		// 固定策略失败 → 随机打散剩余可用模型做兜底
+		// （含 primary 自身，调用方会跳过 primary.KeyID）
+		shuffled := make([]model.StrategyOption, len(available))
+		copy(shuffled, available)
+		// Fisher-Yates 洗牌（crypto/rand）
+		for i := len(shuffled) - 1; i > 0; i-- {
+			j := randIntn(i + 1)
+			shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+		}
+		available = shuffled
+
+	case "round_robin":
+		// 轮询策略失败 → 按用户定义顺序返回，自然跳到下一个
+		// available 已是按 Options 定义顺序收集，无需调整
+	}
+
+	var routes []model.RouteInfo
+	for _, opt := range available {
 		if ri := enrichRouteInfo(&opt); ri != nil {
 			routes = append(routes, *ri)
 		}
@@ -447,8 +506,8 @@ func enrichRouteInfo(opt *model.StrategyOption) *model.RouteInfo {
 		return nil
 	}
 
-	var apiKey string
-	if err := conn.QueryRow("SELECT api_key FROM sys_api_key WHERE id = ?", opt.KeyID).Scan(&apiKey); err != nil || apiKey == "" {
+	var apiKey, keyName string
+	if err := conn.QueryRow("SELECT api_key, name FROM sys_api_key WHERE id = ?", opt.KeyID).Scan(&apiKey, &keyName); err != nil || apiKey == "" {
 		return nil
 	}
 
@@ -458,6 +517,7 @@ func enrichRouteInfo(opt *model.StrategyOption) *model.RouteInfo {
 		BaseURL:    baseURL,
 		APIKey:     apiKey,
 		KeyID:      opt.KeyID,
+		KeyName:    keyName,
 		ModelID:    opt.ModelID,
 	}
 	if IsKeyExhausted(opt.KeyID) {
