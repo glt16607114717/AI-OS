@@ -52,10 +52,9 @@ AI-OS/
 - **功能**：构建 AI-OS 客户端安装包
 - **输出位置**：`D:\ai-os-build\AI-OS-Setup-{version}.exe`
 
-### 3.2 MySQL 操作技能 (aios-mysql)
+### 3.2 数据库操作技能 (aios-db)
 - **触发词**：查数据库、MySQL 查询、操作 ai_os
 - **功能**：操作 AI-OS 数据库（查询/插入/更新/删除）
-- **数据库信息**：124.221.220.89:23306/ai_os
 
 ### 3.3 Go 部署技能 (aios-deploy)
 - **触发词**：部署后端、重启服务、编译 Go
@@ -85,7 +84,7 @@ AI-OS/
 3. 使用 `aios-build` 技能构建安装包
 
 ### 4.3 数据库操作流程
-1. 使用 `aios-mysql` 技能执行 SQL
+1. 使用 `aios-db` 技能执行 SQL
 2. 查询数据或修改配置
 3. 谨慎使用 DELETE 和 UPDATE 操作
 
@@ -98,14 +97,7 @@ AI-OS/
 |------|------|------|
 | 18731 | Go 后端 | 业务 API（公网） |
 | 18732 | Python Agent | 语音指令、键鼠控制（本地） |
-| 23306 | MySQL | ai_os 数据库 |
 | 5173 | Vite Dev | 开发模式热更新 |
-
-### 5.2 服务器信息
-- **主机**：124.221.220.89
-- **用户**：ubuntu
-- **服务路径**：/opt/ai-os/ai-os-server
-- **systemd 服务**：ai-os.service
 
 ---
 
@@ -120,18 +112,10 @@ AI-OS/
 
 ## 七、运维指南
 
-### 7.1 检查服务状态
-```bash
-ssh ubuntu@124.221.220.89 "sudo systemctl status ai-os"
-```
-
-### 7.2 查看日志
-```bash
-ssh ubuntu@124.221.220.89 "sudo journalctl -u ai-os -f"
-```
-
-### 7.3 重启服务
-- 使用 `aios-deploy` 技能，参数：restart
+运维操作请使用对应的技能：
+- 部署/重启服务：`aios-deploy` 技能
+- 部署前端：`aios-web-deploy` 技能
+- 服务器运维：`aios-server-ops` 技能
 
 ---
 

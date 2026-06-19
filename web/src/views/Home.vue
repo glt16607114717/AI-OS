@@ -11,6 +11,7 @@ const devExpanded = ref(false)
 const llmExpanded = ref(false)
 const ragExpanded = ref(false)
 const systemExpanded = ref(false)
+const skillExpanded = ref(false)
 const isAdmin = ref(false)
 const currentUser = ref('')
 const activeStrategy = ref('') // 当前生效的策略名称
@@ -19,6 +20,7 @@ const isDevActive = computed(() => route.path.startsWith('/dev'))
 const isLlmActive = computed(() => route.path.startsWith('/llm'))
 const isRagActive = computed(() => route.path.startsWith('/rag'))
 const isSystemActive = computed(() => route.path.startsWith('/system'))
+const isSkillActive = computed(() => route.path.startsWith('/skills'))
 
 watch(isDevActive, (val) => {
   if (val) devExpanded.value = true
@@ -36,6 +38,10 @@ watch(isSystemActive, (val) => {
   if (val) systemExpanded.value = true
 }, { immediate: true })
 
+watch(isSkillActive, (val) => {
+  if (val) skillExpanded.value = true
+}, { immediate: true })
+
 function toggleDevMenu() {
   devExpanded.value = !devExpanded.value
 }
@@ -50,6 +56,10 @@ function toggleRagMenu() {
 
 function toggleSystemMenu() {
   systemExpanded.value = !systemExpanded.value
+}
+
+function toggleSkillMenu() {
+  skillExpanded.value = !skillExpanded.value
 }
 
 async function checkAdmin() {
@@ -272,6 +282,29 @@ onBeforeUnmount(() => {
               <router-link to="/dev/timestamp" class="nav-sub-item" active-class="active">
                 <span class="sub-dot"></span>
                 时间戳转换
+              </router-link>
+            </div>
+          </transition>
+        </div>
+
+        <!-- Skills (expandable, admin only) -->
+        <div class="nav-group" v-if="isAdmin">
+          <div class="nav-item" :class="{ active: isSkillActive }" @click="toggleSkillMenu">
+            <div class="nav-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+              </svg>
+            </div>
+            <span class="nav-text">技能</span>
+            <svg class="nav-arrow" :class="{ expanded: skillExpanded }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </div>
+          <transition name="sub-slide">
+            <div v-show="skillExpanded" class="nav-sub">
+              <router-link to="/skills/mysql_query" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                MySQL 查询
               </router-link>
             </div>
           </transition>

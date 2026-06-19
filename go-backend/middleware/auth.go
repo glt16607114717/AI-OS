@@ -97,23 +97,38 @@ func GetSession(r *http.Request) *model.Session {
 		return nil
 	}
 
+	// 先查 session
 	authMutex.RLock()
 	session, ok := Sessions[token]
 	authMutex.RUnlock()
 
-	if !ok {
-		return nil
-	}
-	if time.Now().After(session.Expire) {
-		authMutex.Lock()
-		delete(Sessions, token)
-		if uid := session.UserID; UserTokens[uid] == token {
-			delete(UserTokens, uid)
+	if ok {
+		if time.Now().After(session.Expire) {
+			authMutex.Lock()
+			delete(Sessions, token)
+			if uid := session.UserID; UserTokens[uid] == token {
+				delete(UserTokens, uid)
+			}
+			authMutex.Unlock()
+			return nil
 		}
-		authMutex.Unlock()
-		return nil
+		return session
 	}
-	return session
+
+	// session 查不到，尝试作为 API Key（sk- 开头）
+	if strings.HasPrefix(token, "sk-") && APIKeyLookup != nil {
+		uid, username, isAdmin, err := APIKeyLookup(token)
+		if err == nil && uid > 0 {
+			return &model.Session{
+				UserID:   uid,
+				Username: username,
+				IsAdmin:  isAdmin,
+				Expire:   time.Now().Add(24 * time.Hour),
+			}
+		}
+	}
+
+	return nil
 }
 
 // RequireAuth 鉴权中间件

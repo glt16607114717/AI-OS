@@ -1,32 +1,12 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-import paramiko
+"""检查 SSH 日志"""
+import subprocess
 
-# ── 服务器配置 ──
-SERVER_HOST = '8.163.127.182'
-SERVER_PORT = 443
-SERVER_USER = 'root'
-SERVER_PASS = 'glt01054717@'
+SSH = ['ssh', '-p', '443', '-o', 'StrictHostKeyChecking=no', 'root@8.163.127.182']
 
-def check_ssh_logs():
-    """检查SSH日志"""
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(SERVER_HOST, port=SERVER_PORT, username=SERVER_USER, password=SERVER_PASS, timeout=15)
+def run(cmd):
+    result = subprocess.run(SSH + [cmd], capture_output=True, timeout=30)
+    print(result.stdout.decode('utf-8', errors='replace'))
 
-    # 检查最近的SSH日志
-    stdin, stdout, stderr = client.exec_command('journalctl -u ssh -n 20 --no-pager')
-    ssh_logs = stdout.read().decode()
-    print("=== SSH日志 ===")
-    print(ssh_logs)
-
-    # 尝试测试SSH密钥连接
-    print("\n=== 测试SSH密钥验证 ===")
-    stdin, stdout, stderr = client.exec_command('echo "测试"')
-    result = stdout.read().decode()
-    print(f"密码登录成功: {result}")
-
-    client.close()
-
-if __name__ == "__main__":
-    check_ssh_logs()
+if __name__ == '__main__':
+    print("=== 最近SSH日志 ===")
+    run('journalctl -u ssh -n 30 --no-pager')

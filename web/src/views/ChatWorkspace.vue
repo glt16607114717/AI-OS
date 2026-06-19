@@ -64,6 +64,7 @@ interface ToolCall {
 }
 
 interface Message {
+  id?: number
   role: 'user' | 'assistant' | 'system'
   content: string
   done?: boolean
@@ -76,31 +77,9 @@ const input = ref('')
 const loading = ref(false)
 const chatContainer = ref<HTMLDivElement | null>(null)
 const currentModel = ref('')
-const skills = ref<{id: string, name: string, description: string, example_queries: string[]}[]>([])
-const showSkills = ref(false)
 const CACHE_KEY = 'ai-os-chat-messages'
 let abortController: AbortController | null = null
 
-// 加载技能列表
-async function loadSkills() {
-  try {
-    const res = await fetch(`${API_BASE}/api/skills`, { headers: authHeaders() })
-    const json = await res.json()
-    if (!json.ok) return
-    const list = json.data || []
-    if (Array.isArray(list)) {
-      skills.value = list
-    }
-  } catch (e) {
-    console.error('[ChatWorkspace] loadSkills error:', e)
-    ElMessage.error('加载技能列表失败: ' + (e as Error).message)
-  }
-}
-
-function useSkillQuery(query: string) {
-  input.value = query
-  showSkills.value = false
-}
 
 // 缓存管理
 function saveToCache() {
@@ -140,6 +119,7 @@ async function loadFromBackend() {
     const list = json.data?.list || json.data || []
     if (Array.isArray(list) && list.length > 0) {
       messages.value = list.map((m: any) => ({
+        id: m.id,
         role: m.role,
         content: m.content,
         done: m.role === 'assistant'
@@ -510,6 +490,26 @@ async function clearChat() {
   }
 }
 
+async function downloadLog(id: number) {
+  try {
+    const res = await fetch(`${API_BASE}/api/chat/download/${id}`, { headers: authHeaders() })
+    if (!res.ok) {
+      const err = await res.json()
+      ElMessage.error(err.error || '下载失败')
+      return
+    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `conversation_${id}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    ElMessage.error('下载失败: ' + (e as Error).message)
+  }
+}
+
 function handleKeydown(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
@@ -519,7 +519,6 @@ function handleKeydown(e: KeyboardEvent) {
 
 onMounted(async () => {
   loadModel()
-  loadSkills()
   const cached = loadFromCache()
   if (cached.length > 0) {
     messages.value = cached
@@ -561,7 +560,16 @@ function onMessageDone() {
       </div>
 
       <div v-for="(msg, i) in messages" :key="i" class="message" :class="msg.role">
-        <div class="message-role">{{ msg.role === 'user' ? '你' : 'AI' }}</div>
+        <div class="message-role">
+          {{ msg.role === 'user' ? '你' : 'AI' }}
+          <button v-if="msg.role === 'assistant' && msg.id" class="download-log-btn" @click="downloadLog(msg.id)" title="下载请求日志">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+          </button>
+        </div>
         <div class="message-content">
           <!-- 工具调用过程：只显示简洁状态，不暴露底层工具 -->
           <div v-if="msg.toolCalls && msg.toolCalls.length && !msg.done" class="tool-status">
@@ -596,26 +604,6 @@ function onMessageDone() {
     </div>
 
     <div class="chat-input-area">
-      <!-- 技能选择器 -->
-      <div class="skill-selector" v-if="skills.length > 0">
-        <button class="skill-toggle-btn" @click="showSkills = !showSkills" :class="{ active: showSkills }">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-            <path d="M2 17l10 5 10-5"/>
-            <path d="M2 12l10 5 10-5"/>
-          </svg>
-        </button>
-        <div v-if="showSkills" class="skill-dropdown">
-          <div class="skill-dropdown-header">可用技能</div>
-          <div v-for="skill in skills" :key="skill.id" class="skill-item">
-            <div class="skill-item-name">{{ skill.name }}</div>
-            <div class="skill-item-desc">{{ skill.description.slice(0, 60) }}...</div>
-            <div class="skill-item-queries">
-              <button v-for="q in skill.example_queries" :key="q" class="skill-query-btn" @click="useSkillQuery(q)">{{ q }}</button>
-            </div>
-          </div>
-        </div>
-      </div>
       <textarea
         v-model="input"
         placeholder="输入消息... (Enter 发送，Shift+Enter 换行)"
@@ -728,6 +716,26 @@ function onMessageDone() {
   color: #6b7280;
   min-width: 20px;
   padding-top: 1px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.download-log-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #9ca3af;
+  padding: 2px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  transition: color 0.15s, background 0.15s;
+}
+
+.download-log-btn:hover {
+  color: #3b82f6;
+  background: #eff6ff;
 }
 
 .message-content {
@@ -748,97 +756,6 @@ function onMessageDone() {
   align-items: flex-end;
 }
 
-.skill-selector {
-  position: relative;
-  flex-shrink: 0;
-}
-
-.skill-toggle-btn {
-  width: 36px;
-  height: 36px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  background: #fff;
-  color: #6b7280;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s;
-}
-
-.skill-toggle-btn:hover, .skill-toggle-btn.active {
-  background: #eef2ff;
-  border-color: #6366f1;
-  color: #6366f1;
-}
-
-.skill-dropdown {
-  position: absolute;
-  bottom: 42px;
-  left: 0;
-  width: 320px;
-  max-height: 400px;
-  overflow-y: auto;
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-  z-index: 100;
-}
-
-.skill-dropdown-header {
-  padding: 8px 12px;
-  font-size: 12px;
-  font-weight: 600;
-  color: #6b7280;
-  border-bottom: 1px solid #e5e7eb;
-}
-
-.skill-item {
-  padding: 8px 12px;
-  border-bottom: 1px solid #f3f4f6;
-}
-
-.skill-item:last-child {
-  border-bottom: none;
-}
-
-.skill-item-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: #1f2937;
-  margin-bottom: 2px;
-}
-
-.skill-item-desc {
-  font-size: 11px;
-  color: #9ca3af;
-  margin-bottom: 6px;
-}
-
-.skill-item-queries {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.skill-query-btn {
-  font-size: 11px;
-  padding: 3px 8px;
-  border: 1px solid #c7d2fe;
-  border-radius: 4px;
-  background: #eef2ff;
-  color: #4338ca;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.skill-query-btn:hover {
-  background: #6366f1;
-  color: #fff;
-  border-color: #6366f1;
-}
 
 .chat-input-area textarea {
   flex: 1;

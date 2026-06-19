@@ -1,0 +1,334 @@
+package handler
+
+import (
+	"ai-os-server/service"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"reflect"
+	"strings"
+	"time"
+)
+
+// ── 公共：单次 LLM 调用（带故障转移）──
+
+// LLMResult 单次 LLM 调用的结果
+type LLMResult struct {
+	Body       []byte                  // 原始响应体
+	StatusCode int                     // HTTP 状态码
+	Header     http.Header             // 响应头
+	Data       map[string]interface{}  // 解析后的 JSON（仅非流式有效）
+	Route      *service.RouteInfoType  // 使用的路由
+}
+
+// callLLMWithFailover 用故障转移链请求 LLM
+// stream: 是否流式请求上游
+// tools: 工具定义（可为 nil）
+// 返回第一个成功的路由的响应；全部失败则返回 error
+func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts []*service.RouteInfoType, stream bool, convCtx *ConversationContext) (*LLMResult, error) {
+	userID := convCtx.UserID
+	username := convCtx.Username
+	startTime := convCtx.StartTime
+	failedVendors := make(map[int]bool)
+	var lastError string
+
+	for idx, route := range attempts {
+		if failedVendors[route.VendorID] {
+			continue
+		}
+
+		source := "策略路由"
+		if idx > 0 {
+			source = "故障转移"
+			convCtx.FailoverCount++
+		}
+		convCtx.Models = append(convCtx.Models, route.ModelID)
+		convCtx.KeyNames = append(convCtx.KeyNames, route.KeyName)
+
+		// 构造请求
+		llmReq := map[string]interface{}{
+			"model":    route.ModelID,
+			"messages": messages,
+			"stream":   stream,
+		}
+		if len(tools) > 0 {
+			llmReq["tools"] = tools
+		}
+
+		bodyJSON, _ := json.Marshal(llmReq)
+		baseURL := strings.TrimRight(route.BaseURL, "/")
+		httpReq, _ := http.NewRequest("POST", baseURL+"/chat/completions", strings.NewReader(string(bodyJSON)))
+		httpReq.Header.Set("Authorization", "Bearer "+route.APIKey)
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{Timeout: 180 * time.Second}
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			latency := int(time.Since(startTime).Milliseconds())
+			service.RecordStat(&service.LLMStatType{
+				UserID: userID, Username: username,
+				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+				LatencyMs: latency, Success: false, Error: err.Error(),
+			})
+			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 网络错误: %s", route.VendorName, err.Error()))
+			failedVendors[route.VendorID] = true
+			lastError = err.Error()
+			continue
+		}
+
+		// 流式：直接返回 resp，由调用方逐行读取
+		if stream {
+			if resp.StatusCode != 200 {
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				errMsg := string(body)
+				if len(errMsg) > 500 {
+					errMsg = errMsg[:500]
+				}
+				service.RecordStat(&service.LLMStatType{
+					UserID: userID, Username: username,
+					VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+					LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: errMsg,
+				})
+				convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
+				failedVendors[route.VendorID] = true
+				lastError = errMsg
+				continue
+			}
+			log.Printf("[llm] stream vendor=%s model=%s source=%s", route.VendorName, route.ModelID, source)
+			return &LLMResult{
+				Body:       nil,
+				StatusCode: resp.StatusCode,
+				Header:     resp.Header,
+				Route:      route,
+				Data:       map[string]interface{}{"__stream_resp__": resp}, // 特殊标记
+			}, nil
+		}
+
+		// 非流式：读完 body
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != 200 {
+			errMsg := string(body)
+			if len(errMsg) > 500 {
+				errMsg = errMsg[:500]
+			}
+			service.RecordStat(&service.LLMStatType{
+				UserID: userID, Username: username,
+				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+				LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: errMsg,
+			})
+			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
+			failedVendors[route.VendorID] = true
+			lastError = errMsg
+			continue
+		}
+
+		// 成功：解析 + 统计
+		var respData map[string]interface{}
+		json.Unmarshal(body, &respData)
+
+		if usage, ok := respData["usage"].(map[string]interface{}); ok {
+			promptTokens := intFloat(usage["prompt_tokens"])
+			completionTokens := intFloat(usage["completion_tokens"])
+			totalTokens := intFloat(usage["total_tokens"])
+			service.RecordStat(&service.LLMStatType{
+				UserID: userID, Username: username,
+				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+				PromptTokens: promptTokens, CompletionTokens: completionTokens,
+				TotalTokens: totalTokens, LatencyMs: int(time.Since(startTime).Milliseconds()), Success: true,
+			})
+			convCtx.TotalPrompt += promptTokens
+			convCtx.TotalCompletion += completionTokens
+		} else {
+			service.RecordStat(&service.LLMStatType{
+				UserID: userID, Username: username,
+				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+				LatencyMs: int(time.Since(startTime).Milliseconds()), Success: true,
+			})
+		}
+
+		log.Printf("[llm] normal vendor=%s model=%s source=%s", route.VendorName, route.ModelID, source)
+		return &LLMResult{
+			Body:       body,
+			StatusCode: resp.StatusCode,
+			Header:     resp.Header,
+			Data:       respData,
+			Route:      route,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("%s", lastError)
+}
+
+// getStreamResp 从 LLMResult 中取出流式响应的 http.Response
+func getStreamResp(result *LLMResult) *http.Response {
+	if v, ok := result.Data["__stream_resp__"].(*http.Response); ok {
+		return v
+	}
+	return nil
+}
+
+// toInterfaceSlice 将 []interface{} 或 []map[string]interface{} 统一转为 []interface{}
+// 解决 req["messages"] 经 injectRAGContext 后类型变为 []map[string]interface{} 的断言问题
+func toInterfaceSlice(v interface{}) []interface{} {
+	if s, ok := v.([]interface{}); ok {
+		return s
+	}
+	// reflect 兜底处理 []map[string]interface{} 等其他切片类型
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Slice {
+		result := make([]interface{}, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			result[i] = rv.Index(i).Interface()
+		}
+		return result
+	}
+	return nil
+}
+
+// ── 公共：SSE 输出 ──
+
+// writeSSEHeaders 设置 SSE 响应头
+func writeSSEHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(200)
+}
+
+// streamContentAsSSE 把完整文本内容以伪流式（逐字）输出为 SSE
+func streamContentAsSSE(w http.ResponseWriter, content string) {
+	for _, r := range content {
+		chunk := map[string]interface{}{
+			"choices": []interface{}{map[string]interface{}{
+				"delta": map[string]interface{}{"content": string(r)},
+				"index": 0,
+			}},
+		}
+		chunkJSON, _ := json.Marshal(chunk)
+		fmt.Fprintf(w, "data: %s\n\n", string(chunkJSON))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// outputContent 按客户端期望格式输出最终答案
+func outputContent(w http.ResponseWriter, content string, modelID string, convCtx *ConversationContext) {
+	if convCtx.IsStream {
+		writeSSEHeaders(w)
+		streamContentAsSSE(w, content)
+	} else {
+		response := map[string]interface{}{
+			"id":     "chatcmpl-agent",
+			"object": "chat.completion",
+			"model":  modelID,
+			"choices": []interface{}{map[string]interface{}{
+				"index": 0,
+				"message": map[string]interface{}{
+					"role":    "assistant",
+					"content": content,
+				},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]interface{}{
+				"prompt_tokens":     convCtx.TotalPrompt,
+				"completion_tokens": convCtx.TotalCompletion,
+				"total_tokens":      convCtx.TotalPrompt + convCtx.TotalCompletion,
+			},
+		}
+		respJSON, _ := json.Marshal(response)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(respJSON)
+	}
+}
+
+// ── 公共：响应提取辅助 ──
+
+// extractToolCalls 从 LLM 响应中提取 tool_calls
+func extractToolCalls(data map[string]interface{}) []interface{} {
+	choices, ok := data["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return nil
+	}
+	choice, ok := choices[0].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	msg, ok := choice["message"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	if toolCalls, ok := msg["tool_calls"].([]interface{}); ok {
+		return toolCalls
+	}
+	return nil
+}
+
+// extractContentFromLLM 从 LLM 响应中提取 content
+func extractContentFromLLM(data map[string]interface{}) string {
+	choices, ok := data["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return ""
+	}
+	choice, ok := choices[0].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	msg, ok := choice["message"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	content, _ := msg["content"].(string)
+	return content
+}
+
+// getToolCallName 从 tool_call 中提取函数名
+func getToolCallName(tci interface{}) string {
+	tc, ok := tci.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	fn, ok := tc["function"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	name, _ := fn["name"].(string)
+	return name
+}
+
+// getToolCallArgs 从 tool_call 中提取参数
+func getToolCallArgs(tci interface{}) map[string]interface{} {
+	tc, ok := tci.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	fn, ok := tc["function"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	args := make(map[string]interface{})
+	if argStr, ok := fn["arguments"].(string); ok {
+		json.Unmarshal([]byte(argStr), &args)
+	}
+	return args
+}
+
+// getToolCallID 从 tool_call 中提取 id
+func getToolCallID(tci interface{}) string {
+	tc, ok := tci.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	id, _ := tc["id"].(string)
+	return id
+}

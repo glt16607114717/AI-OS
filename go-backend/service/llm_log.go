@@ -3,8 +3,11 @@ package service
 import (
 	"ai-os-server/model"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -348,14 +351,80 @@ func EnsureChatTable() {
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
 }
 
-func AddChatMessage(role, content string) {
+func AddChatMessage(role, content string) int64 {
 	conn, err := GetDB()
+	if err != nil {
+		return 0
+	}
+	res, err := conn.Exec("INSERT INTO sys_chat_history (role, content) VALUES (?, ?)", role, content)
+	if err != nil {
+		return 0
+	}
+	// 清理超过 10000 条
+	conn.Exec("DELETE FROM sys_chat_history WHERE id IN (SELECT id FROM (SELECT id FROM sys_chat_history ORDER BY created_at ASC LIMIT 9999) t) AND (SELECT COUNT(*) FROM sys_chat_history) > 10000")
+	id, _ := res.LastInsertId()
+	return id
+}
+
+const CONVERSATION_LOG_DIR = "logs/conversations"
+
+// SaveConversationLog 将请求+响应保存为JSON文件（供下载），异步执行
+func SaveConversationLog(id int64, req map[string]interface{}, responseContent, modelID string,
+	vendorID, promptTokens, completionTokens, totalTokens, latencyMs int) {
+	go func() {
+		os.MkdirAll(CONVERSATION_LOG_DIR, 0755)
+
+		logData := map[string]interface{}{
+			"id":        id,
+			"timestamp": time.Now().Format("2006-01-02T15:04:05Z07:00"),
+			"request":   req,
+			"response": map[string]interface{}{
+				"content":   responseContent,
+				"model":     modelID,
+				"vendor_id": vendorID,
+				"tokens": map[string]interface{}{
+					"prompt":     promptTokens,
+					"completion": completionTokens,
+					"total":      totalTokens,
+				},
+				"latency_ms": latencyMs,
+			},
+		}
+
+		data, err := json.MarshalIndent(logData, "", "  ")
+		if err != nil {
+			return
+		}
+		filePath := filepath.Join(CONVERSATION_LOG_DIR, fmt.Sprintf("%d.json", id))
+		os.WriteFile(filePath, data, 0644)
+	}()
+}
+
+// GetConversationLogPath 返回对话日志文件路径，文件不存在返回空
+func GetConversationLogPath(id int) string {
+	filePath := filepath.Join(CONVERSATION_LOG_DIR, fmt.Sprintf("%d.json", id))
+	if _, err := os.Stat(filePath); err != nil {
+		return ""
+	}
+	return filePath
+}
+
+// CleanupOldConversationLogs 清理7天前的对话日志文件
+func CleanupOldConversationLogs() {
+	files, err := filepath.Glob(filepath.Join(CONVERSATION_LOG_DIR, "*.json"))
 	if err != nil {
 		return
 	}
-	conn.Exec("INSERT INTO sys_chat_history (role, content) VALUES (?, ?)", role, content)
-	// 清理超过 10000 条
-	conn.Exec("DELETE FROM sys_chat_history WHERE id IN (SELECT id FROM (SELECT id FROM sys_chat_history ORDER BY created_at ASC LIMIT 9999) t) AND (SELECT COUNT(*) FROM sys_chat_history) > 10000")
+	cutoff := time.Now().AddDate(0, 0, -7)
+	for _, f := range files {
+		info, err := os.Stat(f)
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			os.Remove(f)
+		}
+	}
 }
 
 func GetChatHistory(limit int) ([]map[string]interface{}, error) {

@@ -1,0 +1,27 @@
+refactor: 架构重构 - Agent系统 + 工程化清理
+
+## 核心重构：LLM 代理 → Agent 智能体
+- 解耦代理通道与 Agent 通道，按是否注入技能工具分流
+- Agent 通道：无限轮 tool_calls 循环 + 死循环检测兜底
+- 代理通道：纯 HTTP 透传，零额外延迟
+- 技能执行结果支持 trace 字段，SQL 查询过程透明可见
+- 表不存在自动返回可用表列表，LLM 自纠正
+
+## handler 层拆分（api.go 上帝文件 → 11 个职责单一文件）
+- response.go: 统一响应 + 类型转换
+- llm_config.go/strategy.go/user.go/stats.go/logs.go
+- chat_history.go/god_rules.go/quota.go/suggestion.go/system.go
+- llm_client.go: 原 common.go 改名（LLM 调用核心）
+- agent.go: Agent 多轮循环（finishAgent 提取公共结束逻辑）
+- proxy.go: 纯透传
+
+## service 层拆分
+- god_rules.go 拆出 quota.go（额度监控独立）
+- user.go 拆出 suggestion.go（AI 建议独立）
+- bridge.go: 删除自实现 itoa()，改用 strconv.Itoa
+
+## 工程清理
+- 删除 tool/go-backend/ 孤儿副本
+- aios_ssh.py 移入 .trae/skills/aios-server-ops/scripts/
+- 根目录 26 个业务文档迁移到 docs/rmp-docs/
+- 重写 README.md（修正技术栈、目录结构）

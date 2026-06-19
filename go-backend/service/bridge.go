@@ -2,6 +2,7 @@ package service
 
 import (
 	"ai-os-server/model"
+	"strconv"
 )
 
 // ── 类型别名（Handler 层引用） ──
@@ -30,9 +31,9 @@ func GetDefaultRoute() *model.RouteInfo {
 	keyIDStr := ""
 	switch v := keyID.(type) {
 	case int:
-		keyIDStr = itoa(v)
+		keyIDStr = strconv.Itoa(v)
 	case float64:
-		keyIDStr = itoa(int(v))
+		keyIDStr = strconv.Itoa(int(v))
 	case string:
 		keyIDStr = v
 	}
@@ -45,25 +46,4 @@ func GetDefaultRoute() *model.RouteInfo {
 		KeyID:      keyIDStr,
 		ModelID:    modelID,
 	}
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	s := ""
-	digits := "0123456789"
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	for n > 0 {
-		s = string(digits[n%10]) + s
-		n /= 10
-	}
-	if neg {
-		s = "-" + s
-	}
-	return s
 }

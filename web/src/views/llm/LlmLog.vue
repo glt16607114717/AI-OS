@@ -19,6 +19,7 @@ interface ConvDetail {
   errors: string[] | null
   user_message: string
   failover_count: number
+  chat_history_id?: number
 }
 
 interface LogEntry {
@@ -66,6 +67,7 @@ function parseDetail(raw: string): ConvDetail | undefined {
       errors: d.errors || null,
       user_message: d.user_message || '',
       failover_count: d.failover_count || 0,
+      chat_history_id: d.chat_history_id || 0,
     }
   } catch {
     return undefined
@@ -136,6 +138,26 @@ function toggleDetail(id: number) {
 
 function togglePause() {
   paused.value = !paused.value
+}
+
+async function downloadLog(chatHistoryId: number) {
+  try {
+    const res = await fetch(`${API_BASE}/api/chat/download/${chatHistoryId}`, { headers: authHeaders() })
+    if (!res.ok) {
+      const err = await res.json()
+      ElMessage.error(err.error || '下载失败')
+      return
+    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `conversation_${chatHistoryId}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    ElMessage.error('下载失败: ' + (e as Error).message)
+  }
 }
 
 function formatLatency(ms: number) {
@@ -241,6 +263,19 @@ onUnmounted(() => {
             >
               <polyline points="6 9 12 15 18 9"/>
             </svg>
+            <!-- 下载按钮 -->
+            <button
+              v-if="log.parsed?.chat_history_id"
+              class="download-btn"
+              @click.stop="downloadLog(log.parsed!.chat_history_id!)"
+              title="下载请求日志"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+            </button>
           </div>
 
           <!-- 展开详情 -->
@@ -450,6 +485,23 @@ onUnmounted(() => {
   transition: transform 0.2s;
 }
 .log-expand.rotated { transform: rotate(180deg); }
+
+.download-btn {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #94a3b8;
+  padding: 2px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  transition: color 0.15s, background 0.15s;
+}
+.download-btn:hover {
+  color: #3b82f6;
+  background: #eff6ff;
+}
 
 /* Detail panel */
 .log-detail {

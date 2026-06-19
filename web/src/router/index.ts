@@ -79,6 +79,11 @@ const router = createRouter({
           name: 'AccountSettings',
           component: () => import('../views/system/AccountSettings.vue'),
         },
+        {
+          path: 'skills/mysql_query',
+          name: 'MySQLQuerySettings',
+          component: () => import('../views/skills/MySQLQuerySettings.vue'),
+        },
       ],
     },
   ],

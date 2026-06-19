@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -16,6 +17,14 @@ import (
 )
 
 func main() {
+	// 清理过期对话日志，每小时一次
+	go func() {
+		service.CleanupOldConversationLogs()
+		ticker := time.NewTicker(1 * time.Hour)
+		for range ticker.C {
+			service.CleanupOldConversationLogs()
+		}
+	}()
 	// 配置
 	config.Init()
 	port := os.Getenv("AIOS_PORT")
@@ -25,6 +34,9 @@ func main() {
 
 	// 注入 API Key 查询函数（避免循环依赖）
 	middleware.APIKeyLookup = service.GetUserByAPIKey
+
+	// 确保技能表存在
+	service.EnsureBuiltinSkillTables()
 
 	// 启动额度监控
 	service.StartQuotaMonitor()
@@ -68,20 +80,26 @@ func main() {
 		// 聊天历史
 		r.Get("/api/chat/history", handler.GetChatHistory)
 		r.Post("/api/chat/clear", handler.ClearChatHistory)
+		r.Get("/api/chat/download/{id}", handler.DownloadConversationLog)
+
+		// 技能管理
+		r.Get("/api/skills", handler.GetBuiltinSkills)
+		r.Get("/api/skills/{code}/connections", handler.GetSkillConnections)
 
 		// AI 建议
 		r.Get("/api/ai-advisor/suggestions", handler.GetSuggestions)
 		r.Post("/api/ai-advisor/analyze", handler.RunAIAnalysis)
 		r.Post("/api/ai-advisor/process", handler.MarkSuggestionProcessed)
 
-		// 技能
-		r.Get("/api/skills", handler.GetSkillList)
 
 		// RAG 知识库
 		r.Get("/api/rag/status", handler.RagStatus)
 		r.Get("/api/rag/list", handler.RagList)
+		r.Get("/api/rag/files", handler.RagFiles)
+		r.Post("/api/rag/upload", handler.RagUpload)
 		r.Post("/api/rag/test-embed", handler.RagTestEmbed)
 		r.Post("/api/rag/search", handler.RagSearch)
+		r.Delete("/api/rag/delete", handler.RagDelete)
 
 		// 统计
 		r.Get("/api/stats/summary", handler.GetStatsSummary)
@@ -132,6 +150,13 @@ func main() {
 		r.Post("/api/users/toggle-status", handler.ToggleUserStatus)
 		r.Post("/api/users/toggle-admin", handler.ToggleUserAdmin)
 		r.Post("/api/users/delete", handler.DeleteUser)
+
+		// 技能管理（管理员）
+		r.Post("/api/skills/{code}/connection", handler.CreateSkillConnection)
+		r.Put("/api/skills/{code}/connection/{id}", handler.UpdateSkillConnection)
+		r.Delete("/api/skills/{code}/connection/{id}", handler.DeleteSkillConnection)
+		r.Get("/api/skills/{code}/permissions", handler.GetSkillPermissions)
+		r.Post("/api/skills/{code}/permission", handler.SetSkillPermission)
 	})
 
 	// 启动

@@ -137,31 +137,30 @@ func GetEmbeddings(texts []string) ([][]float64, error) {
 
 // ── 知识提炼（GLM-4-Flash 免费模型）──
 
-// summarizeForKnowledge 用 GLM-4-Flash 提炼对话核心知识
+// summarizeForKnowledge 用 GLM-4-Flash 提炼对话中的可复用知识
 func summarizeForKnowledge(content string) (string, error) {
 	if len(content) < 50 {
-		return content, nil // 太短不提炼
+		return content, nil
 	}
 
-	prompt := fmt.Sprintf(`你是一个知识提炼助手。请从以下对话中提取知识，要求：
+	prompt := fmt.Sprintf(`你是一个企业知识库提炼助手。请从以下对话中提取可复用的技术知识，要求：
 
-1. 用户提问：完整保留，一字不改
-2. AI 回复：精简提炼，去除以下内容：
-   - 过渡语（"让我看看"、"我来帮你"等）
-   - 寒暄和客套话
-   - 重复表述
-   - 纯操作过程描述（"正在编译..."、"部署完成"等状态信息）
-3. AI 回复中必须保留：
+1. 识别并保留以下内容：
    - 技术方案和架构决策
-   - 代码片段、配置、命令
+   - 代码片段、配置模板、命令行操作
    - Bug 根因和修复方法
    - 最佳实践和经验总结
-4. 输出格式：
-【用户提问】
-（原始提问内容）
+   - API 用法、数据库操作、部署流程
+   - 项目结构、模块职责说明
 
-【AI 回复要点】
-（提炼后的核心知识）
+2. 去除以下内容：
+   - 过渡语和寒暄（"让我看看"、"好的"等）
+   - 纯操作过程描述（"编译成功"、"部署完成"等）
+   - AI 的内部推理过程（"我需要先..."、"让我检查..."等）
+   - 元对话（讨论 AI 本身行为的对话）
+
+3. 输出格式：自由格式，直接输出提炼后的知识内容，不要加任何标记或前缀。
+如果对话中没有可复用的技术知识，输出"无价值"。
 
 对话内容：
 %s`, content)
@@ -226,6 +225,11 @@ func summarizeForKnowledge(content string) (string, error) {
 // ── 向量存储 ──
 
 func StoreEmbedding(userID int, content, source string) error {
+	// 质量门槛：过滤无价值的对话
+	if !isQualityContent(content) {
+		return nil
+	}
+
 	conn, err := GetDB()
 	if err != nil {
 		return err
@@ -234,7 +238,16 @@ func StoreEmbedding(userID int, content, source string) error {
 	// 先用 GLM-4-Flash 提炼核心知识（异步场景下可接受延迟）
 	summarized, err := summarizeForKnowledge(content)
 	if err == nil && summarized != "" {
+		// 如果提炼结果是"无价值"，直接丢弃
+		if strings.TrimSpace(summarized) == "无价值" {
+			return nil
+		}
 		content = summarized
+	}
+
+	// 提炼后再过一次质量检查
+	if !isQualityContent(content) {
+		return nil
 	}
 
 	// 计算内容 hash 去重（按用户隔离）
@@ -269,18 +282,124 @@ func StoreEmbedding(userID int, content, source string) error {
 	return nil
 }
 
-// StoreEmbeddings 批量存储
+// isQualityContent 判断内容是否有知识价值
+func isQualityContent(content string) bool {
+	content = strings.TrimSpace(content)
+	if len(content) < 100 {
+		return false
+	}
+
+	// 过滤元对话：AI 自说自话、操作过程描述、提炼格式标记
+	metaPatterns := []string{
+		"The user wants to", "The user is asking",
+		"Let me", "I'll", "I need to", "I should",
+		"First,", "Next,", "Then I'll",
+		"编译成功", "编译失败", "部署完成", "上传完成",
+		"正在编译", "正在部署", "正在上传",
+		"已删除", "已清空", "已重启",
+		"OK,", "好的，", "让我", "我来",
+		"【用户提问】", "【ai 回复要点】",
+	}
+	lower := strings.ToLower(content)
+	for _, p := range metaPatterns {
+		if strings.HasPrefix(lower, strings.ToLower(p)) {
+			return false
+		}
+	}
+
+	// 必须有实质内容：代码块、技术关键词、或结构化内容
+	hasCode := strings.Contains(content, "```") || strings.Contains(content, "`")
+	hasTechnical := strings.Contains(lower, "api") ||
+		strings.Contains(lower, "config") ||
+		strings.Contains(lower, "数据库") ||
+		strings.Contains(lower, "sql") ||
+		strings.Contains(lower, "架构") ||
+		strings.Contains(lower, "方案") ||
+		strings.Contains(lower, "bug") ||
+		strings.Contains(lower, "修复") ||
+		strings.Contains(lower, "优化") ||
+		strings.Contains(lower, "部署") ||
+		strings.Contains(lower, "docker") ||
+		strings.Contains(lower, "nginx") ||
+		strings.Contains(lower, "linux") ||
+		strings.Contains(lower, "function") ||
+		strings.Contains(lower, "class") ||
+		strings.Contains(lower, "import") ||
+		strings.Contains(lower, "package") ||
+		strings.Contains(lower, "模块") ||
+		strings.Contains(lower, "接口") ||
+		strings.Contains(lower, "路由") ||
+		strings.Contains(lower, "中间件")
+
+	if !hasCode && !hasTechnical {
+		return false
+	}
+
+	return true
+}
+
+// StoreEmbeddings 批量存储（用于对话知识，会走提炼）
 func StoreEmbeddings(userID int, contents []string, source string) error {
 	if len(contents) == 0 {
 		return nil
 	}
 
-	// 过滤已存在的
 	conn, err := GetDB()
 	if err != nil {
 		return err
 	}
 
+	var newContents []string
+	for _, c := range contents {
+		hash := contentHash(c)
+		var exists int
+		if err := conn.QueryRow("SELECT 1 FROM sys_embedding WHERE content_hash = ? AND user_id = ?", hash, userID).Scan(&exists); err != nil && err != sql.ErrNoRows {
+			log.Printf("[embedding] 查询去重失败: %v", err)
+		}
+		if exists == 0 {
+			newContents = append(newContents, c)
+		}
+	}
+
+	if len(newContents) == 0 {
+		return nil
+	}
+
+	// 批量获取向量
+	vectors, err := GetEmbeddings(newContents)
+	if err != nil {
+		return err
+	}
+
+	// 批量插入
+	for i, content := range newContents {
+		vectorJSON, _ := json.Marshal(vectors[i])
+		hash := contentHash(content)
+		if _, err := conn.Exec(
+			"INSERT INTO sys_embedding (user_id, content, content_hash, vector, source) VALUES (?, ?, ?, ?, ?)",
+			userID, content, hash, string(vectorJSON), source,
+		); err != nil {
+			log.Printf("[embedding] 插入失败: %v", err)
+		}
+	}
+	return nil
+}
+
+// StoreEmbeddingsRaw 批量存储（上传文件专用，不做提炼，原样存储）
+func StoreEmbeddingsRaw(userID int, contents []string, source string) error {
+	if len(contents) == 0 {
+		return nil
+	}
+
+	conn, err := GetDB()
+	if err != nil {
+		return err
+	}
+
+	// 覆盖上传：删除旧版本分块
+	conn.Exec("DELETE FROM sys_embedding WHERE user_id = ? AND source = ?", userID, source)
+
+	// 内容级去重
 	var newContents []string
 	for _, c := range contents {
 		hash := contentHash(c)
@@ -491,3 +610,61 @@ var (
 	_ = sql.ErrNoRows
 	_ = sync.Mutex{}
 )
+
+// DeleteEmbedding 删除单条知识
+func DeleteEmbedding(id int64, userID int) error {
+	conn, err := GetDB()
+	if err != nil {
+		return err
+	}
+	_, err = conn.Exec("DELETE FROM sys_embedding WHERE id = ? AND user_id = ?", id, userID)
+	return err
+}
+
+// DeleteEmbeddingsBySource 按来源批量删除
+func DeleteEmbeddingsBySource(userID int, source string) (int64, error) {
+	conn, err := GetDB()
+	if err != nil {
+		return 0, err
+	}
+	result, err := conn.Exec("DELETE FROM sys_embedding WHERE user_id = ? AND source = ?", userID, source)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := result.RowsAffected()
+	return n, nil
+}
+
+// GetUploadedFiles 获取用户上传的文件列表（按 source 聚合）
+func GetUploadedFiles(userID int) ([]map[string]interface{}, error) {
+	conn, err := GetDB()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := conn.Query(
+		`SELECT source, COUNT(*) as chunks, MAX(created_at) as uploaded_at
+		 FROM sys_embedding WHERE user_id = ? AND source LIKE 'upload:%'
+		 GROUP BY source ORDER BY uploaded_at DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []map[string]interface{}
+	for rows.Next() {
+		var source string
+		var chunks int
+		var uploadedAt string
+		if err := rows.Scan(&source, &chunks, &uploadedAt); err != nil {
+			continue
+		}
+		// source 格式: "upload:filename.pdf"
+		filename := strings.TrimPrefix(source, "upload:")
+		files = append(files, map[string]interface{}{
+			"filename":    filename,
+			"chunks":      chunks,
+			"uploaded_at": uploadedAt,
+		})
+	}
+	return files, nil
+}

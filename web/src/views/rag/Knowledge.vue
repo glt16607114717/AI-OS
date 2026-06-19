@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { API_BASE } from '../../api'
 import { formatTimeShort as formatTime } from '../../utils/time'
 import { marked } from 'marked'
@@ -21,6 +21,12 @@ interface SearchResult {
   similarity: number
 }
 
+interface UploadedFile {
+  filename: string
+  chunks: number
+  uploaded_at: string
+}
+
 const loading = ref(false)
 const documents = ref<DocItem[]>([])
 const total = ref(0)
@@ -29,6 +35,14 @@ const searchQuery = ref('')
 const searchResults = ref<SearchResult[]>([])
 const searching = ref(false)
 const searchMode = ref(false)
+
+// 文件上传
+const uploading = ref(false)
+const uploadedFiles = ref<UploadedFile[]>([])
+const uploadRef = ref<HTMLInputElement>()
+
+// Tab
+const activeTab = ref<'docs' | 'files'>('docs')
 
 function getToken(): string {
   return localStorage.getItem('aios_token') || ''
@@ -58,10 +72,23 @@ async function loadDocs() {
       total.value = data.data?.total || 0
     }
   } catch (e: any) {
-    console.error('Failed to load docs:', e)
     ElMessage.error('加载知识库失败: ' + e.message)
   }
   loading.value = false
+}
+
+async function loadFiles() {
+  try {
+    const res = await fetch(`${API_BASE}/api/rag/files`, {
+      headers: { 'Authorization': `Bearer ${getToken()}` }
+    })
+    const data = await res.json()
+    if (data.ok) {
+      uploadedFiles.value = data.data?.files || []
+    }
+  } catch (e: any) {
+    console.error('加载文件列表失败:', e)
+  }
 }
 
 async function doSearch() {
@@ -89,7 +116,6 @@ async function doSearch() {
       }))
     }
   } catch (e: any) {
-    console.error('Search failed:', e)
     ElMessage.error('搜索失败: ' + e.message)
   }
   searching.value = false
@@ -101,10 +127,92 @@ function clearSearch() {
   searchResults.value = []
 }
 
-// formatTime 已从 '../../utils/time' 全局引入
+// 文件上传
+function triggerUpload() {
+  uploadRef.value?.click()
+}
+
+async function handleUpload(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+
+  uploading.value = true
+  try {
+    const formData = new FormData()
+    formData.append('file', file)
+
+    const res = await fetch(`${API_BASE}/api/rag/upload`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${getToken()}` },
+      body: formData
+    })
+    const data = await res.json()
+    if (data.ok) {
+      ElMessage.success(`上传成功！${data.data?.filename} → ${data.data?.chunks} 个分块`)
+      loadDocs()
+      loadFiles()
+    } else {
+      ElMessage.error(data.error || '上传失败')
+    }
+  } catch (e: any) {
+    ElMessage.error('上传失败: ' + e.message)
+  }
+  uploading.value = false
+  input.value = '' // 重置以允许重复上传同一文件
+}
+
+// 删除
+async function deleteFile(filename: string) {
+  try {
+    await ElMessageBox.confirm(`确定要删除 "${filename}" 的所有知识块吗？`, '确认删除', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+  } catch {
+    return
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/rag/delete?source=upload:${encodeURIComponent(filename)}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${getToken()}` }
+    })
+    const data = await res.json()
+    if (data.ok) {
+      ElMessage.success(`已删除 ${data.data?.deleted} 条记录`)
+      loadDocs()
+      loadFiles()
+    } else {
+      ElMessage.error(data.error || '删除失败')
+    }
+  } catch (e: any) {
+    ElMessage.error('删除失败: ' + e.message)
+  }
+}
+
+async function deleteDoc(id: number) {
+  try {
+    const res = await fetch(`${API_BASE}/api/rag/delete?id=${id}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${getToken()}` }
+    })
+    const data = await res.json()
+    if (data.ok) {
+      ElMessage.success('已删除')
+      loadDocs()
+    } else {
+      ElMessage.error(data.error || '删除失败')
+    }
+  } catch (e: any) {
+    ElMessage.error('删除失败: ' + e.message)
+  }
+}
 
 function sourceLabel(source: string | undefined): string {
   if (!source) return '未知'
+  if (source.startsWith('upload:')) return '📄 ' + source.slice(7)
   const map: Record<string, string> = { workspace: '工作台', proxy: '代理', manual: '手动' }
   return map[source] || source
 }
@@ -114,14 +222,17 @@ function renderMarkdown(text: string): string {
   return marked.parse(text) as string
 }
 
-onMounted(loadDocs)
+onMounted(() => {
+  loadDocs()
+  loadFiles()
+})
 </script>
 
 <template>
   <div class="knowledge-page">
     <div class="page-header">
       <h2>知识库</h2>
-      <p class="page-desc">向量检索增强生成 — 知识库浏览与语义搜索</p>
+      <p class="page-desc">向量检索增强生成 — 上传文档或从对话中自动积累知识</p>
     </div>
 
     <!-- Search Bar -->
@@ -141,7 +252,7 @@ onMounted(loadDocs)
       <button class="btn btn-primary" @click="doSearch" :disabled="searching">
         {{ searching ? '搜索中...' : '搜索' }}
       </button>
-      <button class="btn" @click="loadDocs" :disabled="loading">
+      <button class="btn" @click="loadDocs; loadFiles()" :disabled="loading">
         {{ loading ? '加载中...' : '刷新' }}
       </button>
     </div>
@@ -150,12 +261,22 @@ onMounted(loadDocs)
     <div class="stats-row">
       <div class="stat-item">
         <span class="stat-num">{{ total }}</span>
-        <span class="stat-label">总文档数</span>
+        <span class="stat-label">总知识块</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-num">{{ uploadedFiles.length }}</span>
+        <span class="stat-label">已上传文件</span>
       </div>
       <div class="stat-item" v-if="searchMode">
         <span class="stat-num">{{ searchResults.length }}</span>
         <span class="stat-label">搜索结果</span>
       </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs" v-if="!searchMode">
+      <button class="tab-btn" :class="{ active: activeTab === 'docs' }" @click="activeTab = 'docs'">知识块</button>
+      <button class="tab-btn" :class="{ active: activeTab === 'files' }" @click="activeTab = 'files'">上传文件</button>
     </div>
 
     <!-- Search Results -->
@@ -176,13 +297,50 @@ onMounted(loadDocs)
       </div>
     </template>
 
-    <!-- All Documents -->
+    <!-- Upload Files Tab -->
+    <template v-else-if="activeTab === 'files'">
+      <div class="upload-area" @click="triggerUpload" :class="{ uploading }">
+        <input ref="uploadRef" type="file" style="display:none"
+          accept=".txt,.md,.markdown,.go,.py,.js,.ts,.vue,.java,.c,.cpp,.h,.rs,.sql,.yaml,.yml,.json,.xml,.html,.css,.sh,.bat,.ini,.cfg,.toml,.pdf,.docx,.xlsx"
+          @change="handleUpload" />
+        <div class="upload-icon">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="17 8 12 3 7 8" />
+            <line x1="12" y1="3" x2="12" y2="15" />
+          </svg>
+        </div>
+        <p class="upload-text">{{ uploading ? '上传中...' : '点击上传文件或拖拽到此处' }}</p>
+        <p class="upload-hint">支持 TXT / MD / DOCX / XLSX / 代码文件，最大 50MB</p>
+      </div>
+
+      <div v-if="uploadedFiles.length" class="file-list">
+        <div v-for="f in uploadedFiles" :key="f.filename" class="file-item">
+          <div class="file-info">
+            <span class="file-name">{{ f.filename }}</span>
+            <span class="file-meta">{{ f.chunks }} 个分块 · {{ formatTime(f.uploaded_at) }}</span>
+          </div>
+          <button class="btn-delete" @click="deleteFile(f.filename)" title="删除此文件的所有知识块">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div v-else-if="!uploading" class="empty-state">
+        <p>还没有上传文件</p>
+        <p class="hint">上传文档后会自动分块并向量化入库</p>
+      </div>
+    </template>
+
+    <!-- All Documents Tab -->
     <template v-else>
       <div v-if="documents.length" class="doc-list">
         <div v-for="doc in pagedDocs" :key="doc.id" class="doc-card">
           <div class="doc-meta">
             <span class="tag source">{{ sourceLabel(doc.metadata?.source) }}</span>
             <span class="tag time">{{ formatTime(doc.metadata?.created_at) }}</span>
+            <button class="btn-delete-sm" @click="deleteDoc(doc.id)" title="删除">✕</button>
           </div>
           <div class="doc-text" v-html="renderMarkdown(doc.text)"></div>
         </div>
@@ -199,7 +357,7 @@ onMounted(loadDocs)
       </div>
       <div v-else-if="!loading" class="empty-state">
         <p>知识库为空</p>
-        <p class="hint">在工作台或代理中对话后，AI 的回答会自动存入知识库</p>
+        <p class="hint">上传文档或在工作台/代理中对话后，AI 的回答会自动存入知识库</p>
       </div>
     </template>
   </div>
@@ -345,6 +503,146 @@ onMounted(loadDocs)
   color: #94a3b8;
 }
 
+/* Tabs */
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid #e2e8f0;
+  padding-bottom: 0;
+}
+
+.tab-btn {
+  padding: 8px 16px;
+  border: none;
+  background: none;
+  font-size: 13px;
+  font-weight: 500;
+  color: #64748b;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: all 0.2s;
+}
+
+.tab-btn:hover {
+  color: #475569;
+}
+
+.tab-btn.active {
+  color: #6366f1;
+  border-bottom-color: #6366f1;
+}
+
+/* Upload Area */
+.upload-area {
+  border: 2px dashed #cbd5e1;
+  border-radius: 12px;
+  padding: 40px 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: #fafbfc;
+}
+
+.upload-area:hover {
+  border-color: #6366f1;
+  background: #f5f3ff;
+}
+
+.upload-area.uploading {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.upload-icon {
+  color: #94a3b8;
+  margin-bottom: 12px;
+}
+
+.upload-text {
+  font-size: 14px;
+  color: #475569;
+  margin: 0 0 4px;
+}
+
+.upload-hint {
+  font-size: 12px;
+  color: #94a3b8;
+  margin: 0;
+}
+
+/* File List */
+.file-list {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.file-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.file-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: #1e293b;
+}
+
+.file-meta {
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.btn-delete {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: none;
+  color: #94a3b8;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: all 0.15s;
+}
+
+.btn-delete:hover {
+  background: #fef2f2;
+  color: #ef4444;
+}
+
+.btn-delete-sm {
+  border: none;
+  background: none;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-left: auto;
+  transition: all 0.15s;
+}
+
+.btn-delete-sm:hover {
+  background: #fef2f2;
+  color: #ef4444;
+}
+
 /* Doc List */
 .doc-list {
   display: flex;
@@ -373,6 +671,7 @@ onMounted(loadDocs)
   gap: 6px;
   margin-bottom: 8px;
   flex-wrap: wrap;
+  align-items: center;
 }
 
 .tag {
