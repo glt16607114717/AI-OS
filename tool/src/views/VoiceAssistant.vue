@@ -42,6 +42,11 @@ const recordingIndex = ref(-1)
 const recognizeLogs = ref<any[]>([])
 const showLogPanel = ref(false)
 
+// 录制详情查看
+const showActionsDialog = ref(false)
+const actionsDialogTitle = ref('')
+const actionsDetail = ref<any[]>([])
+
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let recordingPollTimer: ReturnType<typeof setInterval> | null = null
 
@@ -389,6 +394,38 @@ function getCommandModeLabel(cmd: VoiceCommand): string {
   return '未配置'
 }
 
+/** 把单个 action 转成人类可读描述 */
+function actionToText(a: any): string {
+  const ms = a.ms ?? 0
+  const delayText = ms > 0 ? ` (等待${Math.round(ms)}ms)` : ''
+  switch (a.type) {
+    case 'click':
+      return `点击 (${a.x}, ${a.y}) [${a.button || 'left'}]${delayText}`
+    case 'key_down':
+      return `按下 ${a.key_name || 'VK' + a.vk}${delayText}`
+    case 'key_up':
+      return `抬起 ${a.key_name || 'VK' + a.vk}${delayText}`
+    case 'mouse_move':
+      return `移动到 (${a.x}, ${a.y})${delayText}`
+    case 'scroll':
+      return `滚动 delta=${a.delta}${delayText}`
+    default:
+      return `${a.type}${delayText}`
+  }
+}
+
+/** 打开录制详情弹窗 */
+function viewActions(cmd: VoiceCommand, index: number) {
+  if (!cmd.actions || cmd.actions.length === 0) return
+  actionsDialogTitle.value = `指令"${cmd.phrase || '未命名'}"的录制详情（${cmd.actions.length}步）`
+  actionsDetail.value = cmd.actions.map((a: any, i: number) => ({
+    index: i + 1,
+    text: actionToText(a),
+    type: a.type,
+  }))
+  showActionsDialog.value = true
+}
+
 function isCommandActive(i: number): boolean {
   return (
     (calibrating.value && calibratingIndex.value === i) ||
@@ -564,7 +601,13 @@ onUnmounted(() => {
             @blur="updateCommand(i, { phrase: cmd.phrase })"
           />
           <div class="mode-display">
-            <el-tag v-if="getCommandMode(cmd) === 'recording'" type="success" size="small">
+            <el-tag
+              v-if="getCommandMode(cmd) === 'recording'"
+              type="success"
+              size="small"
+              class="actions-tag"
+              @click="viewActions(cmd, i)"
+            >
               {{ getCommandModeLabel(cmd) }}
             </el-tag>
             <el-tag v-else-if="getCommandMode(cmd) === 'calibration'" size="small">
@@ -663,6 +706,29 @@ onUnmounted(() => {
         <el-button size="small" @click="loadRecognizeLogs">刷新</el-button>
         <el-button size="small" type="danger" plain @click="clearRecognizeLogs">清空</el-button>
         <el-button size="small" type="primary" @click="showLogPanel = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 录制详情弹窗 -->
+    <el-dialog
+      v-model="showActionsDialog"
+      :title="actionsDialogTitle"
+      width="520px"
+    >
+      <div v-if="actionsDetail.length === 0" class="empty-hint">无动作数据</div>
+      <div v-else class="actions-list">
+        <div
+          v-for="item in actionsDetail"
+          :key="item.index"
+          class="action-item"
+          :class="'action-' + item.type"
+        >
+          <span class="action-step">#{{ item.index }}</span>
+          <span class="action-text">{{ item.text }}</span>
+        </div>
+      </div>
+      <template #footer>
+        <el-button size="small" type="primary" @click="showActionsDialog = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -1049,4 +1115,41 @@ onUnmounted(() => {
   margin-bottom: 16px;
   word-break: break-all;
 }
+
+/* 录制详情弹窗 */
+.actions-tag {
+  cursor: pointer;
+}
+
+.actions-list {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.action-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #f0f0f0;
+  font-size: 13px;
+}
+
+.action-item:hover {
+  background: #f5f7fa;
+}
+
+.action-step {
+  color: #909399;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  min-width: 36px;
+}
+
+.action-text {
+  color: #303133;
+}
+
+.action-click .action-step { color: #67c23a; }
+.action-key_down .action-step,
+.action-key_up .action-step { color: #e6a23c; }
 </style>

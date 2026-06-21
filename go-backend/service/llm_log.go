@@ -346,18 +346,20 @@ func EnsureChatTable() {
 	conn.Exec(`CREATE TABLE IF NOT EXISTS sys_chat_history (
 		id INT AUTO_INCREMENT PRIMARY KEY,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		user_id INT NOT NULL DEFAULT 0,
 		role VARCHAR(20) NOT NULL,
 		content TEXT NOT NULL,
-		INDEX idx_created (created_at)
+		INDEX idx_created (created_at),
+		INDEX idx_user_date (user_id, created_at)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
 }
 
-func AddChatMessage(role, content string) int64 {
+func AddChatMessage(userID int, role, content string) int64 {
 	conn, err := GetDB()
 	if err != nil {
 		return 0
 	}
-	res, err := conn.Exec("INSERT INTO sys_chat_history (role, content) VALUES (?, ?)", role, content)
+	res, err := conn.Exec("INSERT INTO sys_chat_history (user_id, role, content) VALUES (?, ?, ?)", userID, role, content)
 	if err != nil {
 		return 0
 	}

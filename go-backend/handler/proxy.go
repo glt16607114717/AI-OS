@@ -134,7 +134,7 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 
 		if content != "" {
 			convCtx.AssistantContent = content
-			chatID := service.AddChatMessage("assistant", content)
+			chatID := service.AddChatMessage(userID, "assistant", content)
 			convCtx.ChatHistoryID = chatID
 			go service.SaveConversationLog(chatID, req, content, route.ModelID, route.VendorID, promptTokens, completionTokens, totalTokens, latency)
 		}
@@ -150,7 +150,7 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 	content := extractContentFromLLM(result.Data)
 	if content != "" {
 		convCtx.AssistantContent = content
-		chatID := service.AddChatMessage("assistant", content)
+		chatID := service.AddChatMessage(userID, "assistant", content)
 		convCtx.ChatHistoryID = chatID
 		latency := int(time.Since(startTime).Milliseconds())
 		go service.SaveConversationLog(chatID, req, content, route.ModelID, route.VendorID,

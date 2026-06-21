@@ -85,7 +85,7 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 提取用户消息
 	userMsgRaw, userMsgSummary := extractLastUserMessage(req)
 	if cleanedMsg := extractUserQuery(userMsgRaw); cleanedMsg != "" {
-		service.AddChatMessage("user", cleanedMsg)
+		service.AddChatMessage(userID, "user", cleanedMsg)
 	}
 
 	// 注入上帝指令 + RAG
@@ -144,7 +144,7 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 	// 提取用户消息
 	userMsgRaw, userMsgSummary := extractLastUserMessage(req)
 	if cleanedMsg := extractUserQuery(userMsgRaw); cleanedMsg != "" {
-		service.AddChatMessage("user", cleanedMsg)
+		service.AddChatMessage(userID, "user", cleanedMsg)
 	}
 
 	// 注入上帝指令 + RAG

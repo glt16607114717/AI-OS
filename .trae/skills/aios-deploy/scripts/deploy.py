@@ -8,7 +8,8 @@ import sys
 SSH = ['ssh', '-p', '443', '-o', 'StrictHostKeyChecking=no', 'root@8.163.127.182']
 SCP = ['scp', '-P', '443', '-o', 'StrictHostKeyChecking=no']
 DEPLOY_PORT = '18731'
-REMOTE_PATH = '/opt/ai-os/ai-os-server'
+REMOTE_PATH = '/opt/ai-os/aios-server'
+SERVICE_NAME = 'aios-server'  # systemd 服务名
 
 
 def run(args, timeout=120):
@@ -22,6 +23,31 @@ def ssh(cmd, timeout=60):
     return run(SSH + [cmd], timeout)
 
 
+def stop_service():
+    """停止服务并强制释放端口"""
+    print("\n2. 停止服务...")
+    ssh(f'systemctl stop {SERVICE_NAME}')
+    ssh('sleep 1')
+    # 强制杀掉占用端口的残留进程
+    rc, out, _ = ssh(f"fuser -k {DEPLOY_PORT}/tcp 2>/dev/null; sleep 1; ss -tlnp | grep {DEPLOY_PORT} || echo PORT_FREE")
+    if 'PORT_FREE' in out:
+        print("   端口已释放")
+    else:
+        print(f"   警告: 端口仍被占用: {out}")
+
+
+def start_service():
+    """启动服务并验证"""
+    print("4. 启动服务...")
+    rc, out, err = ssh(
+        f'chmod +x {REMOTE_PATH} && systemctl start {SERVICE_NAME} && sleep 3 && '
+        f'systemctl is-active {SERVICE_NAME} && ss -tlnp | grep {DEPLOY_PORT}',
+        timeout=30
+    )
+    print(out)
+    return out
+
+
 def main():
     action = sys.argv[1].lower() if len(sys.argv) > 1 else 'deploy'
 
@@ -31,7 +57,7 @@ def main():
     binary = 'ai-os-server'
 
     print(f"=== AI-OS Go 后端部署 ===")
-    print(f"操作: {action}  |  服务器: root@8.163.127.182:443")
+    print(f"操作: {action}  |  服务器: root@8.163.127.182:443  |  服务: {SERVICE_NAME}")
 
     if action in ('build', 'deploy'):
         os.chdir(go_dir)
@@ -50,23 +76,16 @@ def main():
     if action == 'deploy':
         local_file = os.path.join(go_dir, binary)
 
-        print("\n2. 停止服务...")
-        ssh('systemctl stop ai-os && sleep 2 && echo STOPPED')
+        stop_service()
 
-        print("3. 上传...")
+        print("\n3. 上传...")
         rc, out, err = run(SCP + [local_file, f'root@8.163.127.182:{REMOTE_PATH}'], timeout=60)
         if rc != 0:
             print(f"上传失败: {err}")
             return
         print(f"上传完成 ({os.path.getsize(local_file) / 1024 / 1024:.1f} MB)")
 
-        print("4. 启动服务...")
-        rc, out, err = ssh(
-            f'chmod +x {REMOTE_PATH} && systemctl start ai-os && sleep 3 && '
-            f'systemctl is-active ai-os && ss -tlnp | grep {DEPLOY_PORT}',
-            timeout=30
-        )
-        print(out)
+        out = start_service()
 
         if 'active' in out:
             rc2, health, _ = ssh(f'curl -s -m 3 http://127.0.0.1:{DEPLOY_PORT}/api/health')
@@ -74,22 +93,22 @@ def main():
             print("\n=== 部署完成 ===")
         else:
             print("\n=== 部署失败，查看日志 ===")
-            _, log, _ = ssh('journalctl -u ai-os --no-pager -n 20')
+            _, log, _ = ssh(f'journalctl -u {SERVICE_NAME} --no-pager -n 20')
             print(log)
 
         os.remove(local_file)
 
     elif action == 'restart':
-        print("\n1. 重启服务...")
-        rc, out, err = ssh(
-            f'systemctl stop ai-os && sleep 2 && '
-            f'systemctl start ai-os && sleep 3 && '
-            f'systemctl is-active ai-os && '
-            f'curl -s -m 3 http://127.0.0.1:{DEPLOY_PORT}/api/health',
-            timeout=30
-        )
-        print(out)
-        print("\n=== 重启完成 ===")
+        stop_service()
+        out = start_service()
+        if 'active' in out:
+            rc2, health, _ = ssh(f'curl -s -m 3 http://127.0.0.1:{DEPLOY_PORT}/api/health')
+            print(f"健康检查: {health}")
+            print("\n=== 重启完成 ===")
+        else:
+            print("\n=== 重启失败，查看日志 ===")
+            _, log, _ = ssh(f'journalctl -u {SERVICE_NAME} --no-pager -n 20')
+            print(log)
 
 
 if __name__ == '__main__':

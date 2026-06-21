@@ -42,18 +42,62 @@ type DistillSuggestion struct {
 	Priority   string `json:"priority"`
 }
 
-// RunDailyDistill 定时任务：蒸馏昨日对话
+// RunDailyDistill 定时任务：蒸馏昨日对话（遍历所有活跃用户）
 func RunDailyDistill() error {
-	userID, err := getDefaultDistillUserID()
+	conn, err := GetDB()
 	if err != nil {
-		return err
+		return fmt.Errorf("连接数据库失败: %v", err)
 	}
+
+	// 查询所有活跃用户
+	rows, err := conn.Query("SELECT id, username FROM sys_user WHERE status = 1 ORDER BY id")
+	if err != nil {
+		return fmt.Errorf("查询用户列表失败: %v", err)
+	}
+	defer rows.Close()
+
+	type userInfo struct {
+		id       int
+		username string
+	}
+	var users []userInfo
+	for rows.Next() {
+		var u userInfo
+		if err := rows.Scan(&u.id, &u.username); err != nil {
+			continue
+		}
+		users = append(users, u)
+	}
+	rows.Close()
+
+	if len(users) == 0 {
+		users = []userInfo{{id: 1, username: "default"}}
+	}
+
 	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-	return RunDistillForDate(userID, yesterday)
+	log.Printf("[cron] 共 %d 个用户需要蒸馏，日期=%s", len(users), yesterday)
+
+	var lastErr error
+	successCount := 0
+	for _, u := range users {
+		log.Printf("[cron] 开始蒸馏用户 %s (id=%d)", u.username, u.id)
+		if err := RunDistillForDate(u.id, u.username, yesterday); err != nil {
+			log.Printf("[cron] 用户 %s (id=%d) 蒸馏失败: %v", u.username, u.id, err)
+			lastErr = err
+			continue
+		}
+		successCount++
+	}
+
+	log.Printf("[cron] 蒸馏结束：成功 %d/%d", successCount, len(users))
+	if successCount == 0 && lastErr != nil {
+		return lastErr
+	}
+	return nil
 }
 
 // RunDistillForDate 指定日期蒸馏：查询对话 → 提炼知识 + 生成建议
-func RunDistillForDate(userID int, date string) error {
+func RunDistillForDate(userID int, username, date string) error {
 	if userID <= 0 {
 		var err error
 		userID, err = getDefaultDistillUserID()
@@ -61,8 +105,11 @@ func RunDistillForDate(userID int, date string) error {
 			return err
 		}
 	}
+	if username == "" {
+		username = getDistillUsername()
+	}
 
-	convContent, count, err := collectConversationForDate(date)
+	convContent, count, err := collectConversationForDate(userID, date)
 	if err != nil {
 		return fmt.Errorf("查询对话失败: %v", err)
 	}
@@ -156,7 +203,7 @@ func RunDistillForDate(userID int, date string) error {
 		log.Printf("[distill] 保存日报: user=%d, date=%s, content_len=%d", userID, date, len(summary))
 		_, err = conn.Exec(`INSERT INTO sys_work_diary (user_id, username, report_date, title, content) VALUES (?, ?, ?, ?, ?)
 			ON DUPLICATE KEY UPDATE title=VALUES(title), content=VALUES(content), updated_at=NOW()`,
-			userID, getDistillUsername(), date, title, summary)
+			userID, username, date, title, summary)
 		if err != nil {
 			log.Printf("[distill] 日报保存失败: %v", err)
 		} else {
@@ -354,7 +401,7 @@ func getDefaultDistillUserID() (int, error) {
 		return 0, fmt.Errorf("连接数据库失败: %v", err)
 	}
 	var userID int
-	conn.QueryRow("SELECT COALESCE(MIN(id), 1) FROM sys_user WHERE status = 'active' LIMIT 1").Scan(&userID)
+	conn.QueryRow("SELECT COALESCE(MIN(id), 1) FROM sys_user WHERE status = 1 LIMIT 1").Scan(&userID)
 	if userID == 0 {
 		userID = 1
 	}
@@ -364,12 +411,12 @@ func getDefaultDistillUserID() (int, error) {
 func getDistillUsername() string {
 	conn, _ := GetDB()
 	var username string
-	conn.QueryRow("SELECT COALESCE(MAX(username), '') FROM sys_user WHERE status = 'active' LIMIT 1").Scan(&username)
+	conn.QueryRow("SELECT COALESCE(MAX(username), '') FROM sys_user WHERE status = 1 LIMIT 1").Scan(&username)
 	return username
 }
 
-// collectConversationForDate 从 chat_history 和对话日志文件收集指定日期的对话
-func collectConversationForDate(date string) (string, int, error) {
+// collectConversationForDate 从 chat_history 收集指定用户指定日期的对话
+func collectConversationForDate(userID int, date string) (string, int, error) {
 	conn, err := GetDB()
 	if err != nil {
 		return "", 0, err
@@ -380,8 +427,8 @@ func collectConversationForDate(date string) (string, int, error) {
 
 	rows, err := conn.Query(`
 		SELECT role, content, created_at FROM sys_chat_history
-		WHERE DATE(created_at) = ?
-		ORDER BY created_at ASC`, date)
+		WHERE user_id = ? AND DATE(created_at) = ?
+		ORDER BY created_at ASC`, userID, date)
 	if err != nil {
 		return "", 0, err
 	}
@@ -507,9 +554,10 @@ func callDistillLLM(userID int, date, convContent string) (*DistillResult, error
 	prompt := buildDistillPrompt(date, convContent)
 
 	body := map[string]interface{}{
-		"model":      "glm-5.2",
-		"messages":   []map[string]string{{"role": "user", "content": prompt}},
-		"temperature": 0.3,
+		"model":          "glm-5.2",
+		"messages":       []map[string]string{{"role": "user", "content": prompt}},
+		"temperature":    0.3,
+		"response_format": map[string]string{"type": "json_object"},
 	}
 	bodyJSON, _ := json.Marshal(body)
 
@@ -552,34 +600,29 @@ func callDistillLLM(userID int, date, convContent string) (*DistillResult, error
 	result := &DistillResult{}
 	cleanContent := strings.TrimSpace(content)
 
-	// 去除 markdown 代码块标记
-	if strings.HasPrefix(cleanContent, "```json") {
-		cleanContent = strings.TrimPrefix(cleanContent, "```json")
-	} else if strings.HasPrefix(cleanContent, "```") {
-		cleanContent = strings.TrimPrefix(cleanContent, "```")
+	// 去除 markdown 代码块标记（含语言标识）
+	if idx := strings.Index(cleanContent, "```"); idx >= 0 {
+		// 找到 ``` 之后第一个换行，去掉整行
+		rest := cleanContent[idx+3:]
+		if nl := strings.Index(rest, "\n"); nl >= 0 {
+			rest = rest[nl+1:]
+		}
+		// 去掉尾部 ```
+		if last := strings.LastIndex(rest, "```"); last >= 0 {
+			rest = rest[:last]
+		}
+		cleanContent = strings.TrimSpace(rest)
 	}
-	// 去掉尾部代码块标记（可能有多个）
-	for strings.HasSuffix(cleanContent, "```") {
-		cleanContent = strings.TrimSuffix(cleanContent, "```")
-		cleanContent = strings.TrimSpace(cleanContent)
+
+	// 用花括号计数找到 JSON 边界（感知字符串，避免字符串内的花括号干扰）
+	jsonBlock := extractJSONBlock(cleanContent)
+	if jsonBlock == "" {
+		jsonBlock = cleanContent
 	}
 
 	// 尝试直接解析
-	if err := json.Unmarshal([]byte(cleanContent), result); err != nil {
-		log.Printf("[distill] JSON 解析失败: %v，尝试提取 JSON 块", err)
-		// 提取 JSON 块
-		start := strings.Index(cleanContent, "{")
-		end := strings.LastIndex(cleanContent, "}")
-		if start >= 0 && end > start {
-			jsonBlock := cleanContent[start : end+1]
-			if err2 := json.Unmarshal([]byte(jsonBlock), result); err2 != nil {
-				log.Printf("[distill] 提取 JSON 块后仍解析失败: %v，块内容前200字符: %s", err2, jsonBlock[:min(200, len(jsonBlock))])
-			} else {
-				log.Printf("[distill] 通过提取 JSON 块成功解析")
-			}
-		} else {
-			log.Printf("[distill] 无法找到 JSON 块，原始内容前300字符: %s", content[:min(300, len(content))])
-		}
+	if err := json.Unmarshal([]byte(jsonBlock), result); err != nil {
+		log.Printf("[distill] JSON 解析失败: %v，原始内容前300字符: %s", err, content[:min(300, len(content))])
 	}
 
 	// 检查是否有有效数据
@@ -588,6 +631,43 @@ func callDistillLLM(userID int, date, convContent string) (*DistillResult, error
 	}
 
 	return result, nil
+}
+
+// extractJSONBlock 用花括号计数提取最外层 JSON 对象（感知字符串）
+func extractJSONBlock(s string) string {
+	start := strings.Index(s, "{")
+	if start < 0 {
+		return ""
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if inString {
+			if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+		} else if c == '{' {
+			depth++
+		} else if c == '}' {
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	return ""
 }
 
 func min(a, b int) int {

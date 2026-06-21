@@ -74,12 +74,14 @@ func GetDistillKnowledge(w http.ResponseWriter, r *http.Request) {
 // TriggerDistill 手动触发蒸馏（分析当天对话）
 func TriggerDistill(w http.ResponseWriter, r *http.Request) {
 	userID := 0
+	username := ""
 	if session := middleware.GetSessionFromCtx(r); session != nil {
 		userID = session.UserID
+		username = session.Username
 	}
 	today := time.Now().Format("2006-01-02")
 	go func() {
-		if err := service.RunDistillForDate(userID, today); err != nil {
+		if err := service.RunDistillForDate(userID, username, today); err != nil {
 			log.Printf("[distill] 手动触发失败 user=%d date=%s: %v", userID, today, err)
 		} else {
 			log.Printf("[distill] 手动触发成功 user=%d date=%s", userID, today)

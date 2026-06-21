@@ -191,7 +191,7 @@ func finishAgent(w http.ResponseWriter, req map[string]interface{}, content stri
 
 	// 保存
 	convCtx.AssistantContent = content
-	chatID := service.AddChatMessage("assistant", content)
+	chatID := service.AddChatMessage(convCtx.UserID, "assistant", content)
 	convCtx.ChatHistoryID = chatID
 	latency := int(time.Since(convCtx.StartTime).Milliseconds())
 	go service.SaveConversationLog(chatID, req, content, modelID, vendorID,

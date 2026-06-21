@@ -680,7 +680,7 @@ def _get_action_count() -> int:
 def _simplify_actions(raw_actions: list[dict]) -> list[dict]:
     """
     精简原始录制数据：
-    1. 去掉过于密集的 mouse_move 事件（采样间隔 < 30ms 的只保留最后一个）
+    1. 完全剔除 mouse_move（回放时 click 会直接定位坐标，移动轨迹无意义）
     2. 将 click + click_release 合并为一个 click 事件
     3. 计算步骤间的相对延时
     """
@@ -688,7 +688,6 @@ def _simplify_actions(raw_actions: list[dict]) -> list[dict]:
         return []
 
     result = []
-    last_move_time = -1000
     last_time = raw_actions[0].get("t", 0) if raw_actions else 0
 
     i = 0
@@ -699,23 +698,12 @@ def _simplify_actions(raw_actions: list[dict]) -> list[dict]:
         delay = t - last_time if result else 0
 
         if atype == "mouse_move":
-            # 降采样：间隔 < 30ms 的 move 跳过
-            if t - last_move_time < 30:
-                i += 1
-                continue
-            last_move_time = t
-            result.append({"type": "mouse_move", "x": a["x"], "y": a["y"], "ms": delay})
-            last_time = t
+            # 鼠标移动全部剔除：click 自带坐标定位，移动轨迹对回放无意义
+            pass
 
         elif atype == "click":
             # 找对应的 click_release，合并为单个 click
             press_x, press_y, btn = a["x"], a["y"], a.get("button", "left")
-            found_release = False
-            for j in range(i + 1, min(i + 20, len(raw_actions))):
-                ra = raw_actions[j]
-                if ra.get("type") == "click_release" and ra.get("button") == btn:
-                    found_release = True
-                    break
             result.append({"type": "click", "x": press_x, "y": press_y, "button": btn, "ms": delay})
             last_time = t
 
