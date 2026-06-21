@@ -13,10 +13,18 @@ from pathlib import Path
 _BASE_DIR = Path(os.environ.get("AI_OS_BASE_DIR", r"C:\ProgramData\AI-OS"))
 CONFIG_FILE = _BASE_DIR / "config" / "voice_config.json"
 LOG_DIR = _BASE_DIR / "logs"
-MODEL_SEARCH_DIRS = [
-    _BASE_DIR / "models" / "vosk",
-    Path(__file__).parent.parent / "models",
-]
+
+# FunASR 模型缓存目录
+MODELSCOPE_CACHE = _BASE_DIR / "models" / "funasr"
+
+# Paraformer 模型名称（ModelScope 标识符）
+PARAFORMER_MODEL = "paraformer-zh"
+
+
+def setup_model_env() -> None:
+    """设置 ModelScope 缓存路径环境变量（必须在 import funasr 之前调用）。"""
+    MODELSCOPE_CACHE.mkdir(parents=True, exist_ok=True)
+    os.environ["MODELSCOPE_CACHE"] = str(MODELSCOPE_CACHE)
 
 
 def load_config() -> dict:
@@ -35,7 +43,6 @@ def save_config(cfg: dict) -> None:
     CONFIG_FILE.write_text(
         json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    # 确保普通用户可写
     _ensure_writable(CONFIG_FILE)
     _ensure_writable(CONFIG_FILE.parent)
 
@@ -50,83 +57,134 @@ def _ensure_writable(path: Path) -> None:
         subprocess.run(
             ["icacls", target, "/grant", "Users:(M)", "/c"],
             capture_output=True, timeout=5,
-            creationflags=0x08000000,  # CREATE_NO_WINDOW，防止闪黑框
+            creationflags=0x08000000,
         )
     except Exception:
         pass
 
 
-def find_vosk_model() -> str | None:
+def find_asr_model() -> str | None:
     """
-    搜索 Vosk 中文模型目录。
-    优先匹配标准模型（vosk-model-cn），其次小模型（vosk-model-small-cn）。
-    验证目录包含 am/final.mdl。
+    检查 FunASR Paraformer 模型是否已下载且完整。
+    必须同时存在 model.pt（权重）和 config.yaml（配置）才算完整。
+    返回模型目录路径，未下载或残缺返回 None。
     """
-    # 优先匹配的前缀列表（标准模型 > 小模型）
-    prefixes = ["vosk-model-cn-0.2", "vosk-model-cn-kaldi", "vosk-model-small-cn"]
-    for base in MODEL_SEARCH_DIRS:
-        if not base.exists():
-            continue
-        for entry in sorted(base.iterdir()):
-            if not entry.is_dir():
-                continue
-            for prefix in prefixes:
-                if entry.name.startswith(prefix):
-                    if (entry / "am" / "final.mdl").exists():
-                        return str(entry)
+    # 关键文件：缺任一个都算残缺
+    required_files = ["model.pt", "config.yaml", "am.mvn"]
+
+    def _check_dir(dir_path: Path) -> bool:
+        if not dir_path.exists():
+            return False
+        return all((dir_path / f).is_file() and (dir_path / f).stat().st_size > 0
+                   for f in required_files)
+
+    # 优先检查自定义缓存目录
+    cache_dir = MODELSCOPE_CACHE / "iic"
+    if cache_dir.exists():
+        for entry in cache_dir.iterdir():
+            if entry.is_dir() and "paraformer" in entry.name.lower() and _check_dir(entry):
+                return str(entry)
+
+    # 兜底：检查 ModelScope 默认缓存（用户目录）
+    default_cache = Path.home() / ".cache" / "modelscope" / "hub" / "iic"
+    if default_cache.exists():
+        for entry in default_cache.iterdir():
+            if entry.is_dir() and "paraformer" in entry.name.lower() and _check_dir(entry):
+                return str(entry)
+
     return None
 
 
-VOSK_MODEL_URLS = [
-    "https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip",
-    "https://github.com/alphacep/vosk-api/releases/download/v0.3.42/vosk-model-small-cn-0.22.zip",
-]
-MODEL_DIR = _BASE_DIR / "models" / "vosk"
+def is_model_ready() -> bool:
+    """检查 FunASR 模型是否已下载就绪。"""
+    return find_asr_model() is not None
 
 
-def download_vosk_model(on_progress=None) -> str:
+def download_asr_model(on_progress=None) -> str:
     """
-    下载 Vosk 中文模型并解压。依次尝试多个下载源。
-    on_progress: callback(downloaded, total) 用于进度回调
-    返回模型目录路径
+    下载 FunASR Paraformer 语音识别模型。
+    使用 modelscope SDK 从国内 CDN 下载到 MODELSCOPE_CACHE 目录。
+    on_progress(percent, message) 回调用于报告进度（percent: 0-100）。
+    返回模型目录路径。
     """
-    import urllib.request
-    import zipfile
+    setup_model_env()
 
-    existing = find_vosk_model()
-    if existing:
-        return existing
+    model_id = "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
+    target_dir = MODELSCOPE_CACHE / "iic" / "speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
 
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    zip_path = MODEL_DIR / "vosk-model-small-cn-0.22.zip"
+    def _report(pct, msg):
+        if on_progress:
+            try:
+                on_progress(pct, msg)
+            except Exception:
+                pass
 
-    last_error = None
-    for url in VOSK_MODEL_URLS:
+    _report(1, "正在连接 ModelScope ...")
+
+    try:
+        from modelscope.hub.snapshot_download import snapshot_download
+    except Exception as e:
+        raise RuntimeError(f"modelscope 未安装: {e}")
+
+    _report(5, "开始下载模型文件 ...")
+
+    # modelscope 的 snapshot_download 不直接提供进度回调，
+    # 用 local_dir 模式下载（文件直接落到目标目录），通过 hooks 估算进度
+    # 9 个文件，按文件数分摊进度（5% ~ 95%）
+    try:
+        # 尝试用 HookCallbacks（较新版本 modelscope 支持）
+        from modelscope.hub.api import HubApi
+        from modelscope.utils.logger import get_logger
+
+        class _ProgressHook:
+            def __init__(self):
+                self.total = 9  # 该模型的文件数
+                self.done = 0
+
+            def __call__(self, *args, **kwargs):
+                # modelscope 内部 hook 签名不固定，用宽松处理
+                pass
+
+        # 简单可靠的方式：直接 snapshot_download，它在下载过程中会输出日志
+        # 我们通过监听目标目录文件数来估算进度
+        import threading
+
+        stop_monitor = threading.Event()
+
+        def monitor():
+            import time
+            known_files = {
+                "config.yaml", "configuration.json", "am.mvn", "model.pt",
+                "README.md", "seg_dict", "tokens.json",
+            }
+            while not stop_monitor.is_set():
+                try:
+                    existing = set()
+                    if target_dir.exists():
+                        for f in target_dir.rglob("*"):
+                            if f.is_file():
+                                existing.add(f.name)
+                    done = len(existing & known_files)
+                    pct = 5 + int(done / len(known_files) * 90)
+                    _report(min(pct, 95), f"下载中（{done}/{len(known_files)} 文件）...")
+                except Exception:
+                    pass
+                time.sleep(2)
+
+        mon_thread = threading.Thread(target=monitor, daemon=True)
+        mon_thread.start()
+
         try:
-            urllib.request.urlretrieve(
-                url,
-                str(zip_path),
-                reporthook=lambda block, block_size, total_size: (
-                    on_progress(block * block_size, total_size) if on_progress and total_size > 0 else None
-                ),
-            )
-            last_error = None
-            break
-        except Exception as e:
-            last_error = e
-            continue
+            snapshot_download(model_id, local_dir=str(target_dir))
+        finally:
+            stop_monitor.set()
 
-    if last_error and not zip_path.exists():
-        raise RuntimeError(f"所有下载源均失败: {last_error}")
+        _report(100, "下载完成")
 
-    # 解压模型
-    with zipfile.ZipFile(str(zip_path), "r") as zf:
-        zf.extractall(str(MODEL_DIR))
+    except Exception as e:
+        raise RuntimeError(f"模型下载失败（modelscope）: {e}")
 
-    # 清理 zip 文件
-    zip_path.unlink(missing_ok=True)
-
-    result = find_vosk_model()
+    result = find_asr_model()
     if not result:
-        raise RuntimeError("模型解压失败")
+        raise RuntimeError("FunASR 模型下载失败：文件未就位")
     return result

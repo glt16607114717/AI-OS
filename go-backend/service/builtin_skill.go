@@ -180,15 +180,20 @@ func GetBuiltinSkillToolDefinitions(userID int, isAdmin bool) ([]map[string]inte
 		var params interface{}
 		json.Unmarshal(s.ToolSchema, &params)
 
-		// 构造 description（包含可用连接名 + 表查询提示）
+		// 构造 description（包含可用连接名 + 每个库的用途说明 + 调用约束）
 		desc := s.Description
 		connections, _ := getUserSkillConnections(userID, s.ID, isAdmin)
 		if len(connections) > 0 {
 			var parts []string
 			for _, c := range connections {
-				parts = append(parts, fmt.Sprintf("%s(%s/%s)", c.Name, getConfigField(c.Config, "host"), getConfigField(c.Config, "database")))
+				// 把每个连接的描述一起带上，让 AI 知道每个库装的是什么
+				if c.Description != "" {
+					parts = append(parts, fmt.Sprintf("%s[%s](%s/%s)", c.Name, c.Description, getConfigField(c.Config, "host"), getConfigField(c.Config, "database")))
+				} else {
+					parts = append(parts, fmt.Sprintf("%s(%s/%s)", c.Name, getConfigField(c.Config, "host"), getConfigField(c.Config, "database")))
+				}
 			}
-			desc = fmt.Sprintf("%s\n可用连接：%s\n重要：不确定表名时，先执行 SHOW TABLES 查看可用表列表。不同连接的表结构不同，不要假设表名。", desc, strings.Join(parts, "、"))
+			desc = fmt.Sprintf("%s\n可用连接：%s\n使用原则：1) 先根据每个连接的描述判断是否真的需要查这个库——如果用户的问题与该库存储的数据无关，则不要调用；2) 不要用于验证连接可用性（禁止 SELECT 1 这类探活语句），也不要出于好奇去探索数据库里有什么；3) 若本对话上下文中已出现过某连接的表清单，直接复用，不要重复 SHOW TABLES；4) 仅当上下文中确实没有该连接的表清单且确实需要查表时，才执行一次 SHOW TABLES；5) 不同连接的表结构不同，不要跨连接假设表名。", desc, strings.Join(parts, "、"))
 		}
 
 		tools = append(tools, map[string]interface{}{
@@ -227,12 +232,13 @@ func getConfigField(configRaw json.RawMessage, field string) string {
 // ── 连接管理 ──
 
 type SkillConnection struct {
-	ID       int             `json:"id"`
-	SkillID  int             `json:"skill_id"`
-	Name     string          `json:"name"`
-	Config   json.RawMessage `json:"config"`
-	Enabled  bool            `json:"enabled"`
-	Masked   bool            `json:"masked,omitempty"` // 前端显示时密码是否脱敏
+	ID          int             `json:"id"`
+	SkillID     int             `json:"skill_id"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Config      json.RawMessage `json:"config"`
+	Enabled     bool            `json:"enabled"`
+	Masked      bool            `json:"masked,omitempty"` // 前端显示时密码是否脱敏
 }
 
 // GetSkillConnections 获取技能的所有连接（管理员）
@@ -241,7 +247,7 @@ func GetSkillConnections(skillID int) ([]SkillConnection, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := conn.Query("SELECT id, skill_id, name, config, enabled FROM sys_skill_connection WHERE skill_id = ? ORDER BY id", skillID)
+	rows, err := conn.Query("SELECT id, skill_id, name, description, config, enabled FROM sys_skill_connection WHERE skill_id = ? ORDER BY id", skillID)
 	if err != nil {
 		return nil, err
 	}
@@ -251,8 +257,12 @@ func GetSkillConnections(skillID int) ([]SkillConnection, error) {
 	for rows.Next() {
 		var c SkillConnection
 		var enabled int
-		if err := rows.Scan(&c.ID, &c.SkillID, &c.Name, &c.Config, &enabled); err != nil {
+		var desc sql.NullString
+		if err := rows.Scan(&c.ID, &c.SkillID, &c.Name, &desc, &c.Config, &enabled); err != nil {
 			continue
+		}
+		if desc.Valid {
+			c.Description = desc.String
 		}
 		c.Enabled = enabled == 1
 		c.Config = maskPassword(c.Config)
@@ -270,7 +280,7 @@ func getUserSkillConnections(userID int, skillID int, isAdmin bool) ([]SkillConn
 	if err != nil {
 		return nil, err
 	}
-	rows, err := conn.Query(`SELECT c.id, c.skill_id, c.name, c.config, c.enabled
+	rows, err := conn.Query(`SELECT c.id, c.skill_id, c.name, c.description, c.config, c.enabled
 		FROM sys_skill_connection c
 		INNER JOIN sys_skill_permission p ON p.connection_id = c.id
 		WHERE c.skill_id = ? AND p.user_id = ? AND c.enabled = 1
@@ -284,8 +294,12 @@ func getUserSkillConnections(userID int, skillID int, isAdmin bool) ([]SkillConn
 	for rows.Next() {
 		var c SkillConnection
 		var enabled int
-		if err := rows.Scan(&c.ID, &c.SkillID, &c.Name, &c.Config, &enabled); err != nil {
+		var desc sql.NullString
+		if err := rows.Scan(&c.ID, &c.SkillID, &c.Name, &desc, &c.Config, &enabled); err != nil {
 			continue
+		}
+		if desc.Valid {
+			c.Description = desc.String
 		}
 		c.Enabled = enabled == 1
 		c.Config = maskPassword(c.Config)
@@ -308,7 +322,7 @@ func maskPassword(configRaw json.RawMessage) json.RawMessage {
 }
 
 // CreateSkillConnection 新建连接
-func CreateSkillConnection(skillID int, name string, config map[string]interface{}) error {
+func CreateSkillConnection(skillID int, name string, description string, config map[string]interface{}) error {
 	// 加密密码
 	if pwd, ok := config["password"].(string); ok && pwd != "" {
 		encrypted, err := EncryptPassword(pwd)
@@ -323,12 +337,12 @@ func CreateSkillConnection(skillID int, name string, config map[string]interface
 	if err != nil {
 		return err
 	}
-	_, err = conn.Exec("INSERT INTO sys_skill_connection (skill_id, name, config) VALUES (?, ?, ?)", skillID, name, string(configJSON))
+	_, err = conn.Exec("INSERT INTO sys_skill_connection (skill_id, name, description, config) VALUES (?, ?, ?, ?)", skillID, name, description, string(configJSON))
 	return err
 }
 
 // UpdateSkillConnection 更新连接
-func UpdateSkillConnection(connID int, name string, config map[string]interface{}) error {
+func UpdateSkillConnection(connID int, name string, description string, config map[string]interface{}) error {
 	// 如果密码是 *** 则保持原密码
 	if pwd, ok := config["password"].(string); ok && pwd == "***" {
 		// 读取原密码
@@ -356,7 +370,7 @@ func UpdateSkillConnection(connID int, name string, config map[string]interface{
 	if err != nil {
 		return err
 	}
-	_, err = conn.Exec("UPDATE sys_skill_connection SET name = ?, config = ? WHERE id = ?", name, string(configJSON), connID)
+	_, err = conn.Exec("UPDATE sys_skill_connection SET name = ?, description = ?, config = ? WHERE id = ?", name, description, string(configJSON), connID)
 	return err
 }
 

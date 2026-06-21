@@ -29,6 +29,12 @@ func agentLoop(w http.ResponseWriter, req map[string]interface{}, attempts []*se
 	// 收集每轮执行的 SQL（最终展示给用户，保证查询可追溯）
 	var sqlTrace []string
 
+	// 流式请求：循环开始前就写 SSE 响应头，这样中间过程可以边执行边推送
+	if convCtx.IsStream {
+		writeSSEHeaders(w)
+		convCtx.SSEHeaderWritten = true
+	}
+
 	// 死循环检测：记录上一轮 tool_calls 的签名
 	var lastToolCallSig string
 	stuckCount := 0
@@ -106,12 +112,12 @@ func agentLoop(w http.ResponseWriter, req map[string]interface{}, attempts []*se
 		}
 
 		if hasNonSkill {
-			// 透传给 TRAE 执行
-			log.Printf("[agent] proxy tool_calls to client (non-skill)")
-			proxyToolCalls(w, toolCalls, convCtx.IsStream)
-			convCtx.SummarizeAndLog()
-			return
-		}
+		// 透传给 TRAE 执行
+		log.Printf("[agent] proxy tool_calls to client (non-skill)")
+		proxyToolCalls(w, toolCalls, convCtx)
+		convCtx.SummarizeAndLog()
+		return
+	}
 
 		// 执行所有 skill_ 工具
 		messages = append(messages, map[string]interface{}{
@@ -126,12 +132,21 @@ func agentLoop(w http.ResponseWriter, req map[string]interface{}, attempts []*se
 			args := getToolCallArgs(tci)
 			tcID := getToolCallID(tci)
 
+			// 流式请求时，先把"即将调用什么技能"告知客户端
+			if convCtx.SSEHeaderWritten {
+				streamProgressAsSSE(w, fmt.Sprintf("\n[调用技能 %s...]\n", skillCode))
+			}
+
 			result, execErr := service.ExecuteBuiltinSkill(skillCode, userID, isAdmin, args)
 
 			// 通用收集 trace（任何技能只要返回 trace 字段就展示）
 			if execErr == nil && result != nil {
 				if trace, ok := result["trace"].(string); ok && trace != "" {
 					sqlTrace = append(sqlTrace, trace)
+					// 流式请求时立即推送 trace，让用户实时看到执行过程
+					if convCtx.SSEHeaderWritten {
+						streamProgressAsSSE(w, trace+"\n")
+					}
 				}
 			}
 
@@ -159,9 +174,12 @@ func agentLoop(w http.ResponseWriter, req map[string]interface{}, attempts []*se
 // finishAgent 统一处理 Agent 结束：拼接 trace → 保存 → 输出
 // route 为 nil 时使用空 modelID（兜底场景）
 func finishAgent(w http.ResponseWriter, req map[string]interface{}, content string, route *service.RouteInfoType, convCtx *ConversationContext, sqlTrace []string) {
-	// 拼接 SQL trace 到答案前面
-	if len(sqlTrace) > 0 {
-		content = strings.Join(sqlTrace, "\n\n") + "\n\n" + content
+	// 流式请求：trace 已在 agentLoop 中实时推送，不再拼接
+	// 非流式请求：保持原行为，把 trace 拼到答案前面
+	if !convCtx.IsStream {
+		if len(sqlTrace) > 0 {
+			content = strings.Join(sqlTrace, "\n\n") + "\n\n" + content
+		}
 	}
 
 	modelID := ""
@@ -178,7 +196,6 @@ func finishAgent(w http.ResponseWriter, req map[string]interface{}, content stri
 	latency := int(time.Since(convCtx.StartTime).Milliseconds())
 	go service.SaveConversationLog(chatID, req, content, modelID, vendorID,
 		convCtx.TotalPrompt, convCtx.TotalCompletion, 0, latency)
-	go service.StoreEmbedding(convCtx.UserID, convCtx.UserMessage+"\n\n"+content, convCtx.Source)
 
 	// 输出
 	outputContent(w, content, modelID, convCtx)
@@ -186,11 +203,16 @@ func finishAgent(w http.ResponseWriter, req map[string]interface{}, content stri
 }
 
 // proxyToolCalls 把非 skill_ 工具的 tool_calls 透传给客户端（TRAE 自己执行）
-func proxyToolCalls(w http.ResponseWriter, toolCalls []interface{}, isStream bool) {
+func proxyToolCalls(w http.ResponseWriter, toolCalls []interface{}, convCtx *ConversationContext) {
 	tcID := getToolCallID(toolCalls[0])
+	isStream := convCtx.IsStream
 
 	if isStream {
-		writeSSEHeaders(w)
+		// 防止重复写 SSE 头（agent 循环中可能已写过）
+		if !convCtx.SSEHeaderWritten {
+			writeSSEHeaders(w)
+			convCtx.SSEHeaderWritten = true
+		}
 
 		// tool_calls 帧
 		chunk := map[string]interface{}{

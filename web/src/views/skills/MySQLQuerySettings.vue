@@ -6,6 +6,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 interface Connection {
   id: number
   name: string
+  description: string
   config: Record<string, any>
   enabled: boolean
 }
@@ -23,7 +24,7 @@ const saving = ref(false)
 
 // 连接编辑对话框
 const connDialog = ref(false)
-const editingConn = reactive({ id: 0, name: '', host: '', port: 3306, user: 'root', password: '', database: '' })
+const editingConn = reactive({ id: 0, name: '', description: '', host: '', port: 3306, user: 'root', password: '', database: '' })
 
 // 获取连接名称（截断）
 function connLabel(conn: Connection) {
@@ -123,6 +124,7 @@ async function savePermissions() {
 function openCreate() {
   editingConn.id = 0
   editingConn.name = ''
+  editingConn.description = ''
   editingConn.host = ''
   editingConn.port = 3306
   editingConn.user = 'root'
@@ -134,6 +136,7 @@ function openCreate() {
 function openEdit(conn: Connection) {
   editingConn.id = conn.id
   editingConn.name = conn.name
+  editingConn.description = conn.description || ''
   editingConn.host = conn.config.host || ''
   editingConn.port = conn.config.port || 3306
   editingConn.user = conn.config.user || ''
@@ -150,6 +153,7 @@ async function saveConnection() {
   const token = localStorage.getItem('aios_token') || ''
   const body = {
     name: editingConn.name,
+    description: editingConn.description,
     config: {
       host: editingConn.host,
       port: editingConn.port,
@@ -219,6 +223,7 @@ onMounted(loadData)
         <thead>
           <tr>
             <th style="width:120px">名称</th>
+            <th>库用途说明</th>
             <th>主机</th>
             <th style="width:70px">端口</th>
             <th style="width:100px">用户</th>
@@ -230,6 +235,7 @@ onMounted(loadData)
         <tbody>
           <tr v-for="conn in connections" :key="conn.id">
             <td><strong>{{ conn.name }}</strong></td>
+            <td class="desc-cell">{{ conn.description || '—' }}</td>
             <td class="mono">{{ conn.config.host }}</td>
             <td>{{ conn.config.port }}</td>
             <td>{{ conn.config.user }}</td>
@@ -245,7 +251,7 @@ onMounted(loadData)
             </td>
           </tr>
           <tr v-if="connections.length === 0">
-            <td colspan="7" class="empty">暂无连接，请先创建</td>
+            <td colspan="8" class="empty">暂无连接，请先创建</td>
           </tr>
         </tbody>
       </table>
@@ -298,6 +304,10 @@ onMounted(loadData)
         <div class="form-group">
           <label>连接名称</label>
           <input v-model="editingConn.name" placeholder="如：生产库" />
+        </div>
+        <div class="form-group">
+          <label>库用途说明 <span class="hint-inline">（告诉 AI 这个库里存的是什么，帮助判断是否需要查询）</span></label>
+          <textarea v-model="editingConn.description" rows="3" placeholder="如：存储用户、订单、商品等业务数据，用于排查业务问题"></textarea>
         </div>
         <div class="form-row">
           <div class="form-group flex-1">
@@ -511,6 +521,34 @@ onMounted(loadData)
   text-align: center;
   color: #999;
   padding: 24px;
+}
+
+.desc-cell {
+  font-size: 12px;
+  color: #666;
+  line-height: 1.5;
+  max-width: 280px;
+}
+
+.hint-inline {
+  font-size: 12px;
+  color: #999;
+  font-weight: normal;
+}
+
+textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  font-size: 13px;
+  resize: vertical;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+textarea:focus {
+  outline: none;
+  border-color: #409eff;
 }
 
 /* 对话框 */

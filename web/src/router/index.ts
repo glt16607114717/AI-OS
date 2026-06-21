@@ -75,6 +75,11 @@ const router = createRouter({
           component: () => import('../views/rag/Knowledge.vue'),
         },
         {
+          path: 'rag/daily-report',
+          name: 'DailyReport',
+          component: () => import('../views/rag/DailyReport.vue'),
+        },
+        {
           path: 'system/account',
           name: 'AccountSettings',
           component: () => import('../views/system/AccountSettings.vue'),

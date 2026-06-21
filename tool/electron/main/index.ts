@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } from 'electron'
 import * as path from 'path'
 import * as http from 'http'
+import { spawn } from 'child_process'
 import { SetupManager, SetupProgress } from './setup-manager'
 
 let mainWindow: BrowserWindow | null = null
@@ -101,15 +102,24 @@ async function agentRestart(): Promise<{ ok: boolean; error?: string }> {
     // 等待 3 秒让进程退出
     await new Promise(r => setTimeout(r, 3000))
 
-    // 通过计划任务重新启动
-    const { exec } = require('child_process')
-    exec('schtasks.exe /Run /TN "AI-OS-Agent"', (err: Error | null) => {
-      if (err) {
-        // 计划任务失败，尝试直接 spawn
-        const mgr = getSetupManager()
-        // spawn 会在 startService 里处理
-      }
-    })
+    // 尝试通过计划任务重新启动；如果计划任务不存在，直接 spawn
+    const DATA_DIR = path.join(process.env.ProgramData || 'C:\\ProgramData', 'AI-OS')
+    const pythonwExe = path.join(DATA_DIR, 'runtime', 'python', 'pythonw.exe')
+    const agentScript = path.join(app.isPackaged ? process.resourcesPath : path.join(__dirname, '..', '..', 'resources'),
+      'backend', 'python', 'agent', 'main.py')
+
+    let started = false
+    try {
+      const { execFileSync } = require('child_process')
+      execFileSync('schtasks.exe', ['/Run', '/TN', 'AI-OS-Agent'], { stdio: 'ignore', timeout: 3000 })
+    } catch {
+      // 计划任务不存在，直接 spawn
+      spawn(pythonwExe, ['-X', 'utf8', agentScript], {
+        cwd: path.join(DATA_DIR, 'runtime', 'python'),
+        detached: true,
+        stdio: 'ignore',
+      }).unref()
+    }
 
     // 等待健康检查通过
     for (let i = 0; i < 15; i++) {

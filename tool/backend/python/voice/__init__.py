@@ -1,6 +1,7 @@
 """
 语音助手模块
-使用 Vosk 离线中文语音识别 + sounddevice 采集音频，实时匹配预配置指令并回放操作序列。
+使用 FunASR Paraformer 离线中文语音识别 + sounddevice 采集音频，
+通过 VAD 检测有声片段后送入模型识别，匹配预配置指令并回放操作序列。
 
 支持两种指令模式：
   1. 标定模式（position）：单点标定，语音唤醒后单击目标坐标
@@ -21,7 +22,7 @@
     get_recognize_log()               获取识别日志
     clear_recognize_log()             清空识别日志
 
-作者：桂杨涛，邮箱：guiyang@nndrobot.com
+作者：桂良涛，邮箱：桂良涛@nndrobot.com
 """
 
 import json
@@ -30,7 +31,16 @@ import time
 import ctypes
 from datetime import datetime
 
-from .config import load_config, save_config, find_vosk_model, LOG_DIR
+from .config import (
+    load_config,
+    save_config,
+    find_asr_model,
+    is_model_ready,
+    setup_model_env,
+    MODELSCOPE_CACHE,
+    PARAFORMER_MODEL,
+    LOG_DIR,
+)
 
 # ── 模块状态 ──────────────────────────────────────────────
 _voice_thread: threading.Thread | None = None
@@ -120,9 +130,13 @@ def _send_mouse(flags: int, delta: int = 0) -> None:
 
 
 def _send_key(vk: int, flags: int = 0) -> None:
+    # 右 Alt/Ctrl/Shift、Win 键、Numpad 等扩展键需要 KEYEVENTF_EXTENDEDKEY 标志
+    _EXTENDED_VKS = {0xA1, 0xA3, 0xA5, 0xA2, 0xA4, 0x5B, 0x5C, 0x5D,
+                     0x6C, 0x6D, 0x6E, 0x6F, 0x21, 0x22, 0x23, 0x24, 0x2D, 0x2E}
+    extra = 0x0001 if vk in _EXTENDED_VKS else 0  # KEYEVENTF_EXTENDEDKEY
     inp = _INPUT()
     inp.type = INPUT_KEYBOARD
-    inp.union.ki = _KEYBDINPUT(vk, 0, flags, 0, _extra_info)
+    inp.union.ki = _KEYBDINPUT(vk, 0, flags | extra, 0, _extra_info)
     _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
 
 
@@ -216,20 +230,21 @@ def _needs_shift(ch: str) -> bool:
     return ch.isupper() or ch in '~!@#$%^&*()_+{}|:"<>?'
 
 
-# ── 语音监听主循环（sounddevice 回调模式）──────────────────
+# ── 语音监听主循环（FunASR + 能量 VAD）──────────────────
 
 def _voice_loop() -> None:
     global _running
 
-    model_path = find_vosk_model()
-    if not model_path:
-        log("Vosk 中文模型未找到，语音唤醒不可用", "ERROR")
+    try:
+        import numpy as np
+    except ImportError:
+        log("numpy 未安装，语音唤醒不可用", "ERROR")
         return
 
     try:
-        from vosk import Model, KaldiRecognizer
+        from funasr import AutoModel
     except ImportError:
-        log("vosk 未安装，语音唤醒不可用", "ERROR")
+        log("funasr 未安装，语音唤醒不可用", "ERROR")
         return
 
     try:
@@ -238,15 +253,26 @@ def _voice_loop() -> None:
         log("sounddevice 未安装，语音唤醒不可用", "ERROR")
         return
 
+    # 设置模型缓存路径
+    setup_model_env()
+
+    # 加载 FunASR 模型（首次会自动下载，需要几分钟）
+    log("正在加载 FunASR 语音识别模型（首次加载较慢）...", "VOICE")
     try:
-        model = Model(model_path)
-        rec = KaldiRecognizer(model, 16000)
-        rec.SetWords(True)
+        asr_model = AutoModel(
+            model=PARAFORMER_MODEL,
+            disable_update=True,
+            disable_pbar=True,
+            disable_log=True,
+        )
     except Exception as e:
-        log(f"Vosk 模型加载失败: {e}", "ERROR")
+        log(f"FunASR 模型加载失败: {e}", "ERROR")
         return
+    log("FunASR 模型加载完成", "VOICE")
 
     import queue
+    import tempfile
+    import wave
     audio_queue: queue.Queue[bytes | None] = queue.Queue()
 
     def _audio_callback(indata, frames, time_info, status):
@@ -257,7 +283,7 @@ def _voice_loop() -> None:
     try:
         stream = sd.RawInputStream(
             samplerate=16000,
-            blocksize=4000,
+            blocksize=1600,  # 100ms per chunk
             dtype="int16",
             channels=1,
             callback=_audio_callback,
@@ -267,8 +293,35 @@ def _voice_loop() -> None:
         log(f"音频设备初始化失败: {e}", "ERROR")
         return
 
-    log("语音指令监听启动（sounddevice）", "VOICE")
+    log("语音指令监听启动（FunASR Paraformer）", "VOICE")
     _running = True
+
+    # ── 环境噪音校准（3秒）──
+    log("正在校准环境噪音（3秒，请保持安静）...", "VOICE")
+    noise_levels = []
+    for _ in range(30):  # 30帧 × 100ms = 3秒
+        try:
+            data = audio_queue.get(timeout=1.0)
+            if data:
+                audio_np = np.frombuffer(data, dtype=np.int16)
+                rms = np.sqrt(np.mean(audio_np.astype(np.float64) ** 2))
+                noise_levels.append(rms)
+        except Exception:
+            continue
+
+    noise_level = float(np.mean(noise_levels)) if noise_levels else 100.0
+    # 语音阈值 = 噪音 × 3，最低 150（防止极安静环境阈值过低）
+    SILENCE_THRESHOLD = max(noise_level * 3, 150)
+    log(f"环境噪音: {noise_level:.0f}, 语音阈值: {SILENCE_THRESHOLD:.0f}", "VOICE")
+
+    # ── VAD 参数 ──
+    SILENCE_FRAMES = 10       # 1秒静音认为一句话结束（10帧 × 100ms）
+    MIN_SPEECH_FRAMES = 3     # 最短语音 0.3秒，过滤短噪音
+    MAX_SPEECH_FRAMES = 100   # 最长语音 10秒，防止无限录制
+
+    audio_buffer = []
+    silence_count = 0
+    is_speaking = False
     read_count = 0
     recognize_count = 0
 
@@ -283,76 +336,36 @@ def _voice_loop() -> None:
                 break
 
             read_count += 1
-            if read_count % 50 == 1:
+            if read_count % 600 == 1:  # 每60秒打印一次心跳
                 log(f"语音监听中... 已读取{read_count}帧, 识别{recognize_count}次", "VOICE")
 
-            try:
-                cfg = load_config()
-            except Exception:
-                cfg = {"enabled": True, "commands": []}
+            # ── 能量 VAD：计算 RMS ──
+            audio_np = np.frombuffer(data, dtype=np.int16)
+            rms = np.sqrt(np.mean(audio_np.astype(np.float64) ** 2))
 
-            commands = cfg.get("commands", [])
-            # 过滤出有效指令：必须有 phrase，且至少有 position 或 actions
-            enabled_cmds = []
-            for c in commands:
-                if not c.get("enabled", True):
-                    continue
-                if not c.get("phrase"):
-                    continue
-                has_pos = c.get("position") and len(c.get("position")) == 2
-                has_actions = bool(c.get("actions"))
-                if has_pos or has_actions:
-                    enabled_cmds.append(c)
+            if rms > SILENCE_THRESHOLD:
+                # 检测到声音
+                if not is_speaking:
+                    is_speaking = True
+                audio_buffer.append(data)
+                silence_count = 0
+            else:
+                # 静音
+                if is_speaking:
+                    audio_buffer.append(data)  # 保留尾部静音，提高识别准确率
+                    silence_count += 1
 
-            if not enabled_cmds:
-                continue
+                    # 静音超时 或 录制超时 → 送 FunASR 识别
+                    if silence_count >= SILENCE_FRAMES or len(audio_buffer) >= MAX_SPEECH_FRAMES:
+                        speech_frames = len(audio_buffer) - silence_count
+                        if speech_frames >= MIN_SPEECH_FRAMES:
+                            recognize_count += 1
+                            _recognize_and_match(asr_model, audio_buffer)
+                        # 重置
+                        audio_buffer = []
+                        is_speaking = False
+                        silence_count = 0
 
-            recognize_count += 1
-            detected_text = ""
-            try:
-                if rec.AcceptWaveform(data):
-                    result = json.loads(rec.Result())
-                    text = result.get("text", "").strip()
-                    if text:
-                        log(f"语音识别: {text}", "VOICE")
-                        detected_text = text
-            except Exception as e:
-                log(f"识别异常: {e}", "VOICE")
-                continue
-
-            if detected_text:
-                # 去掉空格后再匹配（Vosk 可能在词之间插入空格）
-                normalized_text = detected_text.replace(" ", "")
-                matched = False
-                for cmd in enabled_cmds:
-                    raw_phrase = cmd.get("phrase", "")
-                    # 支持逗号分隔多个触发词
-                    keys = [k.replace(" ", "") for k in raw_phrase.replace("，", ",").split(",") if k.strip()]
-                    matched_key = None
-                    for key in keys:
-                        if key and key in normalized_text:
-                            matched_key = key
-                            break
-                    if matched_key:
-                        _add_recognize_log(detected_text, matched_key, True)
-                        matched = True
-                        # 录制模式：有 actions 则回放操作序列
-                        if cmd.get("actions"):
-                            actions = cmd["actions"]
-                            log(f"语音指令 [{matched_key}] -> 回放 {len(actions)} 步操作", "VOICE")
-                            _play_actions(actions)
-                        # 标定模式：有 position 则单击
-                        elif cmd.get("position"):
-                            pos = cmd["position"]
-                            # 兼容 dict {"x":..,"y":..} 和 list [x,y] 两种格式
-                            if isinstance(pos, dict):
-                                px, py = pos.get("x", 0), pos.get("y", 0)
-                            else:
-                                px, py = pos[0], pos[1]
-                            log(f"语音指令 [{matched_key}] -> 点击 ({px},{py})", "VOICE")
-                            _click_point(px, py)
-                if not matched:
-                    _add_recognize_log(detected_text, "", False)
     except Exception as e:
         log(f"语音线程异常退出: {e}", "ERROR")
     finally:
@@ -363,6 +376,105 @@ def _voice_loop() -> None:
             pass
         _running = False
         log("语音指令监听已停止", "VOICE")
+
+
+def _recognize_and_match(asr_model, audio_buffer: list) -> None:
+    """
+    将音频缓冲送 FunASR 识别，并匹配触发词执行指令。
+    """
+    import tempfile
+    import wave
+
+    audio_data = b''.join(audio_buffer)
+
+    # 保存为临时 wav 文件（FunASR 需要文件路径或 numpy）
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+            tmp_path = tmp.name
+        with wave.open(tmp_path, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(audio_data)
+
+        result = asr_model.generate(input=tmp_path, batch_size_s=300)
+    except Exception as e:
+        log(f"识别异常: {e}", "VOICE")
+        return
+    finally:
+        if tmp_path:
+            try:
+                import os as _os
+                _os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    detected_text = ""
+    if result and len(result) > 0:
+        detected_text = result[0].get("text", "").strip()
+
+    if not detected_text:
+        return
+
+    # 去掉空格（FunASR 可能插入分词空格）
+    detected_text = detected_text.replace(" ", "")
+    log(f"语音识别: {detected_text}", "VOICE")
+
+    # 加载指令配置
+    try:
+        cfg = load_config()
+    except Exception:
+        cfg = {"enabled": True, "commands": []}
+
+    commands = cfg.get("commands", [])
+    # 过滤出有效指令：必须有 phrase，且至少有 position 或 actions
+    enabled_cmds = []
+    for c in commands:
+        if not c.get("enabled", True):
+            continue
+        if not c.get("phrase"):
+            continue
+        has_pos = c.get("position") and len(c.get("position")) == 2
+        has_actions = bool(c.get("actions"))
+        if has_pos or has_actions:
+            enabled_cmds.append(c)
+
+    if not enabled_cmds:
+        return
+
+    normalized_text = detected_text.replace(" ", "")
+    matched = False
+    for cmd in enabled_cmds:
+        raw_phrase = cmd.get("phrase", "")
+        # 支持逗号分隔多个触发词
+        keys = [k.replace(" ", "") for k in raw_phrase.replace("，", ",").split(",") if k.strip()]
+        matched_key = None
+        for key in keys:
+            if key and key in normalized_text:
+                matched_key = key
+                break
+        if matched_key:
+            _add_recognize_log(detected_text, matched_key, True)
+            matched = True
+            # 录制模式：有 actions 则回放操作序列
+            if cmd.get("actions"):
+                actions = cmd["actions"]
+                log(f"语音指令 [{matched_key}] -> 回放 {len(actions)} 步操作", "VOICE")
+                _play_actions(actions)
+            # 标定模式：有 position 则单击
+            elif cmd.get("position"):
+                pos = cmd["position"]
+                # 兼容 dict {"x":..,"y":..} 和 list [x,y] 两种格式
+                if isinstance(pos, dict):
+                    px, py = pos.get("x", 0), pos.get("y", 0)
+                else:
+                    px, py = pos[0], pos[1]
+                log(f"语音指令 [{matched_key}] -> 点击 ({px},{py})", "VOICE")
+                _click_point(px, py)
+    if not matched:
+        _add_recognize_log(detected_text, "", False)
+
 
 # ── 标定（旧模式，保留兼容）──────────────────────────────
 
@@ -425,7 +537,9 @@ def cancel_calibration() -> None:
 
 # 需要监听的虚拟键码范围（字母键 + 数字键 + 常用功能键）
 _MONITORED_VKS = list(range(0x08, 0x10))  # Backspace..Tab, Clear, Enter
-_MONITORED_VKS += [0x10, 0x11, 0x12]       # Shift, Ctrl, Alt
+_MONITORED_VKS += [0x10, 0x11, 0x12]       # Shift, Ctrl, Alt（左）
+_MONITORED_VKS += [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5]  # 左右 Shift/Ctrl/Alt（扩展键）
+_MONITORED_VKS += [0x5B, 0x5C, 0x5D]       # 左Win, 右Win, Menu
 _MONITORED_VKS += list(range(0x20, 0x2F))  # Space..Help
 _MONITORED_VKS += list(range(0x30, 0x3A))  # 0-9
 _MONITORED_VKS += list(range(0x41, 0x5B))  # A-Z
@@ -441,9 +555,12 @@ _VK_NAMES = {
     0x1B: "Esc", 0x20: "Space", 0x21: "PageUp", 0x22: "PageDown",
     0x23: "End", 0x24: "Home", 0x25: "Left", 0x26: "Up",
     0x27: "Right", 0x28: "Down", 0x2D: "Insert", 0x2E: "Delete",
+    0x5B: "LWin", 0x5C: "RWin", 0x5D: "Menu",
     0x70: "F1", 0x71: "F2", 0x72: "F3", 0x73: "F4",
     0x74: "F5", 0x75: "F6", 0x76: "F7", 0x77: "F8",
     0x90: "NumLock",
+    0xA0: "LShift", 0xA1: "RShift", 0xA2: "LCtrl", 0xA3: "RCtrl",
+    0xA4: "LAlt", 0xA5: "RAlt",
 }
 
 
@@ -745,7 +862,7 @@ def get_status() -> dict:
         rec_count = len(_recording_actions)
     return {
         "listening": _running,
-        "model_ready": find_vosk_model() is not None,
+        "model_ready": is_model_ready(),
         "enabled": cfg.get("enabled", False),
         "commands": cfg.get("commands", []),
         "calibrating": _calibrating,
@@ -758,8 +875,11 @@ def get_status() -> dict:
 
 # ── 开关 ──────────────────────────────────────────────────
 
-def set_enabled(enabled: bool) -> None:
-    """设置语音模块开关。"""
+def set_enabled(enabled: bool) -> bool:
+    """设置语音模块开关。模型未就绪时拒绝开启。返回是否成功。"""
+    if enabled and not is_model_ready():
+        log("模型未安装，无法开启语音监听", "ERROR")
+        return False
     cfg = load_config()
     cfg["enabled"] = enabled
     save_config(cfg)
@@ -768,6 +888,7 @@ def set_enabled(enabled: bool) -> None:
         start_voice()
     else:
         stop_voice()
+    return True
 
 # ── 指令 CRUD ─────────────────────────────────────────────
 
@@ -805,10 +926,10 @@ def remove_command(index: int) -> None:
 def init_voice() -> None:
     """初始化语音模块，若配置 enabled=True 则自动启动监听。"""
     cfg = load_config()
-    model_path = find_vosk_model()
+    model_ready = is_model_ready()
     log(
         f"语音模块初始化: enabled={cfg.get('enabled', False)}, "
-        f"model={'已安装' if model_path else '未安装'}, "
+        f"model={'已安装' if model_ready else '未安装'}, "
         f"commands={len(cfg.get('commands', []))}个",
         "VOICE",
     )

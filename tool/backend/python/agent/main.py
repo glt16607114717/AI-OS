@@ -57,6 +57,22 @@ DEBUG = os.environ.get("AI_OS_DEBUG", "true").lower() == "true"
 # Voice module (lazy import)
 voice = None
 
+# 模型下载状态（供前端轮询）
+_download_state = {
+    "downloading": False,
+    "progress": 0,      # 0-100
+    "done": False,
+    "error": "",
+    "message": "",      # 当前阶段说明
+}
+
+
+def _on_download_progress(percent: float, message: str = ""):
+    """下载进度回调（由 download_asr_model 调用）。"""
+    _download_state["progress"] = int(percent)
+    if message:
+        _download_state["message"] = message
+
 
 def load_build_info():
     build_info_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'build_info.json')
@@ -213,12 +229,50 @@ async def voice_api(req: VoiceActionRequest):
     if req.action == "voice_status":
         ensure_voice()
         if voice is None:
-            from voice.config import find_vosk_model
-            return {"ok": True, "listening": False, "model_ready": find_vosk_model() is not None,
+            from voice.config import is_model_ready
+            return {"ok": True, "listening": False, "model_ready": is_model_ready(),
                     "enabled": False, "commands": [], "calibrating": False, "calibration_index": None,
                     "mouse_pos": [0, 0]}
         status = voice.get_status()
         return {"ok": True, **status}
+
+    # 下载模型：不需要 voice 模块，在 ensure_voice 之前处理
+    if req.action == "voice_download_model":
+        import threading
+        # 防止重复下载
+        if _download_state["downloading"]:
+            return {"ok": False, "error": "正在下载中，请等待"}
+        _download_state["downloading"] = True
+        _download_state["progress"] = 0
+        _download_state["error"] = ""
+        _download_state["done"] = False
+
+        def do_download():
+            try:
+                from voice.config import download_asr_model
+                path = download_asr_model(on_progress=_on_download_progress)
+                logger.info(f"FunASR model downloaded to {path}")
+                _download_state["progress"] = 100
+                _download_state["done"] = True
+                _download_state["downloading"] = False
+                global voice
+                if voice is None:
+                    from voice import init_voice
+                    init_voice()
+                    import voice as voice_mod
+                    voice = voice_mod
+            except Exception as e:
+                logger.error(f"Model download failed: {e}")
+                _download_state["error"] = str(e)
+                _download_state["downloading"] = False
+                _download_state["done"] = False
+        thread = threading.Thread(target=do_download, daemon=True)
+        thread.start()
+        return {"ok": True, "message": "Download started"}
+
+    # 查询下载进度
+    if req.action == "voice_download_status":
+        return {"ok": True, **_download_state}
 
     ensure_voice()
 
@@ -226,8 +280,8 @@ async def voice_api(req: VoiceActionRequest):
     payload = req.payload
 
     if action == "voice_set_enabled":
-        voice.set_enabled(payload.get("enabled", False))
-        return {"ok": True}
+        ok = voice.set_enabled(payload.get("enabled", False))
+        return {"ok": ok, "error": "" if ok else "语音模型未安装，请先下载模型"}
     elif action == "voice_start":
         voice.start_voice()
         return {"ok": True}
@@ -308,13 +362,13 @@ async def voice_api(req: VoiceActionRequest):
 
 @app.post("/api/voice/download-model")
 async def voice_download_model():
-    """下载 Vosk 模型（在后台线程中执行）"""
+    """下载 FunASR 模型（在后台线程中执行）"""
     import threading
 
     def do_download():
-        from voice.config import download_vosk_model
-        path = download_vosk_model()
-        logger.info(f"Vosk model downloaded to {path}")
+        from voice.config import download_asr_model
+        path = download_asr_model()
+        logger.info(f"FunASR model downloaded to {path}")
         global voice
         if voice is None:
             from voice import init_voice
@@ -329,9 +383,9 @@ async def voice_download_model():
 
 @app.get("/api/voice/model-status")
 async def voice_model_status():
-    """检查 Vosk 模型是否已下载"""
-    from voice.config import find_vosk_model
-    path = find_vosk_model()
+    """检查 FunASR 模型是否已下载"""
+    from voice.config import find_asr_model
+    path = find_asr_model()
     return {"ok": True, "installed": path is not None, "path": path}
 
 

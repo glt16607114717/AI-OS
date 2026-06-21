@@ -22,10 +22,11 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 	startTime := convCtx.StartTime
 
 	messages := toInterfaceSlice(req["messages"])
+	clientTools := toInterfaceSlice(req["tools"]) // 客户端自带的工具（LS/Read/Grep 等），透传给大模型
 	isStream := convCtx.IsStream
 
-	// 请求 LLM
-	result, err := callLLMWithFailover(messages, nil, attempts, isStream, convCtx)
+	// 请求 LLM（透传客户端工具，不注入服务端技能）
+	result, err := callLLMWithFailover(messages, clientTools, attempts, isStream, convCtx)
 	if err != nil {
 		convCtx.SummarizeAndLog()
 		errResponse(w, fmt.Sprintf("所有厂商均失败: %s", err.Error()), 502)
@@ -53,6 +54,7 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 		var totalContent strings.Builder
 		var usage map[string]interface{}
 
+		done := false
 		for scanner.Scan() {
 			line := scanner.Text()
 			if line == "" {
@@ -63,10 +65,10 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 			}
 			data := line[6:]
 			if data == "[DONE]" {
-				break
+				done = true
 			}
 
-			// 转发给客户端
+			// 转发给客户端（[DONE] 也要转发）
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			if flusher != nil {
 				flusher.Flush()
@@ -75,6 +77,10 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 			// 解析 chunk（用于统计，但不影响转发）
 			var chunk map[string]interface{}
 			if json.Unmarshal([]byte(data), &chunk) == nil {
+				// 提取 usage（任何 chunk 都可能含 usage）
+				if u, ok := chunk["usage"].(map[string]interface{}); ok {
+					usage = u
+				}
 				if choices, ok := chunk["choices"].([]interface{}); ok && len(choices) > 0 {
 					if choice, ok := choices[0].(map[string]interface{}); ok {
 						// 累计 content
@@ -83,23 +89,22 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 								totalContent.WriteString(content)
 							}
 						}
-						// 检查 finish_reason
-						if fr, ok := choice["finish_reason"].(string); ok && fr != "" {
-							if u, ok := chunk["usage"].(map[string]interface{}); ok {
-								usage = u
-							}
-						}
 					}
 				}
-				if u, ok := chunk["usage"].(map[string]interface{}); ok {
-					usage = u
-				}
+			}
+
+			// [DONE] 块已处理完，退出循环（确保不漏掉 [DONE] 之后的 chunk）
+			if done {
+				break
 			}
 		}
 
-		fmt.Fprintf(w, "data: [DONE]\n\n")
-		if flusher != nil {
-			flusher.Flush()
+		// 确保客户端收到 [DONE]
+		if !done {
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
 		}
 
 		// 统计
@@ -132,7 +137,6 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 			chatID := service.AddChatMessage("assistant", content)
 			convCtx.ChatHistoryID = chatID
 			go service.SaveConversationLog(chatID, req, content, route.ModelID, route.VendorID, promptTokens, completionTokens, totalTokens, latency)
-			go service.StoreEmbedding(userID, convCtx.UserMessage+"\n\n"+content, convCtx.Source)
 		}
 
 		log.Printf("[proxy] stream %s user=%s latency=%dms tokens=%d/%d",
@@ -151,7 +155,6 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 		latency := int(time.Since(startTime).Milliseconds())
 		go service.SaveConversationLog(chatID, req, content, route.ModelID, route.VendorID,
 			convCtx.TotalPrompt, convCtx.TotalCompletion, 0, latency)
-		go service.StoreEmbedding(userID, convCtx.UserMessage+"\n\n"+content, convCtx.Source)
 	}
 
 	// 透传响应头和 body

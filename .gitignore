@@ -2,28 +2,33 @@
 node_modules/
 dist/
 dist-electron/
+dist-build/
+release/
+release-v*/
 
 # === Python ===
 *.pyc
 __pycache__/
 *.egg-info/
 .venv/
+*.onnx
 
-# === 构建输出 ===
-client/release/
-client/release-v*/
-
-# === Python 运行时环境包（构建脚本自动生成）===
-client/resources/python-runtime.zip
-
-# === Python 构建缓存 ===
-client/scripts/.cache/
-
-# === 构建信息（自动生成）===
-client/backend/python/build_info.json
-
-# === 本地缓存（不入库）===
+# === 构建缓存 ===
 .cache/
+.temp-*
+
+# === 打包资源中的二进制（构建时从 .cache 复制）===
+tool/resources/winsw/*.exe
+tool/resources/python-runtime.zip
+
+# === 构建信息（自动生成，不入库）===
+tool/backend/python/agent/data/
+
+# === Go 编译产物 ===
+go-backend/ai-os-server
+go-backend/aios-server
+go-backend/*.exe
+*.test
 
 # === IDE ===
 .vscode/
@@ -41,16 +46,5 @@ Desktop.ini
 *.log
 *.tmp
 
-# === 打包资源中的二进制（构建时从 .cache 复制）===
-client/resources/winsw/*.exe
-
-# === Go 编译产物 ===
-go-backend/ai-os-server
-go-backend/ai-os-server.exe
-*.test
-
 # === 已废弃的旧代码备份 ===
 _python_backup/
-client/_python_backup/
-client/backend/
-client/go-backend/

@@ -192,20 +192,32 @@ onBeforeUnmount(() => {
                 <line x1="8" y1="11" x2="14" y2="11" />
               </svg>
             </div>
-            <span class="nav-text">知识库</span>
+            <span class="nav-text">信息沉淀</span>
             <svg class="nav-arrow" :class="{ expanded: ragExpanded }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="6 9 12 15 18 9" />
             </svg>
           </div>
           <transition name="sub-slide">
             <div v-show="ragExpanded" class="nav-sub">
-              <router-link to="/rag/config" class="nav-sub-item" active-class="active">
-                <span class="sub-dot"></span>
-                环境配置
-              </router-link>
               <router-link to="/rag/knowledge" class="nav-sub-item" active-class="active">
                 <span class="sub-dot"></span>
-                知识浏览
+                知识库
+              </router-link>
+              <router-link to="/rag/daily-report" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                工作日报
+              </router-link>
+              <router-link to="/llm/stats" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                统计仪表
+              </router-link>
+              <router-link to="/llm/log" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                对话记录
+              </router-link>
+              <router-link to="/llm/ai-advice" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                建议
               </router-link>
             </div>
           </transition>
@@ -235,25 +247,13 @@ onBeforeUnmount(() => {
                 <span class="sub-dot"></span>
                 策略编辑
               </router-link>
-              <router-link to="/llm/stats" class="nav-sub-item" active-class="active">
-                <span class="sub-dot"></span>
-                统计仪表
-              </router-link>
               <router-link to="/llm/god-rules" class="nav-sub-item" active-class="active">
                 <span class="sub-dot"></span>
                 上帝指令
               </router-link>
-              <router-link to="/llm/log" class="nav-sub-item" active-class="active">
-                <span class="sub-dot"></span>
-                对话记录
-              </router-link>
               <router-link to="/llm/quota" class="nav-sub-item" active-class="active">
                 <span class="sub-dot"></span>
                 用量统计
-              </router-link>
-              <router-link to="/llm/ai-advice" class="nav-sub-item" active-class="active">
-                <span class="sub-dot"></span>
-                AI 建议
               </router-link>
             </div>
           </transition>

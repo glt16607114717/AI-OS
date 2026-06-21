@@ -111,7 +111,7 @@ func InjectGodRules(messages []map[string]interface{}) []map[string]interface{} 
 	for i, msg := range messages {
 		role, _ := msg["role"].(string)
 		if role == "system" && !injected {
-			original, _ := msg["content"].(string)
+			original := StringifyContent(msg["content"])
 			result[i] = map[string]interface{}{
 				"role":    "system",
 				"content": inject + "\n\n---\n\n" + original,
@@ -133,4 +133,26 @@ func IsOptimizeEnabled() bool {
 	godRulesLock.RLock()
 	defer godRulesLock.RUnlock()
 	return godRulesConfig.PromptOptimize
+}
+
+// StringifyContent 兼容 string 和 []interface{} 格式的 content，统一转成 string
+// 用于上帝指令/RAG 注入时避免直接断言 content.(string) 丢掉数组格式的数据
+func StringifyContent(content interface{}) string {
+	if s, ok := content.(string); ok {
+		return s
+	}
+	if arr, ok := content.([]interface{}); ok {
+		var sb strings.Builder
+		for _, item := range arr {
+			if m, ok := item.(map[string]interface{}); ok {
+				if t, _ := m["type"].(string); t == "text" {
+					if text, _ := m["text"].(string); text != "" {
+						sb.WriteString(text)
+					}
+				}
+			}
+		}
+		return sb.String()
+	}
+	return ""
 }

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"ai-os-server/middleware"
+	"ai-os-server/model"
 	"ai-os-server/service"
 	"encoding/json"
 	"fmt"
@@ -35,6 +36,7 @@ type ConversationContext struct {
 	Source           string // proxy / workspace
 	IsAdmin          bool   // 是否管理员
 	IsStream         bool   // 原始请求是否流式
+	SSEHeaderWritten bool   // SSE 响应头是否已写入（防止重复 WriteHeader）
 	StartTime        time.Time
 }
 
@@ -67,63 +69,88 @@ func (c *ConversationContext) SummarizeAndLog() {
 }
 
 // ProxyChatCompletions LLM 代理转发入口（供 TRAE 等 OpenAI 兼容客户端调用）
+// 纯透传：不注入服务端技能，客户端工具原样转发，不解析响应体
 func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
-	handleChat(w, r, "proxy")
-}
-
-// WorkspaceChat 工作台聊天入口
-func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
-	handleChat(w, r, "workspace")
-}
-
-// handleChat 统一入口：预处理 + 分发
-func handleChat(w http.ResponseWriter, r *http.Request, source string) {
 	startTime := time.Now()
 	session := middleware.GetSessionFromCtx(r)
-	userID := 0
-	username := "anonymous"
-	if session != nil {
-		userID = session.UserID
-		username = session.Username
-	}
+	userID, username := sessionUser(session)
+	isAdmin := session != nil && session.IsAdmin
 
 	// 解析请求
-	var req map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		errResponse(w, "请求体解析失败", 400)
+	req, ok := parseRequestBody(w, r)
+	if !ok {
 		return
 	}
 
-	// 提取用户消息（兼容 string 和数组格式）
-	userMsgSummary := ""
-	userMsgRaw := ""
-	if messages, ok := req["messages"].([]interface{}); ok {
-		for _, m := range messages {
-			if msg, ok := m.(map[string]interface{}); ok {
-				if role, _ := msg["role"].(string); role == "user" {
-					userMsgRaw = extractContent(msg["content"])
-					userMsgSummary = userMsgRaw
-				}
-			}
-		}
-	}
-	if len(userMsgSummary) > 200 {
-		userMsgSummary = userMsgSummary[:200]
+	// 提取用户消息
+	userMsgRaw, userMsgSummary := extractLastUserMessage(req)
+	if cleanedMsg := extractUserQuery(userMsgRaw); cleanedMsg != "" {
+		service.AddChatMessage("user", cleanedMsg)
 	}
 
-	// 注入上帝指令 + RAG 知识库
-	if messages, ok := req["messages"].([]interface{}); ok {
-		msgMaps := make([]map[string]interface{}, len(messages))
-		for i, m := range messages {
-			msgMaps[i], _ = m.(map[string]interface{})
-		}
-		msgMaps = service.InjectGodRules(msgMaps)
-		msgMaps = injectRAGContext(msgMaps, extractUserQuery(userMsgRaw), userID)
-		req["messages"] = msgMaps
+	// 注入上帝指令 + RAG
+	injectGodRulesAndRAG(req, userMsgRaw, userID)
+
+	// 流式判断
+	isStream := false
+	if s, ok := req["stream"].(bool); ok && s {
+		isStream = true
 	}
 
-	// 注入技能工具
+	convCtx := &ConversationContext{
+		UserID: userID, Username: username, UserMessage: userMsgSummary,
+		Source: "proxy", IsAdmin: isAdmin, IsStream: isStream, StartTime: startTime,
+	}
+
+	// 路由（代理专属：含额度降级）
+	route := service.GetRouteByStrategy(userID)
+	if route == nil {
+		route = service.GetDefaultRoute()
+	}
+	if route == nil {
+		convCtx.Errors = append(convCtx.Errors, "无可用厂商")
+		convCtx.SummarizeAndLog()
+		errResponse(w, "请先配置 API Key 和模型", 400)
+		return
+	}
+	req["model"] = route.ModelID
+
+	// 额度降级（仅代理）
+	if downgraded := service.ShouldDowngradeModel(route.KeyID, route.ModelID); downgraded != route.ModelID {
+		req["model"] = downgraded
+	}
+
+	service.DumpRequest(req)
+	attempts := buildFailoverAttempts(route, userID)
+
+	log.Printf("[proxy] user=%s stream=%v model=%s", username, isStream, req["model"])
+	proxyForward(w, req, attempts, convCtx)
+}
+
+// WorkspaceChat 工作台聊天入口
+// 技能注入 + agent 循环：注入服务端技能，多轮 tool_calls 循环
+func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
+	session := middleware.GetSessionFromCtx(r)
+	userID, username := sessionUser(session)
 	isAdmin := session != nil && session.IsAdmin
+
+	// 解析请求
+	req, ok := parseRequestBody(w, r)
+	if !ok {
+		return
+	}
+
+	// 提取用户消息
+	userMsgRaw, userMsgSummary := extractLastUserMessage(req)
+	if cleanedMsg := extractUserQuery(userMsgRaw); cleanedMsg != "" {
+		service.AddChatMessage("user", cleanedMsg)
+	}
+
+	// 注入上帝指令 + RAG
+	injectGodRulesAndRAG(req, userMsgRaw, userID)
+
+	// 注入服务端技能（工作台专属）
 	tools, _ := service.GetBuiltinSkillToolDefinitions(userID, isAdmin)
 	if len(tools) > 0 {
 		req["tools"] = tools
@@ -136,49 +163,100 @@ func handleChat(w http.ResponseWriter, r *http.Request, source string) {
 	}
 
 	convCtx := &ConversationContext{
-		UserID:      userID,
-		Username:    username,
-		UserMessage: userMsgSummary,
-		Source:      source,
-		IsAdmin:     isAdmin,
-		IsStream:    isStream,
-		StartTime:   startTime,
+		UserID: userID, Username: username, UserMessage: userMsgSummary,
+		Source: "workspace", IsAdmin: isAdmin, IsStream: isStream, StartTime: startTime,
 	}
 
-	// 获取路由
+	// 路由（工作台专属：含额度降级）
 	route := service.GetRouteByStrategy(userID)
 	if route == nil {
 		route = service.GetDefaultRoute()
 	}
 	if route == nil {
-		convCtx.Errors = append(convCtx.Errors, "无可用厂商（无策略、无可用选项）")
+		convCtx.Errors = append(convCtx.Errors, "无可用厂商")
 		convCtx.SummarizeAndLog()
 		errResponse(w, "请先配置 API Key 和模型", 400)
 		return
 	}
 	req["model"] = route.ModelID
 
-	// 请求转储
-	service.DumpRequest(req)
-
-	// 额度降级（仅 proxy）
-	if source == "proxy" {
-		downgraded := service.ShouldDowngradeModel(route.KeyID, route.ModelID)
-		if downgraded != route.ModelID {
-			req["model"] = downgraded
-		}
+	// 额度降级
+	if downgraded := service.ShouldDowngradeModel(route.KeyID, route.ModelID); downgraded != route.ModelID {
+		req["model"] = downgraded
 	}
 
-	// 故障转移链
+	service.DumpRequest(req)
 	attempts := buildFailoverAttempts(route, userID)
 
-	// 分发：有技能工具 → Agent 循环；无工具 → 纯透传
 	if len(tools) > 0 {
-		log.Printf("[chat] %s user=%s tools=%d → agent", source, username, len(tools))
+		log.Printf("[workspace] user=%s tools=%d model=%s → agent", username, len(tools), req["model"])
 		agentLoop(w, req, attempts, convCtx)
 	} else {
-		log.Printf("[chat] %s user=%s stream=%v → proxy", source, username, isStream)
+		log.Printf("[workspace] user=%s no_tools model=%s → proxy", username, req["model"])
 		proxyForward(w, req, attempts, convCtx)
+	}
+}
+
+// ── 公共辅助函数（纯函数，无副作用，两个入口共用）──
+
+// sessionUser 从 session 提取 userID 和 username
+func sessionUser(session *model.Session) (int, string) {
+	if session == nil {
+		return 0, "anonymous"
+	}
+	return session.UserID, session.Username
+}
+
+// parseRequestBody 解析请求体
+func parseRequestBody(w http.ResponseWriter, r *http.Request) (map[string]interface{}, bool) {
+	var req map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errResponse(w, "请求体解析失败", 400)
+		return nil, false
+	}
+	return req, true
+}
+
+// extractLastUserMessage 提取最后一条 user 消息的原始内容和摘要
+func extractLastUserMessage(req map[string]interface{}) (string, string) {
+	messages, ok := req["messages"].([]interface{})
+	if !ok {
+		return "", ""
+	}
+	userMsgRaw := ""
+	for _, m := range messages {
+		if msg, ok := m.(map[string]interface{}); ok {
+			if role, _ := msg["role"].(string); role == "user" {
+				userMsgRaw = extractContent(msg["content"])
+			}
+		}
+	}
+	summary := extractUserQuery(userMsgRaw)
+	if len(summary) > 200 {
+		summary = summary[:200]
+	}
+	return userMsgRaw, summary
+}
+
+// injectGodRulesAndRAG 注入上帝指令和 RAG 知识库上下文
+func injectGodRulesAndRAG(req map[string]interface{}, userMsgRaw string, userID int) {
+	messages, ok := req["messages"].([]interface{})
+	if !ok {
+		return
+	}
+	msgMaps := make([]map[string]interface{}, len(messages))
+	for i, m := range messages {
+		msgMaps[i], _ = m.(map[string]interface{})
+	}
+	msgMaps = service.InjectGodRules(msgMaps)
+	msgMaps = injectRAGContext(msgMaps, extractUserQuery(userMsgRaw), userID)
+
+	// 图片识别预处理：检测最后一条 user message 的图片（上传/URL），识别后追加文字描述
+	msgMaps, visionResult := service.ProcessImages(msgMaps)
+	req["messages"] = msgMaps
+
+	if visionResult != nil && visionResult.Modified {
+		log.Printf("[chat] 图片识别 %d 张，已追加文字描述", visionResult.ImageCount)
 	}
 }
 
@@ -225,6 +303,11 @@ func extractContent(content interface{}) string {
 	return ""
 }
 
+// stringifyContent 兼容 string 和 []interface{} 格式的 content，统一转成 string（委托给 service 包）
+func stringifyContent(content interface{}) string {
+	return service.StringifyContent(content)
+}
+
 func keyPrefix8(s string) string {
 	if len(s) > 8 {
 		return s[:8]
@@ -232,27 +315,53 @@ func keyPrefix8(s string) string {
 	return s
 }
 
-// extractUserQuery 过滤 IDE 注入的噪音块，提取干净的用户提问（用于 RAG 检索）
+// extractUserQuery 过滤 IDE 注入的噪音块，提取干净的用户提问
+// 用于 sys_llm_log.detail.user_message 和 sys_chat_history 展示，不影响原始 req 留存
 func extractUserQuery(raw string) string {
 	if raw == "" {
 		return ""
 	}
 
-	// 去除各类 IDE 注入的 XML 标签块
-	patterns := []string{
+	// 1. 优先提取 <user_input> 标签内的真实用户消息
+	//    先尝试成对闭合标签；匹配不到再尝试「只有开标签」取其后内容（防 IDE 切分导致闭标签丢失）
+	cleaned := raw
+	pairRe := regexp.MustCompile(`(?s)<user_input>(.*?)</user_input>`)
+	if match := pairRe.FindStringSubmatch(raw); len(match) > 1 {
+		cleaned = match[1]
+	} else if idx := strings.Index(raw, "<user_input>"); idx >= 0 {
+		cleaned = raw[idx+len("<user_input>"):]
+	}
+
+	// 2. 去除成对的 IDE 注入 XML 噪音块
+	pairNoise := []string{
 		`(?s)<system-reminder>.*?</system-reminder>`,
 		`(?s)<environment>.*?</environment>`,
 		`(?s)<trae_rules_context>.*?</trae_rules_context>`,
 		`(?s)<available_skills>.*?</available_skills>`,
 		`(?s)<rules>.*?</rules>`,
 	}
-	cleaned := raw
-	for _, p := range patterns {
-		re := regexp.MustCompile(p)
-		cleaned = re.ReplaceAllString(cleaned, "")
+	for _, p := range pairNoise {
+		cleaned = regexp.MustCompile(p).ReplaceAllString(cleaned, "")
 	}
 
-	// 清理多余空行和首尾空白
+	// 3. 清除所有孤立的 XML 标签残片（开标签 + 闭标签都干掉，防跨 text 段拼接导致标签残缺）
+	orphanTags := []string{
+		`</?system-reminder>`,
+		`</?user_input>`,
+		`</?environment>`,
+		`</?trae_rules_context>`,
+		`</?available_skills>`,
+		`</?rules>`,
+		`</?available_terminal>`,
+		`</?tool_calls?>`,
+		`</?toolcall_status>`,
+		`</?toolcall_result>`,
+	}
+	for _, p := range orphanTags {
+		cleaned = regexp.MustCompile(p).ReplaceAllString(cleaned, "")
+	}
+
+	// 4. 清理多余空行和首尾空白
 	cleaned = strings.TrimSpace(cleaned)
 	for strings.Contains(cleaned, "\n\n\n") {
 		cleaned = strings.ReplaceAll(cleaned, "\n\n\n", "\n\n")
@@ -298,7 +407,7 @@ func injectRAGContext(messages []map[string]interface{}, userMsg string, userID 
 	for i, msg := range messages {
 		role, _ := msg["role"].(string)
 		if role == "system" && !injected {
-			original, _ := msg["content"].(string)
+			original := stringifyContent(msg["content"])
 			result[i] = map[string]interface{}{
 				"role":    "system",
 				"content": ragCtx + "\n\n---\n\n" + original,

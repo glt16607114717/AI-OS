@@ -9,6 +9,7 @@ import {
   Aim,
   Download,
   Document,
+  Refresh,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
@@ -187,7 +188,8 @@ async function startCalibration(i: number) {
         if (pos && (pos[0] !== 0 || pos[1] !== 0)) {
           const position = { x: pos[0], y: pos[1] }
           commands.value[i].position = position
-          await updateCommand(i, { position })
+          commands.value[i].actions = null  // 标定与录制互斥
+          await updateCommand(i, { position, actions: null })
           ElMessage.success(`标定成功：(${position.x}, ${position.y})`)
         } else {
           ElMessage.error('标定失败：未获取到有效坐标')
@@ -272,23 +274,81 @@ async function stopRecording() {
   }
 
   if (result?.ok && result.actions) {
-    await updateCommand(idx, { actions: result.actions })
+    commands.value[idx].actions = result.actions
+    commands.value[idx].position = null  // 录制与标定互斥
+    await updateCommand(idx, { actions: result.actions, position: null })
     ElMessage.success(`录制完成，共 ${result.actions.length} 步`)
   }
 }
 
-/** 下载语音模型 */
+// 模型下载状态
+const downloading = ref(false)
+const downloadProgress = ref(0)
+const downloadMessage = ref('')
+const downloadError = ref('')
+let downloadPollTimer: ReturnType<typeof setInterval> | null = null
+
+/** 一键下载语音模型（调用后端 modelscope 命令行下载） */
 async function downloadModel() {
+  if (downloading.value) return
+  if (!agentOnline.value) {
+    ElMessage.warning('本地服务未启动')
+    return
+  }
+  downloading.value = true
+  downloadProgress.value = 0
+  downloadMessage.value = '准备下载...'
+  downloadError.value = ''
+
   const result = await safeAgent(() =>
     window.aiOS.agentRequest('voice_download_model', {})
   )
 
-  if (result?.error) {
-    ElMessage.error(result.error)
+  if (!result?.ok) {
+    downloading.value = false
+    ElMessage.error(result?.error || '下载启动失败')
     return
   }
 
-  ElMessage.success('模型下载已开始，请等待几分钟')
+  // 轮询下载进度
+  downloadPollTimer = setInterval(async () => {
+    const status = await safeAgent(() =>
+      window.aiOS.agentRequest('voice_download_status', {})
+    )
+    if (!status) return
+
+    downloadProgress.value = status.progress ?? 0
+    downloadMessage.value = status.message || ''
+
+    // 下载失败
+    if (status.error) {
+      if (downloadPollTimer) { clearInterval(downloadPollTimer); downloadPollTimer = null }
+      downloading.value = false
+      downloadError.value = status.error
+      return
+    }
+
+    // 下载完成
+    if (status.done || status.progress >= 100) {
+      if (downloadPollTimer) { clearInterval(downloadPollTimer); downloadPollTimer = null }
+      downloading.value = false
+      modelReady.value = true
+      downloadProgress.value = 100
+      ElMessage.success('语音模型下载完成')
+      await checkAgent()
+    }
+  }, 1500)
+}
+
+function cancelDownload() {
+  if (downloadPollTimer) { clearInterval(downloadPollTimer); downloadPollTimer = null }
+  downloading.value = false
+  ElMessage.info('已取消进度刷新（后台仍在下载，可稍后点击刷新检测）')
+}
+
+/** 刷新模型状态 */
+async function refreshModelStatus() {
+  await checkAgent()
 }
 
 /** 加载识别日志 */
@@ -359,6 +419,7 @@ onMounted(() => {
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
   if (recordingPollTimer) clearInterval(recordingPollTimer)
+  if (downloadPollTimer) clearInterval(downloadPollTimer)
 })
 </script>
 
@@ -377,35 +438,6 @@ onUnmounted(() => {
         识别日志
       </el-button>
     </div>
-
-    <!-- 识别日志面板 -->
-    <el-collapse-transition>
-      <el-card v-if="showLogPanel" shadow="never" class="log-card">
-        <template #header>
-          <div class="log-header">
-            <span>语音识别日志</span>
-            <el-button size="small" @click="loadRecognizeLogs">刷新</el-button>
-            <el-button size="small" type="danger" plain @click="clearRecognizeLogs">清空</el-button>
-          </div>
-        </template>
-        <div v-if="recognizeLogs.length === 0" class="empty-hint">
-          暂无识别记录
-        </div>
-        <div v-else class="log-list">
-          <div
-            v-for="(log, i) in recognizeLogs.slice().reverse()"
-            :key="i"
-            class="log-item"
-            :class="{ 'log-matched': log.matched }"
-          >
-            <span class="log-time">{{ log.time || '' }}</span>
-            <span class="log-text">"{{ log.text }}"</span>
-            <el-tag v-if="log.matched" type="success" size="small">已匹配</el-tag>
-            <el-tag v-else type="info" size="small">未匹配</el-tag>
-          </div>
-        </div>
-      </el-card>
-    </el-collapse-transition>
 
     <!-- Status Card -->
     <el-card shadow="never" class="status-card">
@@ -470,9 +502,18 @@ onUnmounted(() => {
           type="primary"
           size="small"
           :icon="Download"
+          :loading="downloading"
           @click="downloadModel"
         >
-          下载语音模型
+          {{ downloading ? '下载中...' : '下载模型' }}
+        </el-button>
+        <el-button
+          v-if="agentOnline && !modelReady && !downloading"
+          size="small"
+          :icon="Refresh"
+          @click="refreshModelStatus"
+        >
+          刷新检测
         </el-button>
       </div>
     </el-card>
@@ -594,6 +635,58 @@ onUnmounted(() => {
         </div>
       </div>
     </el-card>
+
+    <!-- 识别日志弹窗 -->
+    <el-dialog
+      v-model="showLogPanel"
+      title="语音识别日志"
+      width="520px"
+      @open="loadRecognizeLogs"
+    >
+      <div v-if="recognizeLogs.length === 0" class="empty-hint">
+        暂无识别记录
+      </div>
+      <div v-else class="log-list">
+        <div
+          v-for="(log, i) in recognizeLogs.slice().reverse()"
+          :key="i"
+          class="log-item"
+          :class="{ 'log-matched': log.matched }"
+        >
+          <span class="log-time">{{ log.time || '' }}</span>
+          <span class="log-text">"{{ log.text }}"</span>
+          <el-tag v-if="log.matched" type="success" size="small">已匹配</el-tag>
+          <el-tag v-else type="info" size="small">未匹配</el-tag>
+        </div>
+      </div>
+      <template #footer>
+        <el-button size="small" @click="loadRecognizeLogs">刷新</el-button>
+        <el-button size="small" type="danger" plain @click="clearRecognizeLogs">清空</el-button>
+        <el-button size="small" type="primary" @click="showLogPanel = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 模型下载遮罩 -->
+    <div v-if="downloading || downloadError" class="download-mask">
+      <div class="download-modal">
+        <div class="download-title">语音模型下载</div>
+        <template v-if="downloadError">
+          <div class="download-error">{{ downloadError }}</div>
+          <el-button type="primary" size="small" @click="downloadError = ''">关闭</el-button>
+        </template>
+        <template v-else>
+          <div class="download-info">正在下载 FunASR 语音识别模型（约 800MB），请勿关闭窗口</div>
+          <div class="download-bar-track">
+            <div class="download-bar-fill" :style="{ width: downloadProgress + '%' }"></div>
+          </div>
+          <div class="download-progress-row">
+            <span class="download-message">{{ downloadMessage }}</span>
+            <span class="download-pct">{{ downloadProgress }}%</span>
+          </div>
+          <el-button size="small" @click="cancelDownload">取消</el-button>
+        </template>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -623,11 +716,7 @@ onUnmounted(() => {
   margin-left: auto;
 }
 
-/* 识别日志面板 */
-.log-card {
-  border-radius: 10px;
-}
-
+/* 识别日志弹窗 */
 .log-header {
   display: flex;
   align-items: center;
@@ -883,5 +972,81 @@ onUnmounted(() => {
 @keyframes recording-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.5; transform: scale(0.8); }
+}
+
+/* 模型下载遮罩 */
+.download-mask {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.download-modal {
+  background: #fff;
+  border-radius: 12px;
+  padding: 28px 32px;
+  width: 420px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+  text-align: center;
+}
+
+.download-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+  margin-bottom: 16px;
+}
+
+.download-info {
+  font-size: 13px;
+  color: #909399;
+  margin-bottom: 18px;
+}
+
+.download-bar-track {
+  height: 8px;
+  background: #ebeef5;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.download-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #6366f1, #8b5cf6);
+  border-radius: 4px;
+  transition: width 0.4s ease;
+}
+
+.download-progress-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  margin-bottom: 18px;
+}
+
+.download-message {
+  color: #909399;
+}
+
+.download-pct {
+  color: #6366f1;
+  font-weight: 600;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+}
+
+.download-error {
+  color: #f56c6c;
+  font-size: 13px;
+  margin-bottom: 16px;
+  word-break: break-all;
 }
 </style>

@@ -23,6 +23,17 @@ type LLMResult struct {
 	Route      *service.RouteInfoType  // 使用的路由
 }
 
+// appendUnique 仅当切片中不存在 v 时才追加，保证 Models / KeyNames 唯一
+// （agent 多轮循环中主路由不变，避免同一 key/model 被重复记录）
+func appendUnique(s []string, v string) []string {
+	for _, x := range s {
+		if x == v {
+			return s
+		}
+	}
+	return append(s, v)
+}
+
 // callLLMWithFailover 用故障转移链请求 LLM
 // stream: 是否流式请求上游
 // tools: 工具定义（可为 nil）
@@ -44,8 +55,8 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 			source = "故障转移"
 			convCtx.FailoverCount++
 		}
-		convCtx.Models = append(convCtx.Models, route.ModelID)
-		convCtx.KeyNames = append(convCtx.KeyNames, route.KeyName)
+		convCtx.Models = appendUnique(convCtx.Models, route.ModelID)
+		convCtx.KeyNames = appendUnique(convCtx.KeyNames, route.KeyName)
 
 		// 构造请求
 		llmReq := map[string]interface{}{
@@ -222,10 +233,34 @@ func streamContentAsSSE(w http.ResponseWriter, content string) {
 	}
 }
 
+// streamProgressAsSSE 把中间进度信息（如 SQL trace、工具调用提示）作为 SSE 帧推送
+// 用于 agent 多轮工具调用时实时向客户端展示执行过程
+// SSE 头必须先由调用方 writeSSEHeaders 写入
+func streamProgressAsSSE(w http.ResponseWriter, content string) {
+	chunk := map[string]interface{}{
+		"object": "chat.completion.chunk",
+		"choices": []interface{}{map[string]interface{}{
+			"index": 0,
+			"delta": map[string]interface{}{
+				"content": content,
+			},
+		}},
+	}
+	chunkJSON, _ := json.Marshal(chunk)
+	fmt.Fprintf(w, "data: %s\n\n", string(chunkJSON))
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 // outputContent 按客户端期望格式输出最终答案
 func outputContent(w http.ResponseWriter, content string, modelID string, convCtx *ConversationContext) {
 	if convCtx.IsStream {
-		writeSSEHeaders(w)
+		// 防止重复写 SSE 头（agent 循环中可能已写过）
+		if !convCtx.SSEHeaderWritten {
+			writeSSEHeaders(w)
+			convCtx.SSEHeaderWritten = true
+		}
 		streamContentAsSSE(w, content)
 	} else {
 		response := map[string]interface{}{

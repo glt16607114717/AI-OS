@@ -37,23 +37,26 @@ func main() {
 
 	// 确保技能表存在
 	service.EnsureBuiltinSkillTables()
+	service.EnsureSuggestionTable()
+	service.EnsureDistillTable()
+	service.EnsureChatTable()
 
 	// 启动额度监控
 	service.StartQuotaMonitor()
 	log.Println("[init] 额度监控已启动")
 
-	// 启动 AI 建议定时任务
+	// 启动每日知识蒸馏（凌晨3点）
 	c := cron.New()
-	c.AddFunc("0 0 18 * * *", func() {
-		log.Println("[cron] 开始执行 AI 建议分析...")
-		if err := service.RunAIAnalysis(); err != nil {
-			log.Printf("[cron] AI 分析失败: %v", err)
+	c.AddFunc("0 3 * * *", func() {
+		log.Println("[cron] 开始执行每日知识蒸馏...")
+		if err := service.RunDailyDistill(); err != nil {
+			log.Printf("[cron] 蒸馏失败: %v", err)
 		} else {
-			log.Println("[cron] AI 建议分析完成")
+			log.Println("[cron] 每日知识蒸馏完成")
 		}
 	})
 	c.Start()
-	log.Println("[init] 定时任务已启动（每天18:00 AI分析）")
+	log.Println("[init] 定时任务已启动（每天凌晨3:00 蒸馏）")
 
 	// 路由
 	r := chi.NewRouter()
@@ -86,10 +89,11 @@ func main() {
 		r.Get("/api/skills", handler.GetBuiltinSkills)
 		r.Get("/api/skills/{code}/connections", handler.GetSkillConnections)
 
-		// AI 建议
+		// AI 建议 & 蒸馏知识
 		r.Get("/api/ai-advisor/suggestions", handler.GetSuggestions)
-		r.Post("/api/ai-advisor/analyze", handler.RunAIAnalysis)
 		r.Post("/api/ai-advisor/process", handler.MarkSuggestionProcessed)
+		r.Get("/api/ai-advisor/knowledge", handler.GetDistillKnowledge)
+		r.Post("/api/ai-advisor/trigger", handler.TriggerDistill) // 手动触发蒸馏
 
 
 		// RAG 知识库
@@ -100,6 +104,12 @@ func main() {
 		r.Post("/api/rag/test-embed", handler.RagTestEmbed)
 		r.Post("/api/rag/search", handler.RagSearch)
 		r.Delete("/api/rag/delete", handler.RagDelete)
+
+		// 工作日报
+		r.Get("/api/work-diary/list", handler.GetWorkDiaries)
+		r.Get("/api/work-diary/get", handler.GetWorkDiary)
+		r.Post("/api/work-diary/save", handler.SaveWorkDiary)
+		r.Delete("/api/work-diary/delete", handler.DeleteWorkDiary)
 
 		// 统计
 		r.Get("/api/stats/summary", handler.GetStatsSummary)

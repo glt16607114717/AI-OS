@@ -57,14 +57,14 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 	cutoff := time.Now().AddDate(0, 0, -days).Format("2006-01-02 15:04:05")
 
 	// 总览
-	var totalReqs, totalTokens, totalPrompt, totalCompletion, successCount int
+	var totalReqs, totalTokens, totalPrompt, totalCompletion, successCount, errorCount int
 	var avgLatency float64
 	if err := conn.QueryRow(`SELECT COUNT(*),
 		COALESCE(SUM(total_tokens),0), COALESCE(SUM(prompt_tokens),0),
 		COALESCE(SUM(completion_tokens),0), COALESCE(AVG(CASE WHEN success=1 THEN latency_ms END),0),
-		COALESCE(SUM(success),0)
+		COALESCE(SUM(success),0), COALESCE(SUM(CASE WHEN success=0 THEN 1 ELSE 0 END),0)
 		FROM sys_llm_stats WHERE ts >= ?`, cutoff).Scan(
-		&totalReqs, &totalTokens, &totalPrompt, &totalCompletion, &avgLatency, &successCount); err != nil {
+		&totalReqs, &totalTokens, &totalPrompt, &totalCompletion, &avgLatency, &successCount, &errorCount); err != nil {
 		log.Printf("[stat] 查询总览失败: %v", err)
 		return nil, err
 	}
@@ -201,6 +201,7 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 		"total_requests": totalReqs,
 		"total_tokens": totalTokens,
 		"total_prompt_tokens": totalPrompt, "total_completion_tokens": totalCompletion,
+		"total_errors": errorCount,
 		"avg_latency_ms": int(avgLatency), "success_rate": successRate,
 		"by_vendor": byVendor, "by_model": byModel, "daily": daily,
 		"by_user": byUser, "by_key": byKey,

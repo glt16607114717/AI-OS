@@ -1,7 +1,7 @@
 {
   "name": "ai-os-client",
   "version": "1.0.3",
-  "description": "AI-OS Enterprise AI Asset Operating System",
+  "description": "AI-OS 语音助手桌面工具",
   "author": "桂良涛 <桂良涛@nndrobot.com>",
   "main": "dist-electron/main/index.js",
   "scripts": {
@@ -13,12 +13,7 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
-    "@types/chart.js": "^2.9.41",
-    "chart.js": "^4.5.1",
-    "echarts": "^6.1.0",
     "element-plus": "^2.14.1",
-    "highlight.js": "^11.11.1",
-    "marked": "^18.0.5",
     "vue": "^3.5.13",
     "vue-router": "^4.6.4"
   },
@@ -40,7 +35,7 @@
     "nodeGypRebuild": false,
     "buildDependenciesFromSource": false,
     "directories": {
-      "output": "D:/ai-os-build"
+      "output": "dist-build"
     },
     "files": [
       "dist/**/*",

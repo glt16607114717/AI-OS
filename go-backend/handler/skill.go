@@ -88,15 +88,16 @@ func CreateSkillConnection(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Name   string                 `json:"name"`
-		Config map[string]interface{} `json:"config"`
+		Name        string                 `json:"name"`
+		Description string                 `json:"description"`
+		Config      map[string]interface{} `json:"config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		errResponse(w, "请求体解析失败", 400)
 		return
 	}
 
-	if err := service.CreateSkillConnection(skill.ID, body.Name, body.Config); err != nil {
+	if err := service.CreateSkillConnection(skill.ID, body.Name, body.Description, body.Config); err != nil {
 		errResponse(w, err.Error(), 500)
 		return
 	}
@@ -111,15 +112,16 @@ func UpdateSkillConnection(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Name   string                 `json:"name"`
-		Config map[string]interface{} `json:"config"`
+		Name        string                 `json:"name"`
+		Description string                 `json:"description"`
+		Config      map[string]interface{} `json:"config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		errResponse(w, "请求体解析失败", 400)
 		return
 	}
 
-	if err := service.UpdateSkillConnection(connID, body.Name, body.Config); err != nil {
+	if err := service.UpdateSkillConnection(connID, body.Name, body.Description, body.Config); err != nil {
 		errResponse(w, err.Error(), 500)
 		return
 	}

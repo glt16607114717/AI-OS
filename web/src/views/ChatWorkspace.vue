@@ -67,6 +67,7 @@ interface Message {
   id?: number
   role: 'user' | 'assistant' | 'system'
   content: string
+  images?: string[] // base64 格式的图片（仅 user 消息）
   done?: boolean
   toolCalls?: ToolCall[]
   references?: { index: number; source: string; similarity: number; text: string }[]
@@ -75,6 +76,7 @@ interface Message {
 const messages = ref<Message[]>([])
 const input = ref('')
 const loading = ref(false)
+const pendingImages = ref<string[]>([]) // 待发送的图片（base64）
 const chatContainer = ref<HTMLDivElement | null>(null)
 const currentModel = ref('')
 const CACHE_KEY = 'ai-os-chat-messages'
@@ -284,19 +286,121 @@ function getToolDisplayName(name: string): string {
   return map[name] || name
 }
 
+// ── 图片处理 ──
+const MAX_IMAGE_SIZE = 4 * 1024 * 1024 // 4MB 上限
+const fileInput = ref<HTMLInputElement | null>(null)
+
+// 文件转 base64
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+}
+
+// 压缩图片（超过 1MB 时按比例缩放）
+async function compressImage(base64: string): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => {
+      let { width, height } = img
+      const maxDim = 1568 // 智谱推荐的最大边长
+      if (width > maxDim || height > maxDim) {
+        const ratio = maxDim / Math.max(width, height)
+        width = Math.round(width * ratio)
+        height = Math.round(height * ratio)
+      }
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      const ctx = canvas.getContext('2d')!
+      ctx.drawImage(img, 0, 0, width, height)
+      resolve(canvas.toDataURL('image/jpeg', 0.85))
+    }
+    img.onerror = () => resolve(base64) // 压缩失败用原图
+    img.src = base64
+  })
+}
+
+// 处理选择的图片文件
+async function handleImageFiles(files: FileList | File[]) {
+  for (const file of Array.from(files)) {
+    if (!file.type.startsWith('image/')) continue
+    if (file.size > MAX_IMAGE_SIZE) {
+      alert(`图片 ${file.name} 超过 4MB 限制`)
+      continue
+    }
+    let base64 = await fileToBase64(file)
+    base64 = await compressImage(base64)
+    pendingImages.value.push(base64)
+  }
+}
+
+// 点击上传按钮
+function triggerFileInput() {
+  fileInput.value?.click()
+}
+
+// 文件选择回调
+async function onFileChange(e: Event) {
+  const target = e.target as HTMLInputElement
+  if (target.files) await handleImageFiles(target.files)
+  target.value = '' // 清空，允许重复选同一文件
+}
+
+// 粘贴图片
+async function onPaste(e: ClipboardEvent) {
+  if (!e.clipboardData) return
+  const items = e.clipboardData.items
+  for (const item of Array.from(items)) {
+    if (item.type.startsWith('image/')) {
+      const file = item.getAsFile()
+      if (file) await handleImageFiles([file])
+      e.preventDefault()
+    }
+  }
+}
+
+// 拖拽图片
+async function onDrop(e: DragEvent) {
+  e.preventDefault()
+  if (e.dataTransfer?.files) await handleImageFiles(e.dataTransfer.files)
+}
+
+function onDragOver(e: DragEvent) {
+  e.preventDefault()
+}
+
+// 移除待发送图片
+function removeImage(idx: number) {
+  pendingImages.value.splice(idx, 1)
+}
+
+// 点击图片预览（新窗口打开原图）
+function previewImage(src: string) {
+  const w = window.open()
+  if (w) w.document.write(`<img src="${src}" style="max-width:100%" />`)
+}
+
 async function sendMessage() {
   const text = input.value.trim()
-  if (!text || loading.value) return
+  const imgs = [...pendingImages.value]
+  // 有图片或文字都可以发送
+  if ((!text && imgs.length === 0) || loading.value) return
 
   if (!currentModel.value) {
     alert('模型未加载，请先配置策略')
     return
   }
 
-  console.log('[Chat] Sending message:', text)
+  console.log('[Chat] Sending message:', text, `images: ${imgs.length}`)
 
-  messages.value.push({ role: 'user', content: text })
+  // 保存用户消息（带图片）
+  messages.value.push({ role: 'user', content: text, images: imgs.length > 0 ? imgs : undefined })
   input.value = ''
+  pendingImages.value = [] // 清空待发送图片
   loading.value = true
   saveToCache()
   saveMessage('user', text)
@@ -309,16 +413,27 @@ async function sendMessage() {
   abortController = new AbortController()
 
   try {
+    // 构建消息列表：有图片的 user 消息用多模态 content 数组格式
+    const reqMessages = messages.value.slice(0, aiIdx).map(m => {
+      if (m.role === 'user' && m.images && m.images.length > 0) {
+        // 多模态格式：text + image_url 数组
+        const content: any[] = []
+        if (m.content) content.push({ type: 'text', text: m.content })
+        for (const img of m.images) {
+          content.push({ type: 'image_url', image_url: { url: img } })
+        }
+        return { role: m.role, content }
+      }
+      return { role: m.role, content: m.content }
+    })
+
     // 使用独立的工作台接口（不走代理）
     const response = await fetch(`${API_BASE}/api/workspace/chat`, {
       method: 'POST',
       headers: authHeaders(true),
       signal: abortController.signal,
       body: JSON.stringify({
-        messages: messages.value.slice(0, aiIdx).map(m => ({
-          role: m.role,
-          content: m.content
-        })),
+        messages: reqMessages,
         stream: true
       })
     })
@@ -571,6 +686,10 @@ function onMessageDone() {
           </button>
         </div>
         <div class="message-content">
+          <!-- 用户发送的图片 -->
+          <div v-if="msg.role === 'user' && msg.images && msg.images.length" class="user-images">
+            <img v-for="(img, idx) in msg.images" :key="idx" :src="img" class="user-image" @click="previewImage(img)" />
+          </div>
           <!-- 工具调用过程：只显示简洁状态，不暴露底层工具 -->
           <div v-if="msg.toolCalls && msg.toolCalls.length && !msg.done" class="tool-status">
             <div class="thinking-indicator">
@@ -603,25 +722,46 @@ function onMessageDone() {
       </div>
     </div>
 
-    <div class="chat-input-area">
-      <textarea
-        v-model="input"
-        placeholder="输入消息... (Enter 发送，Shift+Enter 换行)"
-        @keydown="handleKeydown"
-        :disabled="loading"
-        rows="5"
-      ></textarea>
-      <button v-if="!loading" class="send-btn" @click="sendMessage" :disabled="!input.trim()">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="22" y1="2" x2="11" y2="13" />
-          <polygon points="22 2 15 22 11 13 2 9 22 2" />
-        </svg>
-      </button>
-      <button v-else class="stop-btn" @click="stopChat">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-          <rect x="6" y="6" width="12" height="12" rx="2" />
-        </svg>
-      </button>
+    <div class="chat-input-area" @drop="onDrop" @dragover="onDragOver">
+      <!-- 隐藏的文件选择 -->
+      <input type="file" ref="fileInput" accept="image/*" multiple style="display:none" @change="onFileChange" />
+      
+      <!-- 待发送图片预览 -->
+      <div v-if="pendingImages.length > 0" class="pending-images">
+        <div v-for="(img, idx) in pendingImages" :key="idx" class="pending-image-item">
+          <img :src="img" />
+          <button class="remove-image-btn" @click="removeImage(idx)" title="移除">&times;</button>
+        </div>
+      </div>
+      
+      <div class="input-actions">
+        <textarea
+          v-model="input"
+          placeholder="输入消息... (Enter 发送，Shift+Enter 换行，可粘贴/拖拽图片)"
+          @keydown="handleKeydown"
+          @paste="onPaste"
+          :disabled="loading"
+          rows="5"
+        ></textarea>
+        <button class="upload-btn" @click="triggerFileInput" :disabled="loading" title="上传图片">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+            <polyline points="21 15 16 10 5 21" />
+          </svg>
+        </button>
+        <button v-if="!loading" class="send-btn" @click="sendMessage" :disabled="!input.trim() && pendingImages.length === 0">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="22" y1="2" x2="11" y2="13" />
+            <polygon points="22 2 15 22 11 13 2 9 22 2" />
+          </svg>
+        </button>
+        <button v-else class="stop-btn" @click="stopChat">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="6" y="6" width="12" height="12" rx="2" />
+          </svg>
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -748,11 +888,121 @@ function onMessageDone() {
 
 .chat-input-area {
   display: flex;
+  flex-direction: column;
   gap: 8px;
   padding-top: 8px;
   padding-bottom: 8px;
   border-top: 1px solid #e5e7eb;
   border-bottom: 1px solid #e5e7eb;
+}
+
+.chat-input-area > .input-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.pending-images {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px 0;
+}
+
+.pending-image-item {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid #e5e7eb;
+}
+
+.pending-image-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.remove-image-btn {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.remove-image-btn:hover {
+  background: rgba(0,0,0,0.8);
+}
+
+/* textarea + 按钮行 */
+.chat-input-area > textarea,
+.chat-input-area > .input-row > textarea {
+  flex: 1;
+}
+
+.upload-btn {
+  width: 36px;
+  height: 36px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  color: #6b7280;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.2s;
+}
+
+.upload-btn:hover:not(:disabled) {
+  border-color: #6366f1;
+  color: #6366f1;
+}
+
+.upload-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 用户消息里的图片 */
+.user-images {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.user-image {
+  max-width: 200px;
+  max-height: 200px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid #e5e7eb;
+  transition: transform 0.2s;
+}
+
+.user-image:hover {
+  transform: scale(1.02);
+}
+
+/* 输入区底部按钮行（textarea + 上传 + 发送） */
+.input-actions {
+  display: flex;
+  gap: 8px;
   align-items: flex-end;
 }
 

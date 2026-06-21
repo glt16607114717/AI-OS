@@ -269,10 +269,14 @@ export class SetupManager {
       await this.installPip()
     }
 
-    this.emit({ stepIndex: this.currentStepIndex, totalSteps: this.totalVisibleSteps, percent: 8, detail: '正在升级 pip...' })
-    await this.execAsync(this.getPythonExe(),
-      ['-m', 'pip', 'install', '--upgrade', 'pip', '-i', PIP_INDEX, '--no-warn-script-location',
-       '--target', path.join(this.pythonDir, 'Lib', 'site-packages')])
+    // 安装基础构建工具（embed Python 缺少 setuptools/wheel，会导致 funasr 等带 pyproject.toml 的包构建失败）
+    const sitePackages = path.join(this.pythonDir, 'Lib', 'site-packages')
+    if (!await this.isPkgInstalled('setuptools') || !await this.isPkgInstalled('wheel')) {
+      this.emit({ stepIndex: this.currentStepIndex, totalSteps: this.totalVisibleSteps, percent: 8, detail: '正在安装基础构建工具...' })
+      await this.execAsync(this.getPythonExe(),
+        ['-m', 'pip', 'install', 'setuptools', 'wheel', '-i', PIP_INDEX, '--no-warn-script-location',
+         '--target', sitePackages])
+    }
 
     const reqFile = path.join(this.appDir, 'resources', 'backend', 'python', 'requirements.txt')
     if (!fs.existsSync(reqFile)) {
@@ -621,8 +625,10 @@ export class SetupManager {
     try {
       const entries = fs.readdirSync(sitePackages)
       return entries.some(e => {
-        const lower = e.toLowerCase().replace(/[-_.]/g, '_')
-        return lower.startsWith(lowerName) || lower.startsWith(lowerName + '-')
+        const lower = e.toLowerCase()
+        // 精确匹配：包目录名（如 torch）或 dist-info（如 torch-2.5.1.dist-info）
+        return lower === lowerName ||
+          (lower.startsWith(lowerName + '-') && lower.endsWith('.dist-info'))
       })
     } catch { return false }
   }

@@ -61,6 +61,7 @@ interface Stats {
   total_tokens: number
   total_prompt_tokens: number
   total_completion_tokens: number
+  total_errors: number
   avg_latency_ms: number
   success_rate: number
   by_vendor: Record<string, VendorStat>
@@ -421,6 +422,8 @@ onUnmounted(() => {
           <div class="card-label">总请求数</div>
         </div>
         <div class="overview-card">
+          <div class="card-value">{{ formatNumber(stats.total_errors) }}</div>
+          <div class="card-label">总错误数</div>
         </div>
         <div class="overview-card">
           <div class="card-value">{{ formatNumber(stats.total_tokens) }}</div>

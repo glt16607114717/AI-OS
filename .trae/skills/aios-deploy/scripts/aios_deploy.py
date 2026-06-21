@@ -33,8 +33,18 @@ def run(cmd, cwd=None, check=True, shell=False):
     return result
 
 
-# SSH 公共参数：重试 + 保活，对抗丢包
+# SSH 公共参数：重试 + 保活 + 指定端口 443，对抗丢包
+SSH_PORT = "443"
 SSH_OPTS = [
+    "-p", SSH_PORT,
+    "-o", "ConnectTimeout=30",
+    "-o", "ServerAliveInterval=10",
+    "-o", "ServerAliveCountMax=6",
+    "-o", "ConnectionAttempts=5",
+]
+# SCP 用大写 -P 指定端口
+SCP_OPTS = [
+    "-P", SSH_PORT,
     "-o", "ConnectTimeout=30",
     "-o", "ServerAliveInterval=10",
     "-o", "ServerAliveCountMax=6",
@@ -54,7 +64,7 @@ def scp_upload(local, remote, max_retries=5):
     """SCP 上传文件（自动重试，对抗丢包）"""
     for attempt in range(1, max_retries + 1):
         result = run(
-            ["scp"] + SSH_OPTS + [local, f"{SERVER_USER}@{SERVER_HOST}:{remote}"],
+            ["scp"] + SCP_OPTS + [local, f"{SERVER_USER}@{SERVER_HOST}:{remote}"],
             check=False,
         )
         if result.returncode == 0:
