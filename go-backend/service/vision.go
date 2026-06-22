@@ -3,13 +3,12 @@ package service
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"regexp"
 	"strings"
-	"time"
 )
 
 // VisionResult 图片识别结果
@@ -20,9 +19,6 @@ type VisionResult struct {
 }
 
 var (
-	// 图片 URL 正则（http/https 链接，以常见图片扩展名结尾，可带查询参数）
-	imageURLRegex = regexp.MustCompile(`(?i)https?://[^\s"'<>)\\]+\.(?:png|jpg|jpeg|gif|webp|bmp)(?:\?[^\s"'<>)\\]*)?`)
-
 	// 智谱视觉模型（GLM-4.6V 视觉推理专用套餐）
 	visionModelID = "glm-4.6v"
 	visionAPIURL  = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
@@ -76,14 +72,13 @@ func StripImageContent(messages []map[string]interface{}) {
 	}
 }
 
-// ProcessImages 检测并处理 messages 中的图片
+// ProcessImages 处理 messages 中上传的图片（image_url）
 // 规则：
 //   - 只扫描最后一条 user message
-//   - 支持 content 数组中的 image_url（本地上传）
-//   - 支持 text 中的图片 URL（网络图片）
-//   - 同一请求内同 URL 只识别一次
+//   - 只处理 content 数组中的 image_url（正经上传的图片）
+//   - 不扫描文本中的图片 URL（已改由前端接口处理）
 //   - 识别结果作为文字追加到 user message 末尾
-func ProcessImages(messages []map[string]interface{}) ([]map[string]interface{}, *VisionResult) {
+func ProcessImages(messages []map[string]interface{}, userID int, username string) ([]map[string]interface{}, *VisionResult) {
 	if len(messages) == 0 {
 		return messages, &VisionResult{}
 	}
@@ -105,82 +100,56 @@ func ProcessImages(messages []map[string]interface{}) ([]map[string]interface{},
 	var descriptions []string      // 图片描述列表
 	imageCount := 0
 
-	// 处理两种 content 格式
-	switch content := lastMsg["content"].(type) {
-	case string:
-		// 字符串格式：正则匹配图片 URL
-		urls := imageURLRegex.FindAllString(content, -1)
-		for _, url := range urls {
-			if processed[url] {
-				continue
+	// 只处理数组格式的 content（多模态上传）
+	content, ok := lastMsg["content"].([]interface{})
+	if !ok {
+		return messages, &VisionResult{}
+	}
+
+	// 遍历 content，处理 image_url 项，其他项原样保留
+	newContent := make([]interface{}, 0, len(content))
+	for _, item := range content {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			newContent = append(newContent, item)
+			continue
+		}
+		t, _ := m["type"].(string)
+
+		if t == "image_url" {
+			// image_url 项：尝试识别，但不保留原项（避免下游纯文本模型报错）
+			imgURL, _ := m["image_url"].(map[string]interface{})
+			if imgURL == nil {
+				continue // 无效的 image_url，直接丢弃
+			}
+			url, _ := imgURL["url"].(string)
+			if url == "" || processed[url] {
+				continue // 空 URL 或已处理，丢弃
 			}
 			processed[url] = true
-			desc := RecognizeImage(url, "")
-			if desc != "" {
+			desc, err := RecognizeImage(userID, username, url, "")
+			imageSize := len(url)
+			if err != nil {
+				LogVisionRecognize(userID, username, url, imageSize, "", "", visionModelID, false, err.Error())
+				imageCount++
+				descriptions = append(descriptions, fmt.Sprintf("[图片 %d：识别失败]", imageCount))
+			} else if desc != "" {
+				LogVisionRecognize(userID, username, url, imageSize, "", desc, visionModelID, true, "")
 				imageCount++
 				descriptions = append(descriptions, fmt.Sprintf("[图片 %d 内容：%s]", imageCount, desc))
+			} else {
+				LogVisionRecognize(userID, username, url, imageSize, "", "", visionModelID, false, "返回空结果")
+				imageCount++
+				descriptions = append(descriptions, fmt.Sprintf("[图片 %d：识别失败]", imageCount))
 			}
+			// 不把原 item 加回 newContent → 等效删除 image_url 项
+			continue
 		}
 
-	case []interface{}:
-		// 数组格式（多模态）：处理 image_url 项 + 扫描 text 项里的 URL
-		// 关键：无论识别成功还是失败，都要把 image_url 项从 content 里移除
-		// 否则下游 chat 模型（如 deepseek）会因为不支持图片输入而报 400
-		newContent := make([]interface{}, 0, len(content))
-		for _, item := range content {
-			m, ok := item.(map[string]interface{})
-			if !ok {
-				newContent = append(newContent, item)
-				continue
-			}
-			t, _ := m["type"].(string)
-
-			if t == "image_url" {
-				// image_url 项：尝试识别，但不保留原项（避免下游报错）
-				imgURL, _ := m["image_url"].(map[string]interface{})
-				if imgURL == nil {
-					continue // 无效的 image_url，直接丢弃
-				}
-				url, _ := imgURL["url"].(string)
-				if url == "" || processed[url] {
-					continue // 空 URL 或已处理，丢弃
-				}
-				processed[url] = true
-				desc := RecognizeImage(url, "")
-				if desc != "" {
-					imageCount++
-					descriptions = append(descriptions, fmt.Sprintf("[图片 %d 内容：%s]", imageCount, desc))
-				} else {
-					// 识别失败：追加占位提示，不丢弃图片这个事实
-					imageCount++
-					descriptions = append(descriptions, fmt.Sprintf("[图片 %d：识别失败]", imageCount))
-				}
-				// 不把原 item 加回 newContent → 等效删除 image_url 项
-				continue
-			}
-
-			if t == "text" {
-				// text 项：扫描里面的图片 URL，但保留原 text（URL 作为文字是无害的）
-				text, _ := m["text"].(string)
-				urls := imageURLRegex.FindAllString(text, -1)
-				for _, url := range urls {
-					if processed[url] {
-						continue
-					}
-					processed[url] = true
-					desc := RecognizeImage(url, "")
-					if desc != "" {
-						imageCount++
-						descriptions = append(descriptions, fmt.Sprintf("[图片 %d 内容：%s]", imageCount, desc))
-					}
-				}
-			}
-
-			newContent = append(newContent, item)
-		}
-		// 替换为清理后的 content（image_url 已移除）
-		lastMsg["content"] = newContent
+		newContent = append(newContent, item)
 	}
+	// 替换为清理后的 content（image_url 已移除）
+	lastMsg["content"] = newContent
 
 	if imageCount == 0 {
 		return messages, &VisionResult{ImageCount: 0, Modified: false}
@@ -188,12 +157,11 @@ func ProcessImages(messages []map[string]interface{}) ([]map[string]interface{},
 
 	// 把图片描述追加到最后一条 user message
 	appendText := "\n\n" + strings.Join(descriptions, "\n")
-	switch content := lastMsg["content"].(type) {
+	switch c := lastMsg["content"].(type) {
 	case string:
-		lastMsg["content"] = content + appendText
+		lastMsg["content"] = c + appendText
 	case []interface{}:
-		// 数组格式：追加一个 text 项
-		lastMsg["content"] = append(content, map[string]interface{}{
+		lastMsg["content"] = append(c, map[string]interface{}{
 			"type": "text",
 			"text": appendText,
 		})
@@ -209,11 +177,12 @@ func ProcessImages(messages []map[string]interface{}) ([]map[string]interface{},
 
 // RecognizeImage 调用智谱 GLM-4V-Plus 识别图片（导出供 handler 调用）
 // imageURL 可以是 http(s):// 链接或 data:image/...;base64,... 格式
-func RecognizeImage(imageURL, prompt string) string {
+// RecognizeImage 调用智谱视觉模型识别图片，并记录日志
+func RecognizeImage(userID int, username, imageURL, prompt string) (string, error) {
 	apiKey := getZhipuAPIKey()
 	if apiKey == "" {
 		log.Println("[vision] 未找到智谱 API Key，跳过图片识别")
-		return ""
+		return "", fmt.Errorf("未找到智谱 API Key")
 	}
 
 	if prompt == "" {
@@ -237,28 +206,29 @@ func RecognizeImage(imageURL, prompt string) string {
 
 	bodyJSON, err := json.Marshal(reqBody)
 	if err != nil {
-		log.Printf("[vision] 请求序列化失败: %v", err)
-		return ""
+		errMsg := fmt.Sprintf("请求序列化失败: %v", err)
+		log.Printf("[vision] %s", errMsg)
+		return "", errors.New(errMsg)
 	}
 
 	req, err := http.NewRequest("POST", visionAPIURL, bytes.NewReader(bodyJSON))
 	if err != nil {
-		return ""
+		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := SharedHTTPClientLong.Do(req)
 	if err != nil {
-		log.Printf("[vision] 调用智谱视觉模型失败: %v", err)
-		return ""
+		errMsg := fmt.Sprintf("调用智谱视觉模型失败: %v", err)
+		log.Printf("[vision] %s", errMsg)
+		return "", errors.New(errMsg)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return ""
+		return "", err
 	}
 
 	if resp.StatusCode != 200 {
@@ -266,8 +236,9 @@ func RecognizeImage(imageURL, prompt string) string {
 		if len(body) < previewLen {
 			previewLen = len(body)
 		}
-		log.Printf("[vision] 智谱视觉模型返回 %d: %s", resp.StatusCode, string(body[:previewLen]))
-		return ""
+		errMsg := fmt.Sprintf("智谱视觉模型返回 %d: %s", resp.StatusCode, string(body[:previewLen]))
+		log.Printf("[vision] %s", errMsg)
+		return "", errors.New(errMsg)
 	}
 
 	var result struct {
@@ -278,14 +249,14 @@ func RecognizeImage(imageURL, prompt string) string {
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return ""
+		return "", err
 	}
 	if len(result.Choices) == 0 {
-		return ""
+		return "", errors.New("返回无结果")
 	}
 
 	desc := strings.TrimSpace(result.Choices[0].Message.Content)
-	return desc
+	return desc, nil
 }
 
 // LogVisionRecognize 写入视觉识别日志

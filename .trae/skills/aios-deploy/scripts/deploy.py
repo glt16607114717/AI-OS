@@ -9,7 +9,7 @@ SSH = ['ssh', '-p', '443', '-o', 'StrictHostKeyChecking=no', 'root@8.163.127.182
 SCP = ['scp', '-P', '443', '-o', 'StrictHostKeyChecking=no']
 DEPLOY_PORT = '18731'
 REMOTE_PATH = '/opt/ai-os/aios-server'
-SERVICE_NAME = 'aios-server'  # systemd 服务名
+SERVICE_NAME = 'ai-os'  # systemd 服务名（与服务器 /etc/systemd/system/ai-os.service 一致）
 
 
 def run(args, timeout=120):
@@ -24,14 +24,12 @@ def ssh(cmd, timeout=60):
 
 
 def stop_service():
-    """停止服务并强制释放端口"""
+    """停止服务（纯 systemctl，不杀进程）"""
     print("\n2. 停止服务...")
-    # mask 阻止 Restart=always 自动拉起，避免上传期间旧进程抢占端口
-    ssh(f'systemctl mask {SERVICE_NAME}')
     ssh(f'systemctl stop {SERVICE_NAME}')
     ssh('sleep 1')
-    # 强制杀掉占用端口的残留进程
-    rc, out, _ = ssh(f"fuser -k {DEPLOY_PORT}/tcp 2>/dev/null; sleep 1; ss -tlnp | grep {DEPLOY_PORT} || echo PORT_FREE")
+    # 仅检查端口是否释放，不强制杀进程
+    rc, out, _ = ssh(f"ss -tlnp | grep {DEPLOY_PORT} || echo PORT_FREE")
     if 'PORT_FREE' in out:
         print("   端口已释放")
     else:
@@ -42,7 +40,7 @@ def start_service():
     """启动服务并验证"""
     print("4. 启动服务...")
     rc, out, err = ssh(
-        f'systemctl unmask {SERVICE_NAME} && chmod +x {REMOTE_PATH} && systemctl start {SERVICE_NAME} && sleep 3 && '
+        f'chmod +x {REMOTE_PATH} && systemctl start {SERVICE_NAME} && sleep 3 && '
         f'systemctl is-active {SERVICE_NAME} && ss -tlnp | grep {DEPLOY_PORT}',
         timeout=30
     )

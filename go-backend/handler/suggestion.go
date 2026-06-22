@@ -81,7 +81,7 @@ func TriggerDistill(w http.ResponseWriter, r *http.Request) {
 	}
 	today := time.Now().Format("2006-01-02")
 	go func() {
-		if err := service.RunDistillForDate(userID, username, today); err != nil {
+		if err := service.RunDistillForDateWithTrigger(userID, username, today, "manual"); err != nil {
 			log.Printf("[distill] 手动触发失败 user=%d date=%s: %v", userID, today, err)
 		} else {
 			log.Printf("[distill] 手动触发成功 user=%d date=%s", userID, today)
@@ -91,4 +91,27 @@ func TriggerDistill(w http.ResponseWriter, r *http.Request) {
 		"message": "蒸馏任务已触发，将在后台执行",
 		"date":    today,
 	})
+}
+
+// GetDistillLogs 获取蒸馏日志
+func GetDistillLogs(w http.ResponseWriter, r *http.Request) {
+	userID := 0
+	isAdmin := false
+	if session := middleware.GetSessionFromCtx(r); session != nil {
+		userID = session.UserID
+		isAdmin = session.IsAdmin
+	}
+	date := r.URL.Query().Get("date")
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil {
+			limit = v
+		}
+	}
+	logs, err := service.GetDistillLogs(userID, isAdmin, date, limit)
+	if err != nil {
+		errResponse(w, err.Error(), 500)
+		return
+	}
+	okResponse(w, logs)
 }

@@ -6,6 +6,7 @@ AI-OS 看门狗脚本
 import subprocess
 import os
 import sys
+import time
 import urllib.request
 import urllib.error
 
@@ -40,6 +41,37 @@ def is_agent_running():
             return resp.status == 200
     except Exception:
         return False
+
+
+def kill_zombie_agent():
+    """杀掉占用 18732 端口的僵尸进程。
+
+    场景：agent 事件循环卡死导致 /health 不通，但进程仍占着端口。
+    不杀掉的话新实例无法 bind，会永远卡死。
+    返回被杀掉的 PID 列表。
+    """
+    try:
+        result = subprocess.run(
+            ["netstat", "-ano", "-p", "tcp"],
+            capture_output=True, text=True, timeout=5,
+            creationflags=NO_WINDOW,
+        )
+        killed = []
+        for line in result.stdout.splitlines():
+            if ":18732" in line and "LISTENING" in line.upper():
+                parts = line.split()
+                if len(parts) >= 5:
+                    pid = parts[-1]
+                    if pid.isdigit() and int(pid) != os.getpid():
+                        subprocess.run(
+                            ["taskkill", "/F", "/PID", pid],
+                            capture_output=True, timeout=5,
+                            creationflags=NO_WINDOW,
+                        )
+                        killed.append(pid)
+        return killed
+    except Exception:
+        return []
 
 def start_agent(python_dir, main_script):
     """启动 main.py"""
@@ -86,6 +118,15 @@ def main():
         pass
 
     if not running:
+        # 端口可能被僵尸进程占用（事件循环卡死但进程没退出），先清理再启动
+        killed = kill_zombie_agent()
+        if killed:
+            try:
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(f"  killed zombie pids: {killed}\n")
+            except Exception:
+                pass
+            time.sleep(2)  # 等待端口释放
         start_agent(python_dir, main_script)
         try:
             with open(log_file, "a", encoding="utf-8") as f:

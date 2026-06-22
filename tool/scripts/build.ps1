@@ -1,6 +1,7 @@
 # AI-OS Build Script
 $ErrorActionPreference = "Continue"
-$projectDir = "D:\wwwroot\AI\AI-OS\tool"
+# 脚本位于 tool/scripts/build.ps1，往上一级到 tool/
+$projectDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $projectDir
 
 $buildOutDir = Join-Path $projectDir "dist-build"

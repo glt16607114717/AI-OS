@@ -32,6 +32,9 @@ func main() {
 		port = "18731"
 	}
 
+	// 初始化 Redis（Session 持久化）
+	middleware.InitRedis()
+
 	// 注入 API Key 查询函数（避免循环依赖）
 	middleware.APIKeyLookup = service.GetUserByAPIKey
 
@@ -95,6 +98,7 @@ func main() {
 		r.Post("/api/ai-advisor/process", handler.MarkSuggestionProcessed)
 		r.Get("/api/ai-advisor/knowledge", handler.GetDistillKnowledge)
 		r.Post("/api/ai-advisor/trigger", handler.TriggerDistill) // 手动触发蒸馏
+		r.Get("/api/ai-advisor/distill-logs", handler.GetDistillLogs) // 蒸馏日志
 
 
 		// RAG 知识库

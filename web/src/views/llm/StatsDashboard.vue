@@ -77,19 +77,19 @@ const days = ref(30)
 const currentUsername = ref('')
 
 // Chart refs
-const trendChartRef = ref<HTMLCanvasElement | null>(null)
 const tokenTrendRef = ref<HTMLCanvasElement | null>(null)
 const modelPieRef = ref<HTMLCanvasElement | null>(null)
 const userRankRef = ref<HTMLCanvasElement | null>(null)
 const userPieRef = ref<HTMLCanvasElement | null>(null)
 const keyPieRef = ref<HTMLCanvasElement | null>(null)
+const visionPieRef = ref<HTMLCanvasElement | null>(null)
 
-let trendChart: Chart | null = null
 let tokenTrend: Chart | null = null
 let modelPie: Chart | null = null
 let userRank: Chart | null = null
 let userPie: Chart | null = null
 let keyPie: Chart | null = null
+let visionPie: Chart | null = null
 
 // 获取当前用户名
 async function fetchCurrentUser() {
@@ -164,37 +164,6 @@ function renderCharts() {
 
   const dailyData = sortedDaily.value
   const labels = dailyData.map(d => d.date.slice(5)) // MM-DD
-
-  // ── 折线图：每日请求趋势 ──
-  if (trendChartRef.value) {
-    if (trendChart) trendChart.destroy()
-
-    trendChart = new Chart(trendChartRef.value, {
-      type: 'line',
-      data: {
-        labels,
-        datasets: [{
-          label: '请求数',
-          data: dailyData.map(d => d.requests),
-          borderColor: '#409eff',
-          backgroundColor: 'rgba(64,158,255,0.1)',
-          fill: true,
-          tension: 0.3,
-          pointRadius: 3,
-          pointHoverRadius: 5,
-        }],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { display: true, position: 'top', labels: { font: { size: 12 } } } },
-        scales: {
-          y: { beginAtZero: true, grid: { color: '#f0f0f0' }, ticks: { font: { size: 11 } } },
-          x: { grid: { display: false }, ticks: { font: { size: 11 } } },
-        },
-      },
-    })
-  }
 
   // ── 折线图：每日 Token 消耗趋势 ──
   if (tokenTrendRef.value) {
@@ -342,6 +311,36 @@ function renderCharts() {
       },
     })
   }
+
+  // ── 饼图：图片识别用户占比 ──
+  if (visionPieRef.value && stats.value?.vision_by_user) {
+    if (visionPie) visionPie.destroy()
+    const visions = Object.entries(stats.value.vision_by_user as Record<string, any>)
+      .map(([id, v]) => ({ id, ...v }))
+      .filter(v => v.count > 0)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 8)
+    const colors3 = ['#409eff', '#67c23a', '#e6a23c', '#f56c6c', '#909399', '#9b59b6', '#1abc9c', '#e74c3c']
+    visionPie = new Chart(visionPieRef.value, {
+      type: 'doughnut',
+      data: {
+        labels: visions.map(v => v.username || v.id),
+        datasets: [{
+          data: visions.map(v => v.count),
+          backgroundColor: colors3.slice(0, visions.length),
+          borderWidth: 2,
+          borderColor: '#fff',
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: true, position: 'right', labels: { font: { size: 11 }, boxWidth: 12, padding: 8 } },
+        },
+      },
+    })
+  }
 }
 
 async function fetchStats() {
@@ -380,12 +379,12 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null }
-  trendChart?.destroy()
   tokenTrend?.destroy()
   modelPie?.destroy()
   userRank?.destroy()
   userPie?.destroy()
   keyPie?.destroy()
+  visionPie?.destroy()
 })
 </script>
 
@@ -453,10 +452,10 @@ onUnmounted(() => {
 
       <!-- Charts Grid -->
       <div class="charts-grid">
-        <!-- 折线图：每日请求趋势 -->
+        <!-- 柱状图：用户用量排行 -->
         <div class="chart-card">
-          <div class="section-title">每日请求趋势</div>
-          <div class="chart-container"><canvas ref="trendChartRef"></canvas></div>
+          <div class="section-title">用户用量排行</div>
+          <div class="chart-container"><canvas ref="userRankRef"></canvas></div>
         </div>
 
         <!-- 折线图：每日 Token 消耗 -->
@@ -465,22 +464,22 @@ onUnmounted(() => {
           <div class="chart-container"><canvas ref="tokenTrendRef"></canvas></div>
         </div>
 
-        <!-- 饼图：模型请求占比 -->
-        <div class="chart-card">
-          <div class="section-title">模型请求占比</div>
-          <div class="chart-container"><canvas ref="modelPieRef"></canvas></div>
-        </div>
-
-        <!-- 柱状图：用户用量排行 -->
-        <div class="chart-card">
-          <div class="section-title">用户用量排行</div>
-          <div class="chart-container"><canvas ref="userRankRef"></canvas></div>
-        </div>
-
         <!-- 饼图：用户 Token 占比 -->
         <div class="chart-card">
           <div class="section-title">用户 Token 占比</div>
           <div class="chart-container"><canvas ref="userPieRef"></canvas></div>
+        </div>
+
+        <!-- 饼图：用户图片识别占比 -->
+        <div class="chart-card">
+          <div class="section-title">用户图片识别占比</div>
+          <div class="chart-container"><canvas ref="visionPieRef"></canvas></div>
+        </div>
+
+        <!-- 饼图：模型请求占比 -->
+        <div class="chart-card">
+          <div class="section-title">模型请求占比</div>
+          <div class="chart-container"><canvas ref="modelPieRef"></canvas></div>
         </div>
 
         <!-- 饼图：API Key 请求次数占比 -->

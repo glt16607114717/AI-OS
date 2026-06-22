@@ -89,7 +89,7 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 注入上帝指令 + RAG
-	injectGodRulesAndRAG(req, userMsgRaw, userID)
+	injectGodRulesAndRAG(req, userMsgRaw, userID, username)
 
 	// 流式判断
 	isStream := false
@@ -148,7 +148,7 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 注入上帝指令 + RAG
-	injectGodRulesAndRAG(req, userMsgRaw, userID)
+	injectGodRulesAndRAG(req, userMsgRaw, userID, username)
 
 	// 注入服务端技能（工作台专属）
 	tools, _ := service.GetBuiltinSkillToolDefinitions(userID, isAdmin)
@@ -239,7 +239,7 @@ func extractLastUserMessage(req map[string]interface{}) (string, string) {
 }
 
 // injectGodRulesAndRAG 注入上帝指令和 RAG 知识库上下文
-func injectGodRulesAndRAG(req map[string]interface{}, userMsgRaw string, userID int) {
+func injectGodRulesAndRAG(req map[string]interface{}, userMsgRaw string, userID int, username string) {
 	messages, ok := req["messages"].([]interface{})
 	if !ok {
 		return
@@ -252,7 +252,7 @@ func injectGodRulesAndRAG(req map[string]interface{}, userMsgRaw string, userID 
 	msgMaps = injectRAGContext(msgMaps, extractUserQuery(userMsgRaw), userID)
 
 	// 图片识别预处理：检测最后一条 user message 的图片（上传/URL），识别后追加文字描述
-	msgMaps, visionResult := service.ProcessImages(msgMaps)
+	msgMaps, visionResult := service.ProcessImages(msgMaps, userID, username)
 	// 兜底：剥离所有消息中残留的 image_url 项，防止透传到纯文本模型
 	service.StripImageContent(msgMaps)
 	req["messages"] = msgMaps
@@ -449,8 +449,7 @@ func ProxyModels(w http.ResponseWriter, r *http.Request) {
 	req, _ := http.NewRequest("GET", upstreamURL, nil)
 	req.Header.Set("Authorization", "Bearer "+route.APIKey)
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := service.SharedHTTPClient.Do(req)
 	if err != nil {
 		errResponse(w, err.Error(), 502)
 		return

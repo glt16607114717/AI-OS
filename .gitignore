@@ -48,3 +48,10 @@ Desktop.ini
 
 # === 已废弃的旧代码备份 ===
 _python_backup/
+
+# === 本地环境规则（含本机路径，不入库）===
+.trae/rules/local-env.md
+
+# === 临时数据库查询脚本 ===
+tool/check-*.json
+tool/*-table.json

@@ -48,53 +48,56 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 		writeSSEHeaders(w)
 
 		flusher, _ := w.(http.Flusher)
-		scanner := bufio.NewScanner(streamResp.Body)
-		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 支持 1MB 单行
+		reader := bufio.NewReaderSize(streamResp.Body, 64*1024)
 
 		var totalContent strings.Builder
 		var usage map[string]interface{}
 
 		done := false
-		for scanner.Scan() {
-			line := scanner.Text()
-			if line == "" {
-				continue
-			}
-			if !strings.HasPrefix(line, "data: ") {
-				continue
-			}
-			data := line[6:]
-			if data == "[DONE]" {
-				done = true
-			}
-
-			// 转发给客户端（[DONE] 也要转发）
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			if flusher != nil {
-				flusher.Flush()
-			}
-
-			// 解析 chunk（用于统计，但不影响转发）
-			var chunk map[string]interface{}
-			if json.Unmarshal([]byte(data), &chunk) == nil {
-				// 提取 usage（任何 chunk 都可能含 usage）
-				if u, ok := chunk["usage"].(map[string]interface{}); ok {
-					usage = u
+		for {
+			line, err := reader.ReadBytes('\n')
+			lineStr := strings.TrimSpace(string(line))
+			if lineStr != "" {
+				if !strings.HasPrefix(lineStr, "data: ") {
+					goto nextLine
 				}
-				if choices, ok := chunk["choices"].([]interface{}); ok && len(choices) > 0 {
-					if choice, ok := choices[0].(map[string]interface{}); ok {
-						// 累计 content
-						if delta, ok := choice["delta"].(map[string]interface{}); ok {
-							if content, ok := delta["content"].(string); ok {
-								totalContent.WriteString(content)
+				data := lineStr[6:]
+				if data == "[DONE]" {
+					done = true
+				}
+
+				// 转发给客户端（[DONE] 也要转发）
+				fmt.Fprintf(w, "data: %s\n\n", data)
+				if flusher != nil {
+					flusher.Flush()
+				}
+
+				// 解析 chunk（用于统计，但不影响转发）
+				var chunk map[string]interface{}
+				if json.Unmarshal([]byte(data), &chunk) == nil {
+					// 提取 usage（任何 chunk 都可能含 usage）
+					if u, ok := chunk["usage"].(map[string]interface{}); ok {
+						usage = u
+					}
+					if choices, ok := chunk["choices"].([]interface{}); ok && len(choices) > 0 {
+						if choice, ok := choices[0].(map[string]interface{}); ok {
+							// 累计 content
+							if delta, ok := choice["delta"].(map[string]interface{}); ok {
+								if content, ok := delta["content"].(string); ok {
+									totalContent.WriteString(content)
+								}
 							}
 						}
 					}
 				}
-			}
 
-			// [DONE] 块已处理完，退出循环（确保不漏掉 [DONE] 之后的 chunk）
-			if done {
+				// [DONE] 块已处理完，退出循环（确保不漏掉 [DONE] 之后的 chunk）
+				if done {
+					break
+				}
+			}
+		nextLine:
+			if err != nil {
 				break
 			}
 		}
@@ -136,7 +139,7 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 			convCtx.AssistantContent = content
 			chatID := service.AddChatMessage(userID, "assistant", content)
 			convCtx.ChatHistoryID = chatID
-			go service.SaveConversationLog(chatID, req, content, route.ModelID, route.VendorID, promptTokens, completionTokens, totalTokens, latency)
+			go service.SaveConversationLogWithUser(chatID, userID, username, req, content, route.ModelID, route.VendorID, promptTokens, completionTokens, totalTokens, latency)
 		}
 
 		log.Printf("[proxy] stream %s user=%s latency=%dms tokens=%d/%d",
@@ -153,7 +156,7 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 		chatID := service.AddChatMessage(userID, "assistant", content)
 		convCtx.ChatHistoryID = chatID
 		latency := int(time.Since(startTime).Milliseconds())
-		go service.SaveConversationLog(chatID, req, content, route.ModelID, route.VendorID,
+		go service.SaveConversationLogWithUser(chatID, userID, username, req, content, route.ModelID, route.VendorID,
 			convCtx.TotalPrompt, convCtx.TotalCompletion, 0, latency)
 	}
 

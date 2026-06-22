@@ -197,6 +197,26 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 		}
 	}
 
+	// 图片识别按用户统计
+	visionByUser := map[string]interface{}{}
+	vRows2, _ := conn.Query(`SELECT user_id, COALESCE(username, CONCAT('user_', user_id)),
+		COUNT(*) as count, SUM(success) as success_count,
+		SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) as fail_count
+		FROM sys_vision_log WHERE created_at >= ? GROUP BY user_id, username ORDER BY count DESC`, cutoff)
+	if vRows2 != nil {
+		defer vRows2.Close()
+		for vRows2.Next() {
+			var uid, count, sc, fc int
+			var name string
+			if err := vRows2.Scan(&uid, &name, &count, &sc, &fc); err != nil {
+				continue
+			}
+			visionByUser[fmt.Sprintf("%d", uid)] = map[string]interface{}{
+				"username": name, "count": count, "success_count": sc, "fail_count": fc,
+			}
+		}
+	}
+
 	return map[string]interface{}{
 		"total_requests": totalReqs,
 		"total_tokens": totalTokens,
@@ -204,7 +224,7 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 		"total_errors": errorCount,
 		"avg_latency_ms": int(avgLatency), "success_rate": successRate,
 		"by_vendor": byVendor, "by_model": byModel, "daily": daily,
-		"by_user": byUser, "by_key": byKey,
+		"by_user": byUser, "by_key": byKey, "vision_by_user": visionByUser,
 	}, nil
 }
 
@@ -374,11 +394,20 @@ const CONVERSATION_LOG_DIR = "logs/conversations"
 // SaveConversationLog 将请求+响应保存为JSON文件（供下载），异步执行
 func SaveConversationLog(id int64, req map[string]interface{}, responseContent, modelID string,
 	vendorID, promptTokens, completionTokens, totalTokens, latencyMs int) {
+	SaveConversationLogWithUser(id, 0, "", req, responseContent, modelID,
+		vendorID, promptTokens, completionTokens, totalTokens, latencyMs)
+}
+
+// SaveConversationLogWithUser 带用户信息的对话日志保存
+func SaveConversationLogWithUser(id int64, userID int, username string, req map[string]interface{}, responseContent, modelID string,
+	vendorID, promptTokens, completionTokens, totalTokens, latencyMs int) {
 	go func() {
 		os.MkdirAll(CONVERSATION_LOG_DIR, 0755)
 
 		logData := map[string]interface{}{
 			"id":        id,
+			"user_id":   userID,
+			"username":  username,
 			"timestamp": time.Now().Format("2006-01-02T15:04:05Z07:00"),
 			"request":   req,
 			"response": map[string]interface{}{

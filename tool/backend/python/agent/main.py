@@ -103,7 +103,9 @@ def _fix_permissions():
         pass
 
 
-_fix_permissions()
+# 权限修复放到后台线程执行，避免阻塞启动（icacls 可能耗时数秒）
+import threading as _t_init
+_t_init.Thread(target=_fix_permissions, daemon=True).start()
 
 _LOG_DIR = _DATA_ROOT / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -225,7 +227,7 @@ def ensure_voice():
 
 
 @app.post("/api/voice")
-async def voice_api(req: VoiceActionRequest):
+def voice_api(req: VoiceActionRequest):
     if req.action == "voice_status":
         ensure_voice()
         if voice is None:
@@ -361,7 +363,7 @@ async def voice_api(req: VoiceActionRequest):
 
 
 @app.post("/api/voice/download-model")
-async def voice_download_model():
+def voice_download_model():
     """下载 FunASR 模型（在后台线程中执行）"""
     import threading
 
@@ -400,4 +402,4 @@ signal.signal(signal.SIGINT, handle_shutdown)
 
 if __name__ == "__main__":
     logger.info(f"Starting AI-OS Local Agent on port {PORT}")
-    uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="info")
+    uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="info", timeout_graceful_shutdown=10)

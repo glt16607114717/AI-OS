@@ -98,10 +98,18 @@ func RunDailyDistill() error {
 
 // RunDistillForDate 指定日期蒸馏：查询对话 → 提炼知识 + 生成建议
 func RunDistillForDate(userID int, username, date string) error {
+	return RunDistillForDateWithTrigger(userID, username, date, "cron")
+}
+
+// RunDistillForDateWithTrigger 带触发类型的蒸馏
+func RunDistillForDateWithTrigger(userID int, username, date, triggerType string) error {
+	overallStart := time.Now()
+
 	if userID <= 0 {
 		var err error
 		userID, err = getDefaultDistillUserID()
 		if err != nil {
+			distillLog(0, username, date, triggerType, "error", "fail", "获取默认用户失败: "+err.Error(), "", 0)
 			return err
 		}
 	}
@@ -109,44 +117,61 @@ func RunDistillForDate(userID int, username, date string) error {
 		username = getDistillUsername()
 	}
 
+	collectStart := time.Now()
 	convContent, count, err := collectConversationForDate(userID, date)
+	collectMs := int(time.Since(collectStart).Milliseconds())
 	if err != nil {
+		distillLog(userID, username, date, triggerType, "collect", "fail",
+			"查询对话失败: "+err.Error(), "", collectMs)
 		return fmt.Errorf("查询对话失败: %v", err)
 	}
 
 	if len(convContent) < 100 {
-		log.Printf("[distill] 日期=%s 无对话或对话过少，跳过。记录数=%d", date, count)
+		distillLog(userID, username, date, triggerType, "collect", "info",
+			fmt.Sprintf("无对话或对话过少，跳过。记录数=%d, 字符数=%d", count, len(convContent)), "", collectMs)
 		return nil
 	}
+
+	distillLog(userID, username, date, triggerType, "collect", "success",
+		fmt.Sprintf("记录数=%d, 字符数=%d", count, len(convContent)), "", collectMs)
 
 	log.Printf("[distill] 开始蒸馏，日期=%s，user=%d，记录数=%d，字符数=%d", date, userID, count, len(convContent))
 
 	conn, err := GetDB()
 	if err != nil {
+		distillLog(userID, username, date, triggerType, "error", "fail", "连接数据库失败: "+err.Error(), "", 0)
 		return fmt.Errorf("连接数据库失败: %v", err)
 	}
 
 	// 分段调用 LLM 蒸馏
 	log.Printf("[distill] 开始分段蒸馏，日期=%s，总字符数=%d", date, len(convContent))
 
-	// 按段落分割对话（以 [时间] user/assistant: 为分割点）
 	chunks := splitConversationIntoChunks(convContent, 25000)
 	log.Printf("[distill] 分割为 %d 段", len(chunks))
 
-	// 汇总所有结果
 	var allKnowledge []DistillKnowledge
 	var allSuggestions []DistillSuggestion
 	var allDailySummaries []string
 
 	for i, chunk := range chunks {
+		chunkStart := time.Now()
 		result, err := callDistillLLM(userID, date, chunk)
+		chunkMs := int(time.Since(chunkStart).Milliseconds())
+
 		if err != nil {
 			log.Printf("[distill] 第 %d/%d 段蒸馏失败: %v", i+1, len(chunks), err)
+			distillLog(userID, username, date, triggerType, "llm_call", "fail",
+				fmt.Sprintf("第 %d/%d 段失败: %v", i+1, len(chunks), err), "", chunkMs)
 			continue
 		}
+
 		ds := result.DailySummary
 		if len(ds) > 50 { ds = ds[:50] }
 		log.Printf("[distill] 第 %d/%d 段完成：知识=%d，建议=%d，日报=%q", i+1, len(chunks), len(result.Knowledge), len(result.Suggestions), ds)
+		distillLog(userID, username, date, triggerType, "llm_call", "success",
+			fmt.Sprintf("第 %d/%d 段: 知识=%d, 建议=%d, 耗时=%dms", i+1, len(chunks), len(result.Knowledge), len(result.Suggestions), chunkMs),
+			"", chunkMs)
+
 		allKnowledge = append(allKnowledge, result.Knowledge...)
 		allSuggestions = append(allSuggestions, result.Suggestions...)
 		if result.DailySummary != "" {
@@ -155,6 +180,7 @@ func RunDistillForDate(userID int, username, date string) error {
 	}
 
 	if len(allKnowledge) == 0 && len(allSuggestions) == 0 && len(allDailySummaries) == 0 {
+		distillLog(userID, username, date, triggerType, "error", "fail", "所有段落蒸馏均失败", "", int(time.Since(overallStart).Milliseconds()))
 		return fmt.Errorf("所有段落蒸馏均失败")
 	}
 
@@ -162,19 +188,24 @@ func RunDistillForDate(userID int, username, date string) error {
 
 	// 存储知识（去重 + 向量化）
 	knowledgeCount := 0
+	knowledgeSkip := 0
 	for _, k := range allKnowledge {
 		if k.Content == "" || k.Dimension == "" {
+			knowledgeSkip++
 			continue
 		}
 		hash := contentHash(k.Content)
 		var exists int
 		conn.QueryRow("SELECT 1 FROM sys_embedding WHERE content_hash = ? AND user_id = ?", hash, userID).Scan(&exists)
 		if exists == 1 {
+			knowledgeSkip++
 			continue
 		}
 		vector, err := GetEmbedding(k.Content)
 		if err != nil {
 			log.Printf("[distill] 向量化失败: %v", err)
+			distillLog(userID, username, date, triggerType, "save_knowledge", "warn",
+				"向量化失败: "+err.Error(), k.Title, 0)
 			continue
 		}
 		vectorJSON, _ := json.Marshal(vector)
@@ -183,6 +214,8 @@ func RunDistillForDate(userID int, username, date string) error {
 			userID, k.Content, hash, string(vectorJSON), source)
 		knowledgeCount++
 	}
+	distillLog(userID, username, date, triggerType, "save_knowledge", "success",
+		fmt.Sprintf("保存=%d, 跳过=%d", knowledgeCount, knowledgeSkip), "", 0)
 
 	// 存储建议
 	suggestionCount := 0
@@ -195,6 +228,8 @@ func RunDistillForDate(userID int, username, date string) error {
 			userID, date, s.Category, s.Title, content, s.Priority)
 		suggestionCount++
 	}
+	distillLog(userID, username, date, triggerType, "save_suggestion", "success",
+		fmt.Sprintf("保存=%d", suggestionCount), "", 0)
 
 	// 存储工作日报
 	if len(allDailySummaries) > 0 {
@@ -206,14 +241,22 @@ func RunDistillForDate(userID int, username, date string) error {
 			userID, username, date, title, summary)
 		if err != nil {
 			log.Printf("[distill] 日报保存失败: %v", err)
+			distillLog(userID, username, date, triggerType, "save_diary", "fail",
+				"日报保存失败: "+err.Error(), "", 0)
 		} else {
 			log.Printf("[distill] 工作日报已保存，长度=%d", len(summary))
+			distillLog(userID, username, date, triggerType, "save_diary", "success",
+				fmt.Sprintf("日报长度=%d", len(summary)), "", 0)
 		}
 	} else {
-		log.Printf("[distill] 无日报内容，跳过保存")
+		distillLog(userID, username, date, triggerType, "save_diary", "info", "无日报内容，跳过", "", 0)
 	}
 
-	log.Printf("[distill] 蒸馏完成：日期=%s，知识=%d，建议=%d", date, knowledgeCount, suggestionCount)
+	totalMs := int(time.Since(overallStart).Milliseconds())
+	log.Printf("[distill] 蒸馏完成：日期=%s，知识=%d，建议=%d，耗时=%dms", date, knowledgeCount, suggestionCount, totalMs)
+	distillLog(userID, username, date, triggerType, "done", "success",
+		fmt.Sprintf("知识=%d, 建议=%d, 耗时=%dms", knowledgeCount, suggestionCount, totalMs), "", totalMs)
+
 	return nil
 }
 
@@ -449,7 +492,7 @@ func collectConversationForDate(userID int, date string) (string, int, error) {
 
 	// chat_history 不足时，从对话日志 JSON 补充（含完整 messages）
 	if convBuilder.Len() < 100 {
-		logCount, logContent := collectConversationFromLogs(date)
+		logCount, logContent := collectConversationFromLogs(userID, date)
 		if logContent != "" {
 			if convBuilder.Len() > 0 {
 				convBuilder.WriteString("\n--- 对话日志补充 ---\n")
@@ -462,7 +505,7 @@ func collectConversationForDate(userID int, date string) (string, int, error) {
 	return convBuilder.String(), count, nil
 }
 
-func collectConversationFromLogs(date string) (int, string) {
+func collectConversationFromLogs(userID int, date string) (int, string) {
 	files, err := filepath.Glob(filepath.Join(CONVERSATION_LOG_DIR, "*.json"))
 	if err != nil || len(files) == 0 {
 		return 0, ""
@@ -479,6 +522,13 @@ func collectConversationFromLogs(date string) (int, string) {
 		if json.Unmarshal(data, &logData) != nil {
 			continue
 		}
+
+		// 按用户过滤（user_id=0 的旧文件不属于任何用户，跳过）
+		logUserID, _ := logData["user_id"].(float64)
+		if int(logUserID) != userID {
+			continue
+		}
+
 		ts, _ := logData["timestamp"].(string)
 		if ts == "" || !strings.HasPrefix(ts, date) {
 			continue
@@ -567,8 +617,7 @@ func callDistillLLM(userID int, date, convContent string) (*DistillResult, error
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := SharedHTTPClientLong.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("API 调用失败: %v", err)
 	}
@@ -576,11 +625,15 @@ func callDistillLLM(userID int, date, convContent string) (*DistillResult, error
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API 返回 %d: %s", resp.StatusCode, string(respBody)[:200])
+		errMsg := fmt.Sprintf("API 返回 %d: %s", resp.StatusCode, string(respBody)[:min(500, len(respBody))])
+		log.Printf("[distill] %s", errMsg)
+		distillLog(userID, "", date, "cron", "llm_call", "fail", errMsg, string(respBody)[:min(1000, len(respBody))], 0)
+		return nil, fmt.Errorf("%s", errMsg)
 	}
 
 	var respData map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&respData); err != nil {
+		distillLog(userID, "", date, "cron", "json_parse", "fail", "响应解析失败: "+err.Error(), "", 0)
 		return nil, fmt.Errorf("响应解析失败: %v", err)
 	}
 
@@ -623,11 +676,17 @@ func callDistillLLM(userID int, date, convContent string) (*DistillResult, error
 	// 尝试直接解析
 	if err := json.Unmarshal([]byte(jsonBlock), result); err != nil {
 		log.Printf("[distill] JSON 解析失败: %v，原始内容前300字符: %s", err, content[:min(300, len(content))])
+		distillLog(userID, "", date, "cron", "json_parse", "fail",
+			"JSON 解析失败: "+err.Error(),
+			content[:min(500, len(content))], 0)
 	}
 
 	// 检查是否有有效数据
 	if len(result.Knowledge) == 0 && len(result.Suggestions) == 0 && result.DailySummary == "" {
 		log.Printf("[distill] 解析结果为空，原始内容前300字符: %s", content[:min(300, len(content))])
+		distillLog(userID, "", date, "cron", "json_parse", "warn",
+			"解析结果为空",
+			content[:min(500, len(content))], 0)
 	}
 
 	return result, nil
@@ -879,6 +938,90 @@ func DistillKnowledgeByDate(userID int, date string) ([]map[string]interface{}, 
 			"id": id, "dimension": dimension, "title": title,
 			"context": context, "content": content,
 			"priority": priority, "source": source, "created_at": createdAt,
+		})
+	}
+	return result, nil
+}
+
+// ── 蒸馏日志（持久化到 sys_distill_log）──
+
+// distillLog 写一条蒸馏日志到数据库
+// stage: collect / llm_call / json_parse / save_knowledge / save_suggestion / save_diary / done / error
+// status: success / fail / warn / info
+// detail: 详细信息（错误内容、原始响应等），可空
+func distillLog(userID int, username, date, triggerType, stage, status, message, detail string, durationMs int) {
+	conn, err := GetDB()
+	if err != nil || conn == nil {
+		log.Printf("[distill-log] DB 连接失败，降级 stdout: user=%d date=%s stage=%s status=%s msg=%s",
+			userID, date, stage, status, message)
+		return
+	}
+	_, err = conn.Exec(
+		`INSERT INTO sys_distill_log (user_id, username, report_date, trigger_type, stage, status, message, detail, duration_ms)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		userID, username, date, triggerType, stage, status, message, detail, durationMs,
+	)
+	if err != nil {
+		log.Printf("[distill-log] 写入失败: %v", err)
+	}
+}
+
+// GetDistillLogs 查询蒸馏日志（管理员可查所有用户，普通用户只查自己）
+func GetDistillLogs(userID int, isAdmin bool, date string, limit int) ([]map[string]interface{}, error) {
+	conn, err := GetDB()
+	if err != nil {
+		return nil, err
+	}
+
+	query := `SELECT id, user_id, username, report_date, trigger_type, stage, status, message, detail, duration_ms, created_at
+		FROM sys_distill_log`
+	var conditions []string
+	var args []interface{}
+
+	if !isAdmin {
+		conditions = append(conditions, "user_id = ?")
+		args = append(args, userID)
+	}
+	if date != "" {
+		conditions = append(conditions, "report_date = ?")
+		args = append(args, date)
+	}
+
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	query += " ORDER BY created_at DESC"
+	if limit > 0 && limit <= 500 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	} else {
+		query += " LIMIT 100"
+	}
+
+	rows, err := conn.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var id, uid, dur int
+		var username, reportDate, triggerType, stage, status, message, detail, createdAt string
+		if err := rows.Scan(&id, &uid, &username, &reportDate, &triggerType, &stage, &status, &message, &detail, &dur, &createdAt); err != nil {
+			continue
+		}
+		result = append(result, map[string]interface{}{
+			"id":           id,
+			"user_id":      uid,
+			"username":     username,
+			"report_date":  reportDate,
+			"trigger_type": triggerType,
+			"stage":        stage,
+			"status":       status,
+			"message":      message,
+			"detail":       detail,
+			"duration_ms":  dur,
+			"created_at":   createdAt,
 		})
 	}
 	return result, nil

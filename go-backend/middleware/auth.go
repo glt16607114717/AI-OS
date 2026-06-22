@@ -1,16 +1,20 @@
 package middleware
 
 import (
+	"ai-os-server/config"
 	"ai-os-server/model"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -18,10 +22,63 @@ import (
 var APIKeyLookup func(apiKey string) (userID int, username string, isAdmin bool, err error)
 
 var (
-	Sessions   = make(map[string]*model.Session) // token -> session
-	UserTokens = make(map[int]string)             // user_id -> token
+	Sessions   = make(map[string]*model.Session) // token -> session（内存缓存）
+	UserTokens = make(map[int]string)             // user_id -> token（内存缓存）
 	authMutex  sync.RWMutex
+	rdb        *redis.Client
 )
+
+// InitRedis 初始化 Redis 连接，并从 Redis 加载未过期的 session 到内存
+func InitRedis() {
+	rdb = redis.NewClient(&redis.Options{
+		Addr:     config.Redis.Addr,
+		Password: config.Redis.Password,
+		DB:       config.Redis.DB,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		log.Printf("[auth] Redis 连接失败: %v，降级为纯内存模式", err)
+		rdb = nil
+		return
+	}
+	log.Println("[auth] Redis 连接成功")
+
+	// 从 Redis 加载所有未过期的 session 到内存
+	keys, err := rdb.Keys(ctx, "session:*").Result()
+	if err != nil {
+		log.Printf("[auth] 加载 Redis session 失败: %v", err)
+		return
+	}
+
+	authMutex.Lock()
+	defer authMutex.Unlock()
+
+	loaded := 0
+	for _, key := range keys {
+		token := strings.TrimPrefix(key, "session:")
+		data, err := rdb.Get(ctx, key).Result()
+		if err != nil {
+			continue
+		}
+		var s model.Session
+		if err := json.Unmarshal([]byte(data), &s); err != nil {
+			continue
+		}
+		if time.Now().After(s.Expire) {
+			rdb.Del(ctx, key)
+			continue
+		}
+		Sessions[token] = &s
+		UserTokens[s.UserID] = token
+		loaded++
+	}
+	if loaded > 0 {
+		log.Printf("[auth] 从 Redis 恢复 %d 个 session", loaded)
+	}
+}
 
 // HashPassword 使用 bcrypt
 func HashPassword(password string) string {
@@ -31,14 +88,13 @@ func HashPassword(password string) string {
 
 // CheckPassword 校验密码（兼容旧的 SHA256 和新的 bcrypt）
 func CheckPassword(password, hash string) bool {
-	// 先尝试 bcrypt
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err == nil {
 		return true
 	}
 	return false
 }
 
-// CreateSession 创建会话，单点互踢
+// CreateSession 创建会话，单点互踢，持久化到 Redis
 func CreateSession(userID int, username string, isAdmin bool) string {
 	token := generateToken()
 	now := time.Now()
@@ -60,14 +116,21 @@ func CreateSession(userID int, username string, isAdmin bool) string {
 	UserTokens[userID] = token
 	authMutex.Unlock()
 
+	// 持久化到 Redis
+	if rdb != nil {
+		data, _ := json.Marshal(session)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		rdb.Set(ctx, "session:"+token, data, 30*24*time.Hour)
+	}
+
 	return token
 }
 
-// GetSession 从请求获取会话（支持 Authorization/Cookie/?key= 三种方式）
+// GetSession 从请求获取会话（内存 → Redis → API Key 三级回退）
 func GetSession(r *http.Request) *model.Session {
 	// 方式1: URL query ?key=xxx（API Key 认证）
 	if apiKey := r.URL.Query().Get("key"); apiKey != "" && APIKeyLookup != nil {
-		// 清理 key：去掉 / 及之后的内容（兼容外部客户端在 key 后拼接路径）
 		if idx := strings.IndexByte(apiKey, '/'); idx > 0 {
 			apiKey = apiKey[:idx]
 		}
@@ -84,7 +147,6 @@ func GetSession(r *http.Request) *model.Session {
 
 	auth := r.Header.Get("Authorization")
 	if auth == "" {
-		// 尝试从 cookie 获取
 		if c, err := r.Cookie("token"); err == nil {
 			auth = c.Value
 		}
@@ -97,25 +159,42 @@ func GetSession(r *http.Request) *model.Session {
 		return nil
 	}
 
-	// 先查 session
+	// 1. 先查内存
 	authMutex.RLock()
 	session, ok := Sessions[token]
 	authMutex.RUnlock()
 
 	if ok {
 		if time.Now().After(session.Expire) {
-			authMutex.Lock()
-			delete(Sessions, token)
-			if uid := session.UserID; UserTokens[uid] == token {
-				delete(UserTokens, uid)
-			}
-			authMutex.Unlock()
+			removeSession(token, session.UserID)
 			return nil
 		}
 		return session
 	}
 
-	// session 查不到，尝试作为 API Key（sk- 开头）
+	// 2. 内存没命中，查 Redis
+	if rdb != nil && !strings.HasPrefix(token, "sk-") {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		data, err := rdb.Get(ctx, "session:"+token).Result()
+		if err == nil {
+			var s model.Session
+			if json.Unmarshal([]byte(data), &s) == nil {
+				if time.Now().After(s.Expire) {
+					rdb.Del(ctx, "session:"+token)
+					return nil
+				}
+				// 回写到内存
+				authMutex.Lock()
+				Sessions[token] = &s
+				UserTokens[s.UserID] = token
+				authMutex.Unlock()
+				return &s
+			}
+		}
+	}
+
+	// 3. 尝试作为 API Key（sk- 开头）
 	if strings.HasPrefix(token, "sk-") && APIKeyLookup != nil {
 		uid, username, isAdmin, err := APIKeyLookup(token)
 		if err == nil && uid > 0 {
@@ -129,6 +208,22 @@ func GetSession(r *http.Request) *model.Session {
 	}
 
 	return nil
+}
+
+// removeSession 删除 session（内存 + Redis）
+func removeSession(token string, userID int) {
+	authMutex.Lock()
+	delete(Sessions, token)
+	if UserTokens[userID] == token {
+		delete(UserTokens, userID)
+	}
+	authMutex.Unlock()
+
+	if rdb != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		rdb.Del(ctx, "session:"+token)
+	}
 }
 
 // RequireAuth 鉴权中间件

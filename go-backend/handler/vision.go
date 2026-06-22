@@ -55,11 +55,15 @@ func VisionRecognize(w http.ResponseWriter, r *http.Request) {
 	imageSize := len(req.Image)
 
 	// ── 调用智谱视觉模型 ──
-	desc := service.RecognizeImage(req.Image, req.Prompt)
+	desc, err := service.RecognizeImage(userID, username, req.Image, req.Prompt)
 
-	if desc == "" {
-		service.LogVisionRecognize(userID, username, req.Image, imageSize, req.Prompt, "", "glm-4.6v", false, "识别失败或未配置智谱API Key")
-		errResponse(w, "图片识别失败", 500)
+	if err != nil || desc == "" {
+		errMsg := "识别失败"
+		if err != nil {
+			errMsg = err.Error()
+		}
+		service.LogVisionRecognize(userID, username, req.Image, imageSize, req.Prompt, "", "glm-4.6v", false, errMsg)
+		errResponse(w, "图片识别失败: "+errMsg, 500)
 		return
 	}
 

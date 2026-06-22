@@ -13,7 +13,14 @@ type MySQLConfig struct {
 	Database string
 }
 
+type RedisConfig struct {
+	Addr     string
+	Password string
+	DB       int
+}
+
 var DB MySQLConfig
+var Redis RedisConfig
 
 // Embedding 配置
 type EmbeddingConfig struct {
@@ -38,6 +45,11 @@ func Init() {
 		User:     envOrDefault("DB_USER", "root"),
 		Password: envOrDefault("DB_PASS", "glt01054717@"),
 		Database: envOrDefault("DB_NAME", "ai_os"),
+	}
+	Redis = RedisConfig{
+		Addr:     envOrDefault("REDIS_ADDR", "127.0.0.1:6379"),
+		Password: envOrDefault("REDIS_PASS", "glt01054717"),
+		DB:       0,
 	}
 	Embedding = EmbeddingConfig{
 		APIKey:     envOrDefault("EMBEDDING_API_KEY", "5170eaa827e042d8ba259cff4393e24e.b1ouPVCQDqxOvDS7"),

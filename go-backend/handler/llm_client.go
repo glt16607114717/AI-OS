@@ -74,8 +74,7 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 		httpReq.Header.Set("Authorization", "Bearer "+route.APIKey)
 		httpReq.Header.Set("Content-Type", "application/json")
 
-		client := &http.Client{Timeout: 180 * time.Second}
-		resp, err := client.Do(httpReq)
+		resp, err := service.SharedHTTPClient.Do(httpReq)
 		if err != nil {
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
