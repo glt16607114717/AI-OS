@@ -1,6 +1,6 @@
 # AI-OS Build Script
 $ErrorActionPreference = "Continue"
-$projectDir = "D:\wwwroot\ai-os\tool"
+$projectDir = "D:\wwwroot\AI\AI-OS\tool"
 Set-Location $projectDir
 
 $buildOutDir = Join-Path $projectDir "dist-build"

@@ -253,6 +253,8 @@ func injectGodRulesAndRAG(req map[string]interface{}, userMsgRaw string, userID 
 
 	// 图片识别预处理：检测最后一条 user message 的图片（上传/URL），识别后追加文字描述
 	msgMaps, visionResult := service.ProcessImages(msgMaps)
+	// 兜底：剥离所有消息中残留的 image_url 项，防止透传到纯文本模型
+	service.StripImageContent(msgMaps)
 	req["messages"] = msgMaps
 
 	if visionResult != nil && visionResult.Modified {

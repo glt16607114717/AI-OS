@@ -310,13 +310,13 @@ def _voice_loop() -> None:
             continue
 
     noise_level = float(np.mean(noise_levels)) if noise_levels else 100.0
-    # 语音阈值 = 噪音 × 3，最低 150（防止极安静环境阈值过低）
-    SILENCE_THRESHOLD = max(noise_level * 3, 150)
+    # 语音阈值 = 噪音 × 1.3（兼顾灵敏度和误触发）
+    SILENCE_THRESHOLD = max(noise_level * 1.3, 300)
     log(f"环境噪音: {noise_level:.0f}, 语音阈值: {SILENCE_THRESHOLD:.0f}", "VOICE")
 
     # ── VAD 参数 ──
-    SILENCE_FRAMES = 10       # 1秒静音认为一句话结束（10帧 × 100ms）
-    MIN_SPEECH_FRAMES = 3     # 最短语音 0.3秒，过滤短噪音
+    SILENCE_FRAMES = 8        # 0.8秒静音认为一句话结束
+    MIN_SPEECH_FRAMES = 2     # 最短语音 0.2秒，适配两字短语
     MAX_SPEECH_FRAMES = 100   # 最长语音 10秒，防止无限录制
 
     audio_buffer = []

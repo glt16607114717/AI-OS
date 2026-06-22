@@ -26,6 +26,8 @@ def ssh(cmd, timeout=60):
 def stop_service():
     """停止服务并强制释放端口"""
     print("\n2. 停止服务...")
+    # mask 阻止 Restart=always 自动拉起，避免上传期间旧进程抢占端口
+    ssh(f'systemctl mask {SERVICE_NAME}')
     ssh(f'systemctl stop {SERVICE_NAME}')
     ssh('sleep 1')
     # 强制杀掉占用端口的残留进程
@@ -40,7 +42,7 @@ def start_service():
     """启动服务并验证"""
     print("4. 启动服务...")
     rc, out, err = ssh(
-        f'chmod +x {REMOTE_PATH} && systemctl start {SERVICE_NAME} && sleep 3 && '
+        f'systemctl unmask {SERVICE_NAME} && chmod +x {REMOTE_PATH} && systemctl start {SERVICE_NAME} && sleep 3 && '
         f'systemctl is-active {SERVICE_NAME} && ss -tlnp | grep {DEPLOY_PORT}',
         timeout=30
     )

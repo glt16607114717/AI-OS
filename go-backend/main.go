@@ -70,6 +70,7 @@ func main() {
 	r.Post("/api/login", handler.Login)
 	r.Get("/api/health", handler.HealthCheck)
 	r.Get("/api/system/me", handler.SystemMe)
+	r.Post("/api/vision/recognize", handler.VisionRecognize)
 
 	// ── 需要登录 ──
 	r.Group(func(r chi.Router) {

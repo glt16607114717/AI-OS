@@ -46,6 +46,36 @@ func getZhipuAPIKey() string {
 	return apiKey
 }
 
+// StripImageContent 从所有 messages 中移除 image_url 项
+// 用于防止图片内容透传到不支持多模态的第三方模型（火山方舟、智谱等）
+// ProcessImages 只处理最后一条 user message，此函数兜底处理所有消息
+func StripImageContent(messages []map[string]interface{}) {
+	for i := range messages {
+		content, ok := messages[i]["content"].([]interface{})
+		if !ok {
+			continue
+		}
+		newContent := make([]interface{}, 0, len(content))
+		for _, item := range content {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				newContent = append(newContent, item)
+				continue
+			}
+			if t, _ := m["type"].(string); t == "image_url" {
+				continue // 丢弃 image_url 项
+			}
+			newContent = append(newContent, item)
+		}
+		// 只有 content 为空数组时才降级为字符串，避免空数组导致请求异常
+		if len(newContent) == 0 {
+			messages[i]["content"] = ""
+		} else {
+			messages[i]["content"] = newContent
+		}
+	}
+}
+
 // ProcessImages 检测并处理 messages 中的图片
 // 规则：
 //   - 只扫描最后一条 user message
@@ -85,7 +115,7 @@ func ProcessImages(messages []map[string]interface{}) ([]map[string]interface{},
 				continue
 			}
 			processed[url] = true
-			desc := recognizeImage(url, "")
+			desc := RecognizeImage(url, "")
 			if desc != "" {
 				imageCount++
 				descriptions = append(descriptions, fmt.Sprintf("[图片 %d 内容：%s]", imageCount, desc))
@@ -116,7 +146,7 @@ func ProcessImages(messages []map[string]interface{}) ([]map[string]interface{},
 					continue // 空 URL 或已处理，丢弃
 				}
 				processed[url] = true
-				desc := recognizeImage(url, "")
+				desc := RecognizeImage(url, "")
 				if desc != "" {
 					imageCount++
 					descriptions = append(descriptions, fmt.Sprintf("[图片 %d 内容：%s]", imageCount, desc))
@@ -138,7 +168,7 @@ func ProcessImages(messages []map[string]interface{}) ([]map[string]interface{},
 						continue
 					}
 					processed[url] = true
-					desc := recognizeImage(url, "")
+					desc := RecognizeImage(url, "")
 					if desc != "" {
 						imageCount++
 						descriptions = append(descriptions, fmt.Sprintf("[图片 %d 内容：%s]", imageCount, desc))
@@ -177,9 +207,9 @@ func ProcessImages(messages []map[string]interface{}) ([]map[string]interface{},
 	}
 }
 
-// recognizeImage 调用智谱 GLM-4V-Plus 识别图片
+// RecognizeImage 调用智谱 GLM-4V-Plus 识别图片（导出供 handler 调用）
 // imageURL 可以是 http(s):// 链接或 data:image/...;base64,... 格式
-func recognizeImage(imageURL, prompt string) string {
+func RecognizeImage(imageURL, prompt string) string {
 	apiKey := getZhipuAPIKey()
 	if apiKey == "" {
 		log.Println("[vision] 未找到智谱 API Key，跳过图片识别")
@@ -256,4 +286,25 @@ func recognizeImage(imageURL, prompt string) string {
 
 	desc := strings.TrimSpace(result.Choices[0].Message.Content)
 	return desc
+}
+
+// LogVisionRecognize 写入视觉识别日志
+func LogVisionRecognize(userID int, username, imageURL string, imageSize int, prompt, result, model string, success bool, errMsg string) {
+	conn, err := GetDB()
+	if err != nil {
+		return
+	}
+	// 截断 imageURL（base64 可能很长）
+	truncatedURL := imageURL
+	if len(truncatedURL) > 200 {
+		truncatedURL = truncatedURL[:200]
+	}
+	successInt := 0
+	if success {
+		successInt = 1
+	}
+	conn.Exec(
+		"INSERT INTO sys_vision_log (user_id, username, image_url, image_size, prompt, result, model, success, error_msg) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		userID, username, truncatedURL, imageSize, prompt, result, model, successInt, errMsg,
+	)
 }

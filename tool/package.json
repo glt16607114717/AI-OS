@@ -57,6 +57,7 @@
     "generateUpdatesFilesForAllChannels": false,
     "win": {
       "icon": "public/icon.ico",
+      "signAndEditExecutable": false,
       "target": [
         {
           "target": "nsis",
