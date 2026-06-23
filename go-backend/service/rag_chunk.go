@@ -17,7 +17,7 @@ func ChunkByType(text string, ext string, cfg ChunkConfig) []string {
 		cfg.MinSize = 200
 	}
 	if cfg.MaxSize <= 0 {
-		cfg.MaxSize = 2000
+		cfg.MaxSize = 800
 	}
 
 	switch ext {

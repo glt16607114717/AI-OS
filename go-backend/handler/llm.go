@@ -390,7 +390,7 @@ func injectRAGContext(messages []map[string]interface{}, userMsg string, userID 
 	ctx.WriteString("以下内容来自企业知识库，在回答时必须优先参考：\n\n")
 	count := 0
 	for _, r := range results {
-		if r.Score < 0.5 {
+		if r.Score < 0.35 {
 			continue
 		}
 		count++
