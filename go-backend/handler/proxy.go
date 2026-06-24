@@ -5,11 +5,34 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// estimatePromptTokens 从请求 messages 中估算 prompt token 数
+// 估算公式：len(rune) * 2 / 3（中文约 1.5 字/token，与 completionTokens 估算一致）
+func estimatePromptTokens(req map[string]interface{}) int {
+	messages, ok := req["messages"].([]interface{})
+	if !ok {
+		return 0
+	}
+	totalChars := 0
+	for _, m := range messages {
+		msg, ok := m.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		totalChars += len([]rune(extractContent(msg["content"])))
+	}
+	tokens := totalChars * 2 / 3
+	if tokens == 0 {
+		tokens = 1
+	}
+	return tokens
+}
 
 // ── 代理通道：纯透传（无工具时走这里，真流式零延迟）──
 
@@ -54,8 +77,10 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 		var usage map[string]interface{}
 
 		done := false
+		var readErr error
 		for {
 			line, err := reader.ReadBytes('\n')
+			readErr = err
 			lineStr := strings.TrimSpace(string(line))
 			if lineStr != "" {
 				if !strings.HasPrefix(lineStr, "data: ") {
@@ -102,6 +127,19 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 			}
 		}
 
+		// SSE 流中断检测：区分正常结束和异常中断
+		if !done {
+			if readErr != nil && readErr != io.EOF {
+				// 流被异常中断（网络错误、上游超时等）
+				convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("SSE 流异常中断: %s", readErr.Error()))
+				log.Printf("[proxy] stream %s user=%s SSE_ABORTED: %v", route.ModelID, username, readErr)
+			} else if readErr == io.EOF {
+				// 上游关闭连接但未发送 [DONE]，内容可能不完整
+				convCtx.Errors = append(convCtx.Errors, "SSE 流未收到 [DONE] 即关闭")
+				log.Printf("[proxy] stream %s user=%s SSE_EOF_WITHOUT_DONE", route.ModelID, username)
+			}
+		}
+
 		// 确保客户端收到 [DONE]
 		if !done {
 			fmt.Fprintf(w, "data: [DONE]\n\n")
@@ -120,11 +158,13 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 			convCtx.TotalPrompt += promptTokens
 			convCtx.TotalCompletion += completionTokens
 		} else {
-			// 估算
+			// 估算（上游未返回 usage 时）
 			completionTokens = len([]rune(content)) * 2 / 3
 			if completionTokens == 0 {
 				completionTokens = 1
 			}
+			promptTokens = estimatePromptTokens(req)
+			totalTokens = promptTokens + completionTokens
 		}
 
 		latency := int(time.Since(startTime).Milliseconds())

@@ -13,7 +13,7 @@ import (
 //   - TLS 握手开销重复
 //   - 大量 TIME_WAIT 套接字堆积
 var SharedHTTPClient = &http.Client{
-	Timeout: 60 * time.Second,
+	Timeout: 120 * time.Second,
 	Transport: &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   10 * time.Second,  // TCP 连接超时
@@ -23,7 +23,7 @@ var SharedHTTPClient = &http.Client{
 		MaxIdleConns:          100,              // 全局最大空闲连接
 		MaxIdleConnsPerHost:   20,               // 每个 host 最大空闲连接（智谱）
 		IdleConnTimeout:       90 * time.Second, // 空闲连接超时
-		ResponseHeaderTimeout: 60 * time.Second, // 等待响应头超时
+		ResponseHeaderTimeout: 90 * time.Second, // 等待响应头超时（大 prompt 场景首 token 可能较慢）
 		ExpectContinueTimeout: 1 * time.Second,
 		ForceAttemptHTTP2:     true, // 尝试 HTTP/2（智谱支持）
 	},
