@@ -33,8 +33,8 @@ description: AIOS前端部署。当用户要求"部署前端"、"部署web"、"�
 | 主机 | 8.163.127.182 |
 | SSH端口 | 443 |
 | 用户 | root |
-| 前端部署路径 | /opt/ai-os/ai-os-web |
-| Nginx 配置 | /etc/nginx/sites-available/ai-os |
+| 前端部署路径 | /www/wwwroot/ai-os-web |
+| Nginx 配置 | /www/server/panel/vhost/nginx/ai-os.conf |
 
 ## 注意事项
 

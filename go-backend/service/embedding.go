@@ -172,7 +172,7 @@ func summarizeForKnowledge(content string) ([]string, error) {
 %s`, content)
 
 	body := map[string]interface{}{
-		"model": "glm-4-flash",
+		"model": "glm-5.2",
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},

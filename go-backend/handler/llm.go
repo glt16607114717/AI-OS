@@ -248,7 +248,7 @@ func injectGodRulesAndRAG(req map[string]interface{}, userMsgRaw string, userID 
 	for i, m := range messages {
 		msgMaps[i], _ = m.(map[string]interface{})
 	}
-	msgMaps = service.InjectGodRules(msgMaps)
+	msgMaps = service.InjectGodRules(msgMaps, userID)
 	msgMaps = injectRAGContext(msgMaps, extractUserQuery(userMsgRaw), userID)
 
 	// 图片识别预处理：检测最后一条 user message 的图片（上传/URL），识别后追加文字描述

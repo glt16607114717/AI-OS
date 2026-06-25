@@ -8,16 +8,13 @@ import (
 	"sync"
 )
 
-// ── 上帝指令（持久化到 MySQL）──
+// ── 上帝指令（持久化到 MySQL，按用户隔离）──
 
 var (
-	godRulesConfig = &model.GodRulesConfig{
-		Enabled:        true,
-		Rules:          "",
-		PromptOptimize: true,
-	}
-	godRulesLock   sync.RWMutex
-	godRulesLoaded = false
+	// userID → config 内存缓存
+	godRulesCache   = make(map[int]*model.GodRulesConfig)
+	godRulesLock    sync.RWMutex
+	godRulesLoaded  = false
 )
 
 func EnsureGodRulesTable() {
@@ -27,10 +24,12 @@ func EnsureGodRulesTable() {
 	}
 	conn.Exec(`CREATE TABLE IF NOT EXISTS sys_god_rules (
 		id INT AUTO_INCREMENT PRIMARY KEY,
+		user_id INT NOT NULL DEFAULT 0,
 		enabled TINYINT DEFAULT 1,
 		rules TEXT,
 		prompt_optimize TINYINT DEFAULT 1,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+		UNIQUE KEY uk_user (user_id)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
 }
 
@@ -39,41 +38,62 @@ func loadGodRulesFromDB() {
 	if conn == nil {
 		return
 	}
-	var enabled, promptOptimize int
-	var rules string
-	err := conn.QueryRow("SELECT enabled, rules, prompt_optimize FROM sys_god_rules ORDER BY id DESC LIMIT 1").Scan(&enabled, &rules, &promptOptimize)
+	rows, err := conn.Query("SELECT user_id, enabled, rules, prompt_optimize FROM sys_god_rules")
 	if err != nil {
-		return // 表空，用默认值
+		return
 	}
+	defer rows.Close()
+
 	godRulesLock.Lock()
-	godRulesConfig = &model.GodRulesConfig{
-		Enabled:        enabled == 1,
-		Rules:          rules,
-		PromptOptimize: promptOptimize == 1,
+	defer godRulesLock.Unlock()
+	for rows.Next() {
+		var userID, enabled, promptOptimize int
+		var rules string
+		if err := rows.Scan(&userID, &enabled, &rules, &promptOptimize); err != nil {
+			continue
+		}
+		godRulesCache[userID] = &model.GodRulesConfig{
+			UserID:         userID,
+			Enabled:        enabled == 1,
+			Rules:          rules,
+			PromptOptimize: promptOptimize == 1,
+		}
 	}
-	godRulesLock.Unlock()
 }
 
-func GetGodRules() *model.GodRulesConfig {
+// getGodRulesForUser 获取指定用户的上帝指令配置（带缓存）
+func getGodRulesForUser(userID int) *model.GodRulesConfig {
 	if !godRulesLoaded {
 		loadGodRulesFromDB()
 		godRulesLoaded = true
 	}
 	godRulesLock.RLock()
-	defer godRulesLock.RUnlock()
-	return godRulesConfig
+	cfg, ok := godRulesCache[userID]
+	godRulesLock.RUnlock()
+	if ok {
+		return cfg
+	}
+	// 用户未配置，返回默认（关闭状态）
+	return &model.GodRulesConfig{
+		UserID:  userID,
+		Enabled: false,
+	}
 }
 
-func SaveGodRules(enabled bool, rules string, promptOptimize bool) {
+func GetGodRules(userID int) *model.GodRulesConfig {
+	return getGodRulesForUser(userID)
+}
+
+func SaveGodRules(userID int, enabled bool, rules string, promptOptimize bool) {
 	godRulesLock.Lock()
-	godRulesConfig = &model.GodRulesConfig{
+	godRulesCache[userID] = &model.GodRulesConfig{
+		UserID:         userID,
 		Enabled:        enabled,
 		Rules:          rules,
 		PromptOptimize: promptOptimize,
 	}
 	godRulesLock.Unlock()
 
-	// 持久化
 	conn, err := GetDB()
 	if err != nil {
 		log.Printf("[god_rules] DB连接失败: %v", err)
@@ -86,18 +106,13 @@ func SaveGodRules(enabled bool, rules string, promptOptimize bool) {
 	if promptOptimize {
 		po = 1
 	}
-	if _, err := conn.Exec("TRUNCATE TABLE sys_god_rules"); err != nil {
-		log.Printf("[god_rules] TRUNCATE 失败: %v", err)
-	}
-	if _, err := conn.Exec("INSERT INTO sys_god_rules (enabled, rules, prompt_optimize) VALUES (?, ?, ?)", e, rules, po); err != nil {
-		log.Printf("[god_rules] INSERT 失败: %v", err)
+	if _, err := conn.Exec("INSERT INTO sys_god_rules (user_id, enabled, rules, prompt_optimize) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE enabled=?, rules=?, prompt_optimize=?", userID, e, rules, po, e, rules, po); err != nil {
+		log.Printf("[god_rules] UPSERT 失败: %v", err)
 	}
 }
 
-func InjectGodRules(messages []map[string]interface{}) []map[string]interface{} {
-	godRulesLock.RLock()
-	cfg := godRulesConfig
-	godRulesLock.RUnlock()
+func InjectGodRules(messages []map[string]interface{}, userID int) []map[string]interface{} {
+	cfg := getGodRulesForUser(userID)
 
 	if !cfg.Enabled || strings.TrimSpace(cfg.Rules) == "" {
 		return messages
@@ -129,10 +144,9 @@ func InjectGodRules(messages []map[string]interface{}) []map[string]interface{} 
 	return result
 }
 
-func IsOptimizeEnabled() bool {
-	godRulesLock.RLock()
-	defer godRulesLock.RUnlock()
-	return godRulesConfig.PromptOptimize
+func IsOptimizeEnabled(userID int) bool {
+	cfg := getGodRulesForUser(userID)
+	return cfg.PromptOptimize
 }
 
 // StringifyContent 兼容 string 和 []interface{} 格式的 content，统一转成 string

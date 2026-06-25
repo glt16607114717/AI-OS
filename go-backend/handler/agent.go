@@ -43,7 +43,7 @@ func agentLoop(w http.ResponseWriter, req map[string]interface{}, attempts []*se
 
 	for round := 0; ; round++ {
 		// 1. 请求 LLM（非流式，带故障转移）
-		result, err := callLLMWithFailover(messages, tools, attempts, false, convCtx)
+		result, err := callLLMWithFailover(messages, tools, attempts, convCtx)
 		if err != nil {
 			convCtx.SummarizeAndLog()
 			errResponse(w, fmt.Sprintf("所有厂商均失败: %s", err.Error()), 502)
@@ -82,7 +82,7 @@ func agentLoop(w http.ResponseWriter, req map[string]interface{}, attempts []*se
 			if stuckCount >= stuckRoundsLimit {
 				log.Printf("[agent] stuck loop detected user=%s round=%d (same tool_calls %d times)", username, round+1, stuckCount)
 				// 强制总结（不带 tools）
-				forceResult, forceErr := callLLMWithFailover(messages, nil, attempts, false, convCtx)
+				forceResult, forceErr := callLLMWithFailover(messages, nil, attempts, convCtx)
 				if forceErr != nil {
 					finishAgent(w, req, "检测到查询陷入循环，且总结失败。请尝试换一种问法。", nil, convCtx, sqlTrace)
 					return

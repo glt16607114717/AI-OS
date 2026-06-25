@@ -8,30 +8,28 @@ import (
 )
 
 // SharedHTTPClient 全局共享 HTTP Client（连接池复用 TCP/TLS）
-// 解决每次请求新建 Client 导致的：
-//   - 无法复用 TCP 连接（每次重新握手 ~200ms）
-//   - TLS 握手开销重复
-//   - 大量 TIME_WAIT 套接字堆积
+// 流式请求：ResponseHeaderTimeout=30s 保证首字节，不设总超时（长回答可能很久）
+// 非流式请求：由调用方通过 context.WithTimeout 控制总超时
 var SharedHTTPClient = &http.Client{
-	Timeout: 120 * time.Second,
+	Timeout: 0, // 不设总超时，流式与非流式由各自场景控制
 	Transport: &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   10 * time.Second,  // TCP 连接超时
 			KeepAlive: 30 * time.Second,  // TCP keepalive 探测间隔
 		}).DialContext,
 		TLSClientConfig:       &tls.Config{},
-		MaxIdleConns:          100,              // 全局最大空闲连接
-		MaxIdleConnsPerHost:   20,               // 每个 host 最大空闲连接（智谱）
-		IdleConnTimeout:       90 * time.Second, // 空闲连接超时
-		ResponseHeaderTimeout: 90 * time.Second, // 等待响应头超时（大 prompt 场景首 token 可能较慢）
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second, // 首字节超时：30秒内没响应头 = 卡死
 		ExpectContinueTimeout: 1 * time.Second,
-		ForceAttemptHTTP2:     true, // 尝试 HTTP/2（智谱支持）
+		ForceAttemptHTTP2:     true,
 	},
 }
 
-// SharedHTTPClientLong 超时版（用于蒸馏等长任务，晚上自动跑，允许较长时间）
+// SharedHTTPClientLong 蒸馏专用（定时任务，晚上跑，不设超时）
 var SharedHTTPClientLong = &http.Client{
-	Timeout: 10 * time.Minute, // 蒸馏任务可能很长，给 10 分钟
+	Timeout: 0,
 	Transport: &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   10 * time.Second,
@@ -41,7 +39,7 @@ var SharedHTTPClientLong = &http.Client{
 		MaxIdleConns:          50,
 		MaxIdleConnsPerHost:   10,
 		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 10 * time.Minute,
+		ResponseHeaderTimeout: 0,
 		ExpectContinueTimeout: 1 * time.Second,
 		ForceAttemptHTTP2:     true,
 	},

@@ -219,6 +219,10 @@ onBeforeUnmount(() => {
                 <span class="sub-dot"></span>
                 建议
               </router-link>
+              <router-link to="/llm/errors" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                错误记录
+              </router-link>
             </div>
           </transition>
         </div>

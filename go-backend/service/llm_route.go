@@ -78,21 +78,21 @@ func GetCatalog() ([]map[string]interface{}, error) {
 	}
 
 	// 查模型
-	modelRows, err := conn.Query("SELECT id, vendor_id, model_id, name, model_type, enabled, max_tokens FROM sys_model ORDER BY id")
+	modelRows, err := conn.Query("SELECT id, vendor_id, model_id, name, description, model_type, enabled, max_tokens FROM sys_model ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
 	defer modelRows.Close()
 	for modelRows.Next() {
 		var m model.ModelEntry
-		if err := modelRows.Scan(&m.ID, &m.VendorID, &m.ModelID, &m.Name, &m.ModelType, &m.Enabled, &m.MaxTokens); err != nil {
+		if err := modelRows.Scan(&m.ID, &m.VendorID, &m.ModelID, &m.Name, &m.Description, &m.ModelType, &m.Enabled, &m.MaxTokens); err != nil {
 			continue
 		}
 		if vm, ok := vendorMap[m.VendorID]; ok {
 			models := vm["models"].([]map[string]interface{})
 			vm["models"] = append(models, map[string]interface{}{
 				"id": m.ID, "model_id": m.ModelID, "display_name": m.Name,
-				"model_type": m.ModelType.String, "enabled": m.Enabled, "max_tokens": m.MaxTokens,
+				"description": m.Description.String, "model_type": m.ModelType.String, "enabled": m.Enabled, "max_tokens": m.MaxTokens,
 			})
 		}
 	}

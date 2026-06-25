@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // VisionResult 图片识别结果
@@ -218,7 +220,12 @@ func RecognizeImage(userID int, username, imageURL, prompt string) (string, erro
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := SharedHTTPClientLong.Do(req)
+	// 使用 SharedHTTPClient（有 30s 首字节超时），而非 SharedHTTPClientLong（无超时）
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	resp, err := SharedHTTPClient.Do(req)
 	if err != nil {
 		errMsg := fmt.Sprintf("调用智谱视觉模型失败: %v", err)
 		log.Printf("[vision] %s", errMsg)

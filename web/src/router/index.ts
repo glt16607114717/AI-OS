@@ -65,6 +65,11 @@ const router = createRouter({
           component: () => import('../views/llm/AiAdvice.vue'),
         },
         {
+          path: 'llm/errors',
+          name: 'LlmErrors',
+          component: () => import('../views/llm/ErrorLog.vue'),
+        },
+        {
           path: 'rag/config',
           name: 'RagConfig',
           component: () => import('../views/rag/RagConfig.vue'),

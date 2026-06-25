@@ -33,7 +33,7 @@ description: AIOS Go后端部署。当用户要求"部署后端"、"部署Go服�
 | 主机 | 8.163.127.182 |
 | SSH端口 | 443 |
 | 用户 | root |
-| 服务路径 | /opt/ai-os/ai-os-server |
+| 服务路径 | /opt/ai-os/aios-server |
 | systemd 服务 | ai-os.service |
 
 ## 注意事项

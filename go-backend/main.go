@@ -121,6 +121,10 @@ func main() {
 		r.Get("/api/stats/errors", handler.GetRecentErrors)
 		r.Post("/api/stats/cleanup", handler.CleanupStats)
 
+		// 错误日志
+		r.Get("/api/llm/error-log", handler.GetErrorLog)
+		r.Get("/api/llm/error-stats", handler.GetErrorStats)
+
 		// 日志
 		r.Get("/api/logs", handler.GetLogs)
 		r.Post("/api/logs/clear", handler.ClearLogs)

@@ -64,14 +64,15 @@ type Vendor struct {
 }
 
 type ModelEntry struct {
-	ID          int           `json:"id"`
-	VendorID    int           `json:"vendor_id"`
-	ModelID     string        `json:"model_id"`
-	Name        string        `json:"name"`
+	ID          int            `json:"id"`
+	VendorID    int            `json:"vendor_id"`
+	ModelID     string         `json:"model_id"`
+	Name        string         `json:"name"`
+	Description sql.NullString `json:"description"`
 	ModelType   sql.NullString `json:"model_type"`
-	Enabled     bool          `json:"enabled"`
-	MaxTokens   int           `json:"max_tokens"`
-	DisplayName string        `json:"display_name"`
+	Enabled     bool           `json:"enabled"`
+	MaxTokens   int            `json:"max_tokens"`
+	DisplayName string         `json:"display_name"`
 }
 
 type APIKey struct {
@@ -172,6 +173,7 @@ type AISuggestion struct {
 // ── God Rules ──
 
 type GodRulesConfig struct {
+	UserID         int    `json:"user_id"`
 	Enabled        bool   `json:"enabled"`
 	Rules          string `json:"rules"`
 	PromptOptimize bool   `json:"prompt_optimize"`

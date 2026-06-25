@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [{
+      "name": "aios-session-context",
+      "enabled": true,
+      "matcher": "startup",
+      "command": "C:\\Users\\guilt\\AppData\\Local\\Programs\\Python\\Python312\\python.exe D:\\wwwroot\\AI\\AI-OS\\.trae\\hooks\\session-start.py"
+    }],
+    "PreCompact": [{
+      "name": "aios-preserve-session-id",
+      "enabled": true,
+      "matcher": "auto|manual",
+      "command": "C:\\Users\\guilt\\AppData\\Local\\Programs\\Python\\Python312\\python.exe D:\\wwwroot\\AI\\AI-OS\\.trae\\hooks\\session-start.py"
+    }]
+  }
+}

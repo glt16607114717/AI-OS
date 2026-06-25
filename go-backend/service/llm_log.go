@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -505,4 +506,193 @@ func GetChatMaxID() int {
 		log.Printf("[chat] 查询 maxID 失败: %v", err)
 	}
 	return maxID
+}
+
+// ── 错误日志查询 ──
+
+// GetErrorLog 分页查询错误记录
+func GetErrorLog(page, pageSize int, modelFilter, userFilter string) ([]map[string]interface{}, int, error) {
+	conn, err := GetDB()
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// 构建条件
+	where := "success = 0"
+	args := []interface{}{}
+	if modelFilter != "" {
+		where += " AND model_id = ?"
+		args = append(args, modelFilter)
+	}
+	if userFilter != "" {
+		where += " AND username = ?"
+		args = append(args, userFilter)
+	}
+
+	// 查总数
+	var total int
+	countArgs := make([]interface{}, len(args))
+	copy(countArgs, args)
+	conn.QueryRow("SELECT COUNT(*) FROM sys_llm_stats WHERE "+where, countArgs...).Scan(&total)
+
+	// 分页查询
+	offset := (page - 1) * pageSize
+	queryArgs := append(args, pageSize, offset)
+	rows, err := conn.Query(
+		"SELECT s.id, s.ts, s.user_id, s.username, s.vendor_id, s.key_id, s.model_id, s.error, s.latency_ms, IFNULL(k.name,'') FROM sys_llm_stats s LEFT JOIN sys_api_key k ON k.id = s.key_id WHERE "+
+			where+" ORDER BY s.ts DESC LIMIT ? OFFSET ?", queryArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	result := []map[string]interface{}{}
+	for rows.Next() {
+		var id, userID, vendorID, latencyMs int
+		var ts, username, keyID, modelID, errMsg, keyName string
+		if err := rows.Scan(&id, &ts, &userID, &username, &vendorID, &keyID, &modelID, &errMsg, &latencyMs, &keyName); err != nil {
+			continue
+		}
+		result = append(result, map[string]interface{}{
+			"id":       id,
+			"ts":       ts,
+			"user_id":  userID,
+			"username": username,
+			"vendor_id": vendorID,
+			"key_id":   keyID,
+			"key_name": keyName,
+			"model_id": modelID,
+			"error":    errMsg,
+			"latency_ms": latencyMs,
+		})
+	}
+	return result, total, nil
+}
+
+// classifyError 根据错误内容分类
+func classifyError(errMsg string) string {
+	lower := strings.ToLower(errMsg)
+	if strings.Contains(lower, "429") || strings.Contains(lower, "限流") || strings.Contains(lower, "rate limit") {
+		return "限流(429)"
+	}
+	if strings.Contains(lower, "timeout") || strings.Contains(lower, "超时") || strings.Contains(lower, "deadline exceeded") {
+		return "超时"
+	}
+	if strings.Contains(lower, "sse") || strings.Contains(lower, "流") {
+		return "SSE流中断"
+	}
+	if strings.Contains(lower, "connection refused") || strings.Contains(lower, "dial tcp") || strings.Contains(lower, "network") {
+		return "网络错误"
+	}
+	if strings.Contains(lower, "500") || strings.Contains(lower, "502") || strings.Contains(lower, "503") {
+		return "服务器错误(5xx)"
+	}
+	if strings.Contains(lower, "400") || strings.Contains(lower, "401") || strings.Contains(lower, "403") {
+		return "客户端错误(4xx)"
+	}
+	return "其他"
+}
+
+// GetErrorStats 错误聚合统计
+func GetErrorStats(days int) (map[string]interface{}, error) {
+	conn, err := GetDB()
+	if err != nil {
+		return nil, err
+	}
+	cutoff := time.Now().AddDate(0, 0, -days).Format("2006-01-02 15:04:05")
+
+	// 1. 错误总数
+	var totalErrors int
+	conn.QueryRow("SELECT COUNT(*) FROM sys_llm_stats WHERE success=0 AND ts >= ?", cutoff).Scan(&totalErrors)
+
+	// 2. 按错误类型分组
+	byType := []map[string]interface{}{}
+	typeRows, _ := conn.Query(`
+		SELECT model_id, COUNT(*) as cnt, MAX(ts) as last_ts
+		FROM sys_llm_stats WHERE success=0 AND ts >= ?
+		GROUP BY model_id ORDER BY cnt DESC`, cutoff)
+	if typeRows != nil {
+		defer typeRows.Close()
+		for typeRows.Next() {
+			var modelID string
+			var cnt int
+			var lastTs string
+			if err := typeRows.Scan(&modelID, &cnt, &lastTs); err != nil {
+				continue
+			}
+			byType = append(byType, map[string]interface{}{
+				"model_id": modelID, "count": cnt, "last_ts": lastTs,
+			})
+		}
+	}
+
+	// 3. 按具体错误内容分组（Top 错误类型）
+	byError := []map[string]interface{}{}
+	errRows, _ := conn.Query(`
+		SELECT error, COUNT(*) as cnt, MAX(ts) as last_ts,
+			(SELECT model_id FROM sys_llm_stats s2 WHERE s2.error = s1.error AND s2.success=0 AND s2.ts >= ? ORDER BY s2.ts DESC LIMIT 1) as model_id
+		FROM sys_llm_stats s1 WHERE success=0 AND ts >= ?
+		GROUP BY error ORDER BY cnt DESC LIMIT 20`, cutoff, cutoff)
+	if errRows != nil {
+		for errRows.Next() {
+			var errMsg, modelID string
+			var cnt int
+			var lastTs string
+			if err := errRows.Scan(&errMsg, &cnt, &lastTs, &modelID); err != nil {
+				continue
+			}
+			byError = append(byError, map[string]interface{}{
+				"error": errMsg, "count": cnt, "last_ts": lastTs, "model_id": modelID,
+			})
+		}
+		errRows.Close()
+	}
+
+	// 4. 按错误分类分组（需要遍历）
+	allRows, _ := conn.Query("SELECT error FROM sys_llm_stats WHERE success=0 AND ts >= ?", cutoff)
+	typeCount := map[string]int{}
+	if allRows != nil {
+		for allRows.Next() {
+			var errMsg string
+			if err := allRows.Scan(&errMsg); err != nil {
+				continue
+			}
+			typeCount[classifyError(errMsg)]++
+		}
+		allRows.Close()
+	}
+	byCategory := []map[string]interface{}{}
+	for t, c := range typeCount {
+		byCategory = append(byCategory, map[string]interface{}{
+			"type": t, "count": c,
+		})
+	}
+
+	// 5. 按天分组（近7天趋势）
+	byDay := []map[string]interface{}{}
+	dayRows, _ := conn.Query(`
+		SELECT DATE(ts) as day, COUNT(*) as cnt
+		FROM sys_llm_stats WHERE success=0 AND ts >= ?
+		GROUP BY DATE(ts) ORDER BY day`, cutoff)
+	if dayRows != nil {
+		for dayRows.Next() {
+			var day string
+			var cnt int
+			if err := dayRows.Scan(&day, &cnt); err != nil {
+				continue
+			}
+			byDay = append(byDay, map[string]interface{}{
+				"date": day, "count": cnt,
+			})
+		}
+		dayRows.Close()
+	}
+
+	return map[string]interface{}{
+		"total":       totalErrors,
+		"by_model":    byType,
+		"by_error":    byError,
+		"by_category": byCategory,
+		"by_day":      byDay,
+	}, nil
 }

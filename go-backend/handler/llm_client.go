@@ -2,6 +2,7 @@ package handler
 
 import (
 	"ai-os-server/service"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,19 +35,18 @@ func appendUnique(s []string, v string) []string {
 	return append(s, v)
 }
 
-// callLLMWithFailover 用故障转移链请求 LLM
-// stream: 是否流式请求上游
+// callLLMWithFailover 用故障转移链请求 LLM（非流式）
 // tools: 工具定义（可为 nil）
 // 返回第一个成功的路由的响应；全部失败则返回 error
-func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts []*service.RouteInfoType, stream bool, convCtx *ConversationContext) (*LLMResult, error) {
+func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts []*service.RouteInfoType, convCtx *ConversationContext) (*LLMResult, error) {
 	userID := convCtx.UserID
 	username := convCtx.Username
 	startTime := convCtx.StartTime
-	failedVendors := make(map[int]bool)
+	failedKeys := make(map[string]bool)
 	var lastError string
 
 	for idx, route := range attempts {
-		if failedVendors[route.VendorID] {
+		if failedKeys[route.KeyID] {
 			continue
 		}
 
@@ -58,11 +58,10 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 		convCtx.Models = appendUnique(convCtx.Models, route.ModelID)
 		convCtx.KeyNames = appendUnique(convCtx.KeyNames, route.KeyName)
 
-		// 构造请求
+		// 构造请求（始终非流式）
 		llmReq := map[string]interface{}{
 			"model":    route.ModelID,
 			"messages": messages,
-			"stream":   stream,
 		}
 		if len(tools) > 0 {
 			llmReq["tools"] = tools
@@ -74,6 +73,11 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 		httpReq.Header.Set("Authorization", "Bearer "+route.APIKey)
 		httpReq.Header.Set("Content-Type", "application/json")
 
+		// 加总超时 context（60s）
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		httpReq = httpReq.WithContext(ctx)
+		defer cancel()
+
 		resp, err := service.SharedHTTPClient.Do(httpReq)
 		if err != nil {
 			latency := int(time.Since(startTime).Milliseconds())
@@ -83,59 +87,30 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 				LatencyMs: latency, Success: false, Error: err.Error(),
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 网络错误: %s", route.VendorName, err.Error()))
-			failedVendors[route.VendorID] = true
+			failedKeys[route.KeyID] = true
 			lastError = err.Error()
 			continue
 		}
 
-		// 流式：直接返回 resp，由调用方逐行读取
-		if stream {
-			if resp.StatusCode != 200 {
-				body, _ := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				errMsg := string(body)
-				if len(errMsg) > 500 {
-					errMsg = errMsg[:500]
-				}
-				service.RecordStat(&service.LLMStatType{
-					UserID: userID, Username: username,
-					VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
-					LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: errMsg,
-				})
-				convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
-				failedVendors[route.VendorID] = true
-				lastError = errMsg
-				continue
-			}
-			log.Printf("[llm] stream vendor=%s model=%s source=%s", route.VendorName, route.ModelID, source)
-			return &LLMResult{
-				Body:       nil,
-				StatusCode: resp.StatusCode,
-				Header:     resp.Header,
-				Route:      route,
-				Data:       map[string]interface{}{"__stream_resp__": resp}, // 特殊标记
-			}, nil
-		}
+	// 读完 body
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
 
-		// 非流式：读完 body
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		if resp.StatusCode != 200 {
-			errMsg := string(body)
-			if len(errMsg) > 500 {
-				errMsg = errMsg[:500]
-			}
-			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
-				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
-				LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: errMsg,
-			})
-			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
-			failedVendors[route.VendorID] = true
-			lastError = errMsg
-			continue
+	if resp.StatusCode != 200 {
+		errMsg := string(body)
+		if len(errMsg) > 500 {
+			errMsg = errMsg[:500]
 		}
+		service.RecordStat(&service.LLMStatType{
+			UserID: userID, Username: username,
+			VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+			LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: errMsg,
+		})
+		convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
+		failedKeys[route.KeyID] = true
+		lastError = errMsg
+		continue
+	}
 
 		// 成功：解析 + 统计
 		var respData map[string]interface{}
@@ -172,14 +147,6 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 	}
 
 	return nil, fmt.Errorf("%s", lastError)
-}
-
-// getStreamResp 从 LLMResult 中取出流式响应的 http.Response
-func getStreamResp(result *LLMResult) *http.Response {
-	if v, ok := result.Data["__stream_resp__"].(*http.Response); ok {
-		return v
-	}
-	return nil
 }
 
 // toInterfaceSlice 将 []interface{} 或 []map[string]interface{} 统一转为 []interface{}
