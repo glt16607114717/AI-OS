@@ -39,6 +39,15 @@ const userFilter = ref('')
 const autoRefresh = ref(true)
 let timer: ReturnType<typeof setInterval> | null = null
 
+// 熔断状态
+interface BreakerKey {
+  model_id: string
+  key_id: string
+  opened_at: string
+  reason: string
+}
+const breakerKeys = ref<BreakerKey[]>([])
+
 const totalPages = computed(() => Math.ceil(total.value / pageSize))
 
 async function fetchStats() {
@@ -48,6 +57,16 @@ async function fetchStats() {
     if (data.ok) stats.value = data.data
   } catch (e) {
     console.error('[ErrorLog] fetchStats error:', e)
+  }
+}
+
+async function fetchBreakerStatus() {
+  try {
+    const res = await fetch(`${API_BASE}/api/llm/circuit-status`, { headers: authHeaders(), cache: 'no-cache' })
+    const data = await res.json()
+    if (data.ok) breakerKeys.value = data.data.open_keys || []
+  } catch (e) {
+    console.error('[ErrorLog] fetchBreakerStatus error:', e)
   }
 }
 
@@ -71,6 +90,7 @@ async function fetchErrors() {
 
 function refresh() {
   fetchStats()
+  fetchBreakerStatus()
   fetchErrors()
 }
 
@@ -120,6 +140,22 @@ onUnmounted(() => {
       <div class="stat-card" v-for="c in stats.by_category?.slice(0, 4)" :key="c.type">
         <div class="stat-value">{{ c.count }}</div>
         <div class="stat-label">{{ c.type }}</div>
+      </div>
+    </div>
+
+    <!-- 熔断状态 -->
+    <div class="breaker-section" v-if="breakerKeys.length > 0">
+      <div class="breaker-header">
+        <span class="breaker-badge">{{ breakerKeys.length }}</span>
+        <span class="breaker-title">个模型+Key 组合已熔断</span>
+      </div>
+      <div class="breaker-list">
+        <div class="breaker-item" v-for="b in breakerKeys" :key="b.model_id + b.key_id">
+          <span class="breaker-model">{{ b.model_id }}</span>
+          <span class="breaker-key">Key: {{ b.key_id }}</span>
+          <span class="breaker-time">熔断于 {{ formatTime(b.opened_at) }}</span>
+          <span class="breaker-reason" :title="b.reason">{{ b.reason }}</span>
+        </div>
       </div>
     </div>
 
@@ -249,6 +285,70 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
+}
+
+/* 熔断状态 */
+.breaker-section {
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.breaker-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.breaker-badge {
+  background: #ef4444;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.breaker-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #c2410c;
+}
+.breaker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.breaker-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: #fff;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.breaker-model {
+  color: #6366f1;
+  font-weight: 500;
+  min-width: 120px;
+}
+.breaker-key {
+  color: #909399;
+  font-size: 12px;
+  min-width: 80px;
+}
+.breaker-time {
+  color: #909399;
+  font-size: 12px;
+}
+.breaker-reason {
+  color: #e34d59;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-left: auto;
+  max-width: 300px;
 }
 .top-card {
   background: #fff;

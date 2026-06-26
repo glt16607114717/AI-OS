@@ -31,7 +31,6 @@ description: AIOS系统数据库查询。当用户要求"查AIOS数据库"、"�
 | strategies | 模型路由策略 |
 | god_rules | 上帝规则 |
 | embeddings | 向量嵌入存储 |
-| voice_logs | 语音日志 |
 
 ## 使用方式
 

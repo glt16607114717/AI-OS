@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"ai-os-server/circuit"
 	"ai-os-server/service"
 	"bufio"
 	"encoding/json"
@@ -97,6 +98,11 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 
 	for idx, route := range attempts {
 		if failedKeys[route.KeyID] {
+			continue
+		}
+		// 熔断检查：独立进程已标记该 "模型+Key" 不可用
+		if circuit.GetBreaker().IsOpen(route.ModelID, route.KeyID) {
+			log.Printf("[proxy] circuit breaker open for %s/%s, skip", route.ModelID, route.KeyID)
 			continue
 		}
 

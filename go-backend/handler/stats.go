@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"ai-os-server/circuit"
 	"ai-os-server/service"
 	"net/http"
 	"strconv"
@@ -77,4 +78,17 @@ func GetErrorStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	okResponse(w, stats)
+}
+
+// ── 熔断状态 ──
+
+func GetCircuitBreakerStatus(w http.ResponseWriter, r *http.Request) {
+	cb := circuit.GetBreaker()
+	if cb == nil {
+		okResponse(w, map[string]interface{}{"open_keys": []interface{}{}})
+		return
+	}
+	okResponse(w, map[string]interface{}{
+		"open_keys": cb.GetOpenKeys(),
+	})
 }

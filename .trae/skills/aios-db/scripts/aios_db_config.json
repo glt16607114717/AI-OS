@@ -17,7 +17,6 @@
         "sys_config": "系统配置（id, key, value, updated_at）",
         "sys_model": "模型目录（id, vendor, model_name, display_name, context_window, max_tokens）",
         "sys_vendor": "供应商管理（id, name, display_name, enabled）",
-        "sys_llm_stats": "LLM 统计聚合（id, model, date, request_count, total_tokens, avg_duration）",
-        "voice_commands": "语音指令（id, command, action, enabled, created_at）"
+        "sys_llm_stats": "LLM 统计聚合（id, model, date, request_count, total_tokens, avg_duration）"
     }
 }

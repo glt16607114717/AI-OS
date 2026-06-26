@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"ai-os-server/circuit"
 	"ai-os-server/service"
 	"context"
 	"encoding/json"
@@ -47,6 +48,11 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 
 	for idx, route := range attempts {
 		if failedKeys[route.KeyID] {
+			continue
+		}
+		// 熔断检查：独立进程已标记该 "模型+Key" 不可用
+		if circuit.GetBreaker().IsOpen(route.ModelID, route.KeyID) {
+			log.Printf("[llm] circuit breaker open for %s/%s, skip", route.ModelID, route.KeyID)
 			continue
 		}
 

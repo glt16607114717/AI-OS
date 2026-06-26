@@ -1,6 +1,7 @@
 package main
 
 import (
+	"ai-os-server/circuit"
 	"ai-os-server/config"
 	"ai-os-server/handler"
 	"ai-os-server/middleware"
@@ -47,6 +48,10 @@ func main() {
 	// 启动额度监控
 	service.StartQuotaMonitor()
 	log.Println("[init] 额度监控已启动")
+
+	// 启动熔断器（独立 goroutine，每1分钟扫库检测）
+	cb := circuit.Init(service.GetDB)
+	go cb.StartMonitor()
 
 	// 启动每日知识蒸馏（凌晨3点）
 	c := cron.New()
@@ -124,6 +129,7 @@ func main() {
 		// 错误日志
 		r.Get("/api/llm/error-log", handler.GetErrorLog)
 		r.Get("/api/llm/error-stats", handler.GetErrorStats)
+		r.Get("/api/llm/circuit-status", handler.GetCircuitBreakerStatus)
 
 		// 日志
 		r.Get("/api/logs", handler.GetLogs)
@@ -131,6 +137,7 @@ func main() {
 
 		// 上帝指令
 		r.Get("/api/god-rules", handler.GetGodRules)
+		r.Post("/api/god-rules/save", handler.SaveGodRules)
 
 		// 额度监控
 		r.Get("/api/quota/status", handler.GetQuotaStatus)
@@ -154,9 +161,6 @@ func main() {
 		// LLM 配置管理
 		r.Post("/api/llm/vendor-keys", handler.SaveVendorKeys)
 		r.Post("/api/llm/toggle-vendor", handler.ToggleVendor)
-
-		// 上帝指令
-		r.Post("/api/god-rules/save", handler.SaveGodRules)
 
 		// 额度监控
 		r.Post("/api/quota/set-enabled", handler.SetQuotaEnabled)

@@ -10,12 +10,20 @@ import (
 // ── 上帝指令 ──
 
 func GetGodRules(w http.ResponseWriter, r *http.Request) {
-	session := middleware.GetSession(r)
+	session := middleware.GetSessionFromCtx(r)
+	if session == nil {
+		errResponse(w, "未登录", http.StatusUnauthorized)
+		return
+	}
 	okResponse(w, service.GetGodRules(session.UserID))
 }
 
 func SaveGodRules(w http.ResponseWriter, r *http.Request) {
-	session := middleware.GetSession(r)
+	session := middleware.GetSessionFromCtx(r)
+	if session == nil {
+		errResponse(w, "未登录", http.StatusUnauthorized)
+		return
+	}
 	var body map[string]interface{}
 	json.NewDecoder(r.Body).Decode(&body)
 	enabled, _ := body["enabled"].(bool)

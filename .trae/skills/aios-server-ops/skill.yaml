@@ -1,5 +1,0 @@
-name: "aios-server-ops"
-description: "AIOS 服务器运维操作（SSH免密、服务启停、部署）。当需要操作 8.163.127.182 服务器时调用此技能。"
-version: "1.0.0"
-author: "桂良涛"
-contact: "桂良涛@nndrobot.com"

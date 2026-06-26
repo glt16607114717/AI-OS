@@ -20,7 +20,7 @@ interface Option {
 interface Strategy {
   id: string
   name: string
-  type: 'fixed' | 'round_robin'
+  type: 'fixed' | 'round_robin' | 'system'
   options: string[]
   active: boolean
   user_id?: number
@@ -49,7 +49,7 @@ const strategies = ref<Strategy[]>([])
 const loading = ref(false)
 
 const selectedId = ref<string | null>(null)
-const editForm = ref<{ name: string; type: 'fixed' | 'round_robin'; options: string[] }>({
+const editForm = ref<{ name: string; type: 'fixed' | 'round_robin' | 'system'; options: string[] }>({
   name: '',
   type: 'fixed',
   options: [],
@@ -352,8 +352,8 @@ onMounted(async () => {
             <div class="card-main">
               <span class="card-name">{{ s.username ? `${s.username} - ${s.name || '未命名策略'}` : (s.name || '未命名策略') }}</span>
               <div class="card-tags">
-                <el-tag size="small" :type="s.type === 'fixed' ? 'primary' : 'success'" effect="plain">
-                  {{ s.type === 'fixed' ? '固定' : '轮询' }}
+                <el-tag size="small" :type="s.type === 'fixed' ? 'primary' : s.type === 'system' ? 'warning' : 'success'" effect="plain">
+                  {{ s.type === 'fixed' ? '固定' : s.type === 'system' ? '系统接管' : '轮询' }}
                 </el-tag>
                 <span v-if="s.active" class="active-dot"></span>
               </div>
@@ -377,6 +377,41 @@ onMounted(async () => {
         </div>
 
         <template v-else>
+          <!-- 系统接管：只读展示 -->
+          <template v-if="editForm.type === 'system'">
+            <div class="detail-section">
+              <label class="field-label">策略名称</label>
+              <el-input v-model="editForm.name" disabled />
+            </div>
+            <div class="detail-section">
+              <label class="field-label">策略类型</label>
+              <el-tag type="warning" effect="plain">系统接管（由系统统一管理，不可修改）</el-tag>
+            </div>
+            <div class="detail-section">
+              <label class="field-label">预置选项（只读）</label>
+              <div class="option-tags">
+                <el-tag
+                  v-for="(opt, idx) in editForm.options"
+                  :key="idx"
+                  size="large"
+                  type="info"
+                >
+                  {{ resolveOptionLabel(opt) }}
+                </el-tag>
+              </div>
+              <div class="system-hint">
+                <el-alert type="info" :closable="false" show-icon>
+                  系统接管策略由系统统一配置，轮询使用以下 6 个 API：智谱 GLM-5.2 × 2、DeepSeek Chat × 1、火山方舟（Ark Code / GLM-5.2 / DeepSeek-V4-Pro）× 3。配合熔断机制自动跳过故障模型。
+                </el-alert>
+              </div>
+            </div>
+            <div class="detail-actions">
+              <el-button type="primary" @click="setActive">激活此策略</el-button>
+            </div>
+          </template>
+
+          <!-- 普通策略：可编辑 -->
+          <template v-else>
           <div class="detail-section">
             <label class="field-label">策略名称</label>
             <el-input v-model="editForm.name" placeholder="请输入策略名称" />
@@ -477,6 +512,7 @@ onMounted(async () => {
             <el-button @click="saveStrategy">保存</el-button>
             <el-button type="danger" @click="deleteStrategy">删除策略</el-button>
           </div>
+          </template>
         </template>
       </div>
     </div>

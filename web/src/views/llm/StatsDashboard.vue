@@ -73,8 +73,9 @@ interface Stats {
 
 const stats = ref<Stats | null>(null)
 const loading = ref(false)
-const days = ref(30)
+const days = ref(1)
 const currentUsername = ref('')
+const dailyStats = ref<Stats | null>(null)  // 每日 Token 消耗专用（始终 30 天）
 
 // Chart refs
 const tokenTrendRef = ref<HTMLCanvasElement | null>(null)
@@ -110,8 +111,8 @@ async function fetchCurrentUser() {
 }
 
 const sortedDaily = computed(() => {
-  if (!stats.value?.daily) return []
-  return Object.entries(stats.value.daily)
+  if (!dailyStats.value?.daily) return []
+  return Object.entries(dailyStats.value.daily)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, d]) => ({ date, ...d }))
 })
@@ -229,31 +230,33 @@ function renderCharts() {
     if (userRank) userRank.destroy()
 
     const users = userEntries.value.slice(0, 10)
-    const bgColors = users.map(u =>
-      u.username === currentUsername.value ? '#f56c6c' : '#409eff'
-    )
+    if (users.length > 0) {
+      const bgColors = users.map(u =>
+        u.username === currentUsername.value ? '#f56c6c' : '#409eff'
+      )
 
-    userRank = new Chart(userRankRef.value, {
-      type: 'bar',
-      data: {
-        labels: users.map(u => u.username || u.id),
-        datasets: [{
-          label: 'Token 用量',
-          data: users.map(u => u.tokens),
-          backgroundColor: bgColors,
-          borderRadius: 4,
-        }],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: {
-          y: { beginAtZero: true, grid: { color: '#f0f0f0' }, ticks: { font: { size: 11 }, callback: (v: any) => formatNumber(v) } },
-          x: { grid: { display: false }, ticks: { font: { size: 11 } } },
+      userRank = new Chart(userRankRef.value, {
+        type: 'bar',
+        data: {
+          labels: users.map(u => u.username || u.id),
+          datasets: [{
+            label: 'Token 用量',
+            data: users.map(u => u.tokens),
+            backgroundColor: bgColors,
+            borderRadius: 4,
+          }],
         },
-      },
-    })
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            y: { beginAtZero: true, grid: { color: '#f0f0f0' }, ticks: { font: { size: 11 }, callback: (v: any) => formatNumber(v) } },
+            x: { grid: { display: false }, ticks: { font: { size: 11 } } },
+          },
+        },
+      })
+    }
   }
 
   // ── 饼图：用户 Token 占比 ──
@@ -359,6 +362,20 @@ async function fetchStats() {
   loading.value = false
 }
 
+async function fetchDailyStats() {
+  try {
+    const response = await fetch(`${API_BASE}/api/stats/summary?days=30`, { headers: authHeaders() })
+    const result = await response.json()
+    if (result.ok) {
+      dailyStats.value = result.data || null
+      await nextTick()
+      renderCharts()
+    }
+  } catch (e) {
+    console.error('[StatsDashboard] fetchDailyStats error:', e)
+  }
+}
+
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 const autoRefresh = ref(true)
 
@@ -374,6 +391,7 @@ function toggleAutoRefresh() {
 onMounted(async () => {
   await fetchCurrentUser()
   await fetchStats()
+  await fetchDailyStats()
   refreshTimer = setInterval(fetchStats, 30000)
 })
 
@@ -395,6 +413,7 @@ onUnmounted(() => {
       <h2 class="page-title">统计仪表</h2>
       <div class="header-actions">
         <div class="day-tabs">
+          <button class="day-tab" :class="{ active: days === 1 }" @click="days = 1; fetchStats()">今天</button>
           <button class="day-tab" :class="{ active: days === 7 }" @click="days = 7; fetchStats()">近 7 天</button>
           <button class="day-tab" :class="{ active: days === 30 }" @click="days = 30; fetchStats()">近 30 天</button>
         </div>
@@ -580,6 +599,27 @@ onUnmounted(() => {
 }
 .day-tab:hover { color: #303133; }
 .day-tab.active { background: #fff; color: #409eff; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+
+.period-tabs {
+  display: inline-flex;
+  background: #f4f4f5;
+  border-radius: 6px;
+  padding: 2px;
+  margin-left: 12px;
+}
+.period-tab {
+  padding: 3px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #909399;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.period-tab:hover { color: #606266; }
+.period-tab.active { background: #fff; color: #409eff; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
 
 .refresh-toggle {
   display: flex;

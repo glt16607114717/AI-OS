@@ -257,9 +257,48 @@ func EnsureStrategyTable() {
 	}
 	conn.Exec(`CREATE TABLE IF NOT EXISTS sys_strategy (
 		id INT AUTO_INCREMENT PRIMARY KEY,
+		user_id INT NOT NULL DEFAULT 0,
 		data JSON NOT NULL,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
+}
+
+// SystemStrategyOptions 系统接管预置的6个API配置
+// 智谱2个key + DeepSeek 1个key + 火山方舟3个key = 6个
+func SystemStrategyOptions() []model.StrategyOption {
+	return []model.StrategyOption{
+		{VendorID: 1, KeyID: "1", ModelID: "glm-5.2", VendorName: "智谱", KeyName: "桂良涛", DisplayName: "GLM-5.2"},
+		{VendorID: 1, KeyID: "2", ModelID: "glm-5.2", VendorName: "智谱", KeyName: "李现成", DisplayName: "GLM-5.2"},
+		{VendorID: 2, KeyID: "6", ModelID: "deepseek-chat", VendorName: "DeepSeek", KeyName: "卞成龙", DisplayName: "DeepSeek-Chat"},
+		{VendorID: 3, KeyID: "3", ModelID: "ark-code-latest", VendorName: "火山方舟", KeyName: "桂良涛", DisplayName: "Ark Code Latest"},
+		{VendorID: 3, KeyID: "4", ModelID: "glm-5.2", VendorName: "火山方舟", KeyName: "陈梓健", DisplayName: "GLM-5.2 (火山)"},
+		{VendorID: 3, KeyID: "5", ModelID: "deepseek-v4-pro", VendorName: "火山方舟", KeyName: "李伟男", DisplayName: "DeepSeek-V4-Pro (火山)"},
+	}
+}
+
+// CreateSystemStrategy 为用户创建并激活系统接管策略
+func CreateSystemStrategy(userID int) {
+	strategies := loadStrategiesFromDB(userID, false)
+	// 已有 system 策略就不重复创建
+	for _, s := range strategies {
+		if s.Type == "system" {
+			s.Active = true
+			saveStrategiesToDB(strategies, userID)
+			return
+		}
+	}
+	// 创建系统接管策略，同时取消其他策略的 active
+	for i := range strategies {
+		strategies[i].Active = false
+	}
+	strategies = append(strategies, model.Strategy{
+		ID:      randomID(12),
+		Name:    "系统接管",
+		Type:    "system",
+		Active:  true,
+		Options: SystemStrategyOptions(),
+	})
+	saveStrategiesToDB(strategies, userID)
 }
 
 func loadStrategiesFromDB(userID int, isAdmin bool) []model.Strategy {
@@ -349,6 +388,10 @@ func GetStrategies(userID int, isAdmin bool) []model.Strategy {
 }
 
 func SaveStrategy(s model.Strategy, userID int) {
+	// system 策略的 options 始终由系统控制
+	if s.Type == "system" {
+		s.Options = SystemStrategyOptions()
+	}
 	strategies := loadStrategiesFromDB(userID, false)
 
 	if s.Active {
@@ -379,6 +422,9 @@ func DeleteStrategy(id string, userID int) {
 	strategies := loadStrategiesFromDB(userID, false)
 	var filtered []model.Strategy
 	for _, s := range strategies {
+		if s.ID == id && s.Type == "system" {
+			return // 系统接管策略不允许删除
+		}
 		if s.ID != id {
 			filtered = append(filtered, s)
 		}
@@ -416,7 +462,7 @@ func GetRouteByStrategy(userID int) *model.RouteInfo {
 	}
 
 	var selected *model.StrategyOption
-	if active.Type == "round_robin" {
+	if active.Type == "round_robin" || active.Type == "system" {
 		total := len(active.Options)
 		userCounter := getUserRRCounter(userID)
 		for i := 0; i < total; i++ {
@@ -481,8 +527,8 @@ func GetAllRoutesForFailover(userID int) []model.RouteInfo {
 		}
 		available = shuffled
 
-	case "round_robin":
-		// 轮询策略失败 → 按用户定义顺序返回，自然跳到下一个
+	case "round_robin", "system":
+		// 轮询/系统接管策略失败 → 按用户定义顺序返回，自然跳到下一个
 		// available 已是按 Options 定义顺序收集，无需调整
 	}
 

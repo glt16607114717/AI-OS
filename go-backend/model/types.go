@@ -131,7 +131,7 @@ type RouteInfo struct {
 type Strategy struct {
 	ID       string           `json:"id"`
 	Name     string           `json:"name"`
-	Type     string           `json:"type"`     // fixed | round_robin
+	Type     string           `json:"type"`     // fixed | round_robin | system
 	Active   bool             `json:"active"`
 	Options  []StrategyOption `json:"options"`
 	UserID   int              `json:"user_id,omitempty"`

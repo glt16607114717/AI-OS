@@ -65,6 +65,10 @@ func CreateUser(w http.ResponseWriter, r *http.Request) {
 		errResponse(w, err.Error(), 400)
 		return
 	}
+	// 新用户自动创建并激活系统接管策略
+	if userID, ok := result["id"].(int64); ok {
+		service.CreateSystemStrategy(int(userID))
+	}
 	okResponse(w, result)
 }
 

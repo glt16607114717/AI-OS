@@ -1,7 +1,7 @@
 
 ---
 name: "aios-server-ops"
-description: "AIOS 服务器运维操作（SSH免密、服务启停、部署），避免重复踩坑。当需要操作 8.163.127.182 服务器时调用此技能。"
+description: "AIOS 服务器运维操作（SSH免密、服务启停、日志查看）。当需要SSH连接8.163.127.182服务器、查看服务器日志、重启AIOS服务时调用此技能。"
 ---
 
 # AIOS 服务器运维操作技能
@@ -55,22 +55,19 @@ description: "AIOS 服务器运维操作（SSH免密、服务启停、部署）�
 cd d:\wwwroot\AI\AI-OS
 
 # 执行任意服务器命令
-python aios_ssh.py "命令内容"
+python .trae\skills\aios-server-ops\scripts\aios_ssh.py "命令内容"
 ```
 
 **示例：**
 ```powershell
 # 查看服务状态
-python aios_ssh.py "systemctl status ai-os"
+python .trae\skills\aios-server-ops\scripts\aios_ssh.py "systemctl status ai-os"
 
 # 重启后端
-python aios_ssh.py "systemctl restart ai-os"
+python .trae\skills\aios-server-ops\scripts\aios_ssh.py "systemctl restart ai-os"
 
 # 查看数据库
-python aios_ssh.py "mysql -uroot -p'glt01054717@' -e 'USE ai_os; SHOW TABLES;'"
-
-# 上传文件
-python aios_ssh.py "scp 本地文件 root@8.163.127.182:/opt/ai-os/"  # 用原生 scp 也可以
+python .trae\skills\aios-server-ops\scripts\aios_ssh.py "mysql -uroot -p'glt01054717@' -e 'USE ai_os; SHOW TABLES;'"
 ```
 
 ---
@@ -93,20 +90,6 @@ journalctl -u ai-os -f
 tail -f /var/log/mysql/error.log
 ```
 
-### 部署 Go 后端
-
-```bash
-# 1. 本地编译
-cd go-backend
-GOOS=linux GOARCH=amd64 go build -o ai-os-server
-
-# 2. 上传到服务器
-scp -i C:\Users\guilt\.ssh\aios_ed25519 -P 443 ai-os-server root@8.163.127.182:/opt/ai-os/
-
-# 3. 重启服务
-python aios_ssh.py "systemctl restart ai-os"
-```
-
 ### 防火墙管理
 
 ```bash
@@ -125,7 +108,7 @@ ufw reload
 ## 五、如果需要用原生 SSH 连接
 
 ```powershell
-ssh -i C:\Users\guilt\.ssh\aios_ed25519 -p 443 root@8.163.127.182
+ssh -p 443 root@8.163.127.182
 ```
 
 ---
@@ -133,9 +116,9 @@ ssh -i C:\Users\guilt\.ssh\aios_ed25519 -p 443 root@8.163.127.182
 ## 六、快速问题排查清单
 
 1. **后端不工作？**
-   - 先看日志：`python aios_ssh.py "journalctl -u ai-os -n 20"`
-   - 检查 MySQL：`python aios_ssh.py "systemctl is-active mysql"`
-   - 检查防火墙：`python aios_ssh.py "ufw status"`
+   - 先看日志：`python .trae\skills\aios-server-ops\scripts\aios_ssh.py "journalctl -u ai-os -n 20"`
+   - 检查 MySQL：`python .trae\skills\aios-server-ops\scripts\aios_ssh.py "systemctl is-active mysql"`
+   - 检查防火墙：`python .trae\skills\aios-server-ops\scripts\aios_ssh.py "ufw status"`
 
 2. **本地连不上后端？**
    - 检查本地 Go 是否在运行
