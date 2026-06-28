@@ -30,7 +30,15 @@ type EmbeddingConfig struct {
 	Dimensions int
 }
 
+// Qdrant 向量库配置
+type QdrantConfig struct {
+	Host    string
+	Port    int
+	Collection string
+}
+
 var Embedding EmbeddingConfig
+var Qdrant QdrantConfig
 
 func Init() {
 	dbPort := 3306
@@ -56,6 +64,17 @@ func Init() {
 		APIURL:     "https://open.bigmodel.cn/api/paas/v4/embeddings",
 		Model:      "embedding-3",
 		Dimensions: 2048,
+	}
+	qdrantPort := 6333
+	if v := os.Getenv("QDRANT_PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			qdrantPort = p
+		}
+	}
+	Qdrant = QdrantConfig{
+		Host:       envOrDefault("QDRANT_HOST", "127.0.0.1"),
+		Port:       qdrantPort,
+		Collection: envOrDefault("QDRANT_COLLECTION", "aios_knowledge"),
 	}
 }
 

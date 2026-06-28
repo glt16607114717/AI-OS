@@ -76,6 +76,22 @@ func chunkMarkdown(text string, cfg ChunkConfig) []string {
 			continue
 		}
 
+		// 单个 section 超长时，按段落二次拆分
+		if len(content) > cfg.MaxSize {
+			// 先保存当前累积的块
+			if current.Len() >= cfg.MinSize {
+				chunks = append(chunks, strings.TrimSpace(current.String()))
+				current.Reset()
+			}
+			// 按 \n\n 段落拆分超长 section
+			for _, sub := range splitLongContent(content, cfg.MaxSize) {
+				if len(strings.TrimSpace(sub)) >= 50 {
+					chunks = append(chunks, strings.TrimSpace(sub))
+				}
+			}
+			continue
+		}
+
 		// 如果当前块 + 新内容超过最大长度，保存当前块
 		if current.Len() > 0 && current.Len()+len(content) > cfg.MaxSize {
 			if current.Len() >= cfg.MinSize {
@@ -124,6 +140,58 @@ func splitByMarkdownHeaders(text string) []string {
 		sections = append(sections, current.String())
 	}
 	return sections
+}
+
+// splitLongContent 将超长文本按段落（\n\n）拆分，超过 maxSize 的段落硬切
+func splitLongContent(text string, maxSize int) []string {
+	paragraphs := strings.Split(text, "\n\n")
+	var result []string
+	var current strings.Builder
+
+	for _, p := range paragraphs {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+
+		// 单个段落本身就超长 → 硬切
+		if len(p) > maxSize {
+			// 先保存当前累积的内容
+			if current.Len() > 0 {
+				result = append(result, current.String())
+				current.Reset()
+			}
+			// 按 maxSize 硬切
+			for i := 0; i < len(p); i += maxSize {
+				end := i + maxSize
+				if end > len(p) {
+					end = len(p)
+				}
+				result = append(result, p[i:end])
+			}
+			continue
+		}
+
+		// 累积到超过 maxSize 就保存
+		if current.Len()+len(p)+2 > maxSize {
+			if current.Len() > 0 {
+				result = append(result, current.String())
+				current.Reset()
+			}
+		}
+
+		if current.Len() == 0 {
+			current.WriteString(p)
+		} else {
+			current.WriteString("\n\n" + p)
+		}
+	}
+
+	if current.Len() > 0 {
+		result = append(result, current.String())
+	}
+
+	return result
 }
 
 // ── 代码分块：按空行 + 函数/类边界切分 ──

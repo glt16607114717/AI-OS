@@ -23,21 +23,22 @@ import (
 type ConversationContext struct {
 	UserID           int
 	Username         string
-	UserMessage      string   // 用户提问摘要
-	Models           []string // 使用的模型列表
-	KeyNames         []string // 使用的 API Key 名称列表
-	FailoverCount    int      // 故障转移次数
+	UserMessage      string                   // 用户提问摘要
+	Models           []string                 // 使用的模型列表
+	KeyNames         []string                 // 使用的 API Key 名称列表
+	FailoverCount    int
 	TotalPrompt      int
 	TotalCompletion  int
 	ToolCallCount    int
 	Errors           []string
-	AssistantContent string // 最终助手回复
-	ChatHistoryID    int64  // sys_chat_history.id，用于下载日志
-	Source           string // proxy / workspace
-	IsAdmin          bool   // 是否管理员
-	IsStream         bool   // 原始请求是否流式
-	SSEHeaderWritten bool   // SSE 响应头是否已写入（防止重复 WriteHeader）
+	AssistantContent string                   // 最终助手回复
+	ChatHistoryID    int64                    // sys_chat_history.id，用于下载日志
+	Source           string                   // proxy / workspace
+	IsAdmin          bool                     // 是否管理员
+	IsStream         bool                     // 原始请求是否流式
+	SSEHeaderWritten bool                     // SSE 响应头是否已写入（防止重复 WriteHeader）
 	StartTime        time.Time
+	KnowledgeRefs    []service.KnowledgeItem  // RAG 检索命中的知识引用
 }
 
 // SummarizeAndLog 写一条对话汇总日志
@@ -88,9 +89,6 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 		service.AddChatMessage(userID, "user", cleanedMsg)
 	}
 
-	// 注入上帝指令 + RAG
-	injectGodRulesAndRAG(req, userMsgRaw, userID, username)
-
 	// 流式判断
 	isStream := false
 	if s, ok := req["stream"].(bool); ok && s {
@@ -101,6 +99,9 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 		UserID: userID, Username: username, UserMessage: userMsgSummary,
 		Source: "proxy", IsAdmin: isAdmin, IsStream: isStream, StartTime: startTime,
 	}
+
+	// 注入上帝指令 + RAG
+	injectGodRulesAndRAG(req, userMsgRaw, userID, username, convCtx)
 
 	// 路由（代理专属：含额度降级）
 	route := service.GetRouteByStrategy(userID)
@@ -148,7 +149,11 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 注入上帝指令 + RAG
-	injectGodRulesAndRAG(req, userMsgRaw, userID, username)
+	convCtx := &ConversationContext{
+		UserID: userID, Username: username, UserMessage: userMsgSummary,
+		Source: "workspace", IsAdmin: isAdmin, IsStream: false, StartTime: startTime,
+	}
+	injectGodRulesAndRAG(req, userMsgRaw, userID, username, convCtx)
 
 	// 注入服务端技能（工作台专属）
 	tools, _ := service.GetBuiltinSkillToolDefinitions(userID, isAdmin)
@@ -161,11 +166,7 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 	if s, ok := req["stream"].(bool); ok && s {
 		isStream = true
 	}
-
-	convCtx := &ConversationContext{
-		UserID: userID, Username: username, UserMessage: userMsgSummary,
-		Source: "workspace", IsAdmin: isAdmin, IsStream: isStream, StartTime: startTime,
-	}
+	convCtx.IsStream = isStream
 
 	// 路由（工作台专属：含额度降级）
 	route := service.GetRouteByStrategy(userID)
@@ -239,7 +240,7 @@ func extractLastUserMessage(req map[string]interface{}) (string, string) {
 }
 
 // injectGodRulesAndRAG 注入上帝指令和 RAG 知识库上下文
-func injectGodRulesAndRAG(req map[string]interface{}, userMsgRaw string, userID int, username string) {
+func injectGodRulesAndRAG(req map[string]interface{}, userMsgRaw string, userID int, username string, convCtx *ConversationContext) {
 	messages, ok := req["messages"].([]interface{})
 	if !ok {
 		return
@@ -249,7 +250,11 @@ func injectGodRulesAndRAG(req map[string]interface{}, userMsgRaw string, userID 
 		msgMaps[i], _ = m.(map[string]interface{})
 	}
 	msgMaps = service.InjectGodRules(msgMaps, userID)
-	msgMaps = injectRAGContext(msgMaps, extractUserQuery(userMsgRaw), userID)
+	var refs []service.KnowledgeItem
+	msgMaps, refs = injectRAGContext(msgMaps, extractUserQuery(userMsgRaw), userID)
+	if convCtx != nil {
+		convCtx.KnowledgeRefs = refs
+	}
 
 	// 图片识别预处理：检测最后一条 user message 的图片（上传/URL），识别后追加文字描述
 	msgMaps, visionResult := service.ProcessImages(msgMaps, userID, username)
@@ -373,32 +378,42 @@ func extractUserQuery(raw string) string {
 }
 
 // injectRAGContext 检索知识库，将相关内容注入 system prompt 最前面
-func injectRAGContext(messages []map[string]interface{}, userMsg string, userID int) []map[string]interface{} {
-	if userMsg == "" || userID <= 0 {
-		return messages
+// 使用 Qdrant 向量检索 + 项目过滤（忽略 user_id，所有用户共享知识库）
+// 返回命中的知识引用列表（供前端展示）
+func injectRAGContext(messages []map[string]interface{}, userMsg string, userID int) ([]map[string]interface{}, []service.KnowledgeItem) {
+	if userMsg == "" {
+		return messages, nil
 	}
 
-	// 语义搜索知识库
-	results, err := service.SearchSimilar(userMsg, 5, userID)
+	// 语义搜索知识库（Qdrant，按项目过滤）
+	// TODO: 后续根据上下文自动识别当前项目，暂时检索全部项目
+	results, err := service.SearchKnowledge(userMsg, 5, []string{"ai-os", "rmp", "general"}, nil)
 	if err != nil || len(results) == 0 {
-		return messages
+		return messages, nil
+	}
+
+	// 过滤低分结果
+	var refs []service.KnowledgeItem
+	var valid []service.KnowledgeItem
+	for _, r := range results {
+		if r.Score < 0.5 {
+			continue
+		}
+		refs = append(refs, r)
+		valid = append(valid, r)
+	}
+
+	if len(valid) == 0 {
+		return messages, nil
 	}
 
 	// 构建知识上下文
 	var ctx strings.Builder
 	ctx.WriteString("[HIGHEST PRIORITY - 知识库参考]\n")
-	ctx.WriteString("以下内容来自企业知识库，在回答时必须优先参考：\n\n")
-	count := 0
-	for _, r := range results {
-		if r.Score < 0.35 {
-			continue
-		}
-		count++
-		ctx.WriteString(fmt.Sprintf("--- 参考 %d（相似度 %.0f%%）---\n%s\n\n", count, r.Score*100, r.Content))
-	}
-
-	if count == 0 {
-		return messages
+	ctx.WriteString("以下内容来自企业知识库，在回答时必须优先参考。\n")
+	ctx.WriteString("回答时请在引用相关知识的位置标注来源，格式：[参考知识N：标题]。不相关的不要标注。\n\n")
+	for i, r := range valid {
+		ctx.WriteString(fmt.Sprintf("--- 参考 %d（相似度 %.0f%%）[%s] %s ---\n%s\n\n", i+1, r.Score*100, r.Category, r.Title, r.Content))
 	}
 
 	ragCtx := strings.TrimSpace(ctx.String())
@@ -424,7 +439,7 @@ func injectRAGContext(messages []map[string]interface{}, userMsg string, userID 
 			{"role": "system", "content": ragCtx},
 		}, result...)
 	}
-	return result
+	return result, refs
 }
 
 // ProxyModels 代理 /v1/models 接口

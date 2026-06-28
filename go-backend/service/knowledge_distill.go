@@ -31,6 +31,7 @@ type DistillKnowledge struct {
 	Content   string   `json:"content"`
 	Priority  string   `json:"priority"`
 	Tags      []string `json:"tags"`
+	Project   string   `json:"project"`
 }
 
 // DistillSuggestion 优化建议
@@ -186,7 +187,7 @@ func RunDistillForDateWithTrigger(userID int, username, date, triggerType string
 
 	log.Printf("[distill] 分段蒸馏完成，汇总：知识=%d，建议=%d，日报段数=%d", len(allKnowledge), len(allSuggestions), len(allDailySummaries))
 
-	// 存储知识（去重 + 向量化）
+	// 存储知识（去重 + 向量化 + 存全字段）
 	knowledgeCount := 0
 	knowledgeSkip := 0
 	for _, k := range allKnowledge {
@@ -194,25 +195,18 @@ func RunDistillForDateWithTrigger(userID int, username, date, triggerType string
 			knowledgeSkip++
 			continue
 		}
-		hash := contentHash(k.Content)
-		var exists int
-		conn.QueryRow("SELECT 1 FROM sys_embedding WHERE content_hash = ? AND user_id = ?", hash, userID).Scan(&exists)
-		if exists == 1 {
-			knowledgeSkip++
-			continue
-		}
-		vector, err := GetEmbedding(k.Content)
+		stored, err := StoreDistillKnowledge(userID, date, k)
 		if err != nil {
-			log.Printf("[distill] 向量化失败: %v", err)
+			log.Printf("[distill] 知识入库失败: %v", err)
 			distillLog(userID, username, date, triggerType, "save_knowledge", "warn",
-				"向量化失败: "+err.Error(), k.Title, 0)
+				"入库失败: "+err.Error(), k.Title, 0)
 			continue
 		}
-		vectorJSON, _ := json.Marshal(vector)
-		source := fmt.Sprintf("distill:%s:%s:%s", date, k.Dimension, k.Title)
-		conn.Exec(`INSERT INTO sys_embedding (user_id, content, content_hash, vector, source) VALUES (?, ?, ?, ?, ?)`,
-			userID, k.Content, hash, string(vectorJSON), source)
-		knowledgeCount++
+		if stored {
+			knowledgeCount++
+		} else {
+			knowledgeSkip++
+		}
 	}
 	distillLog(userID, username, date, triggerType, "save_knowledge", "success",
 		fmt.Sprintf("保存=%d, 跳过=%d", knowledgeCount, knowledgeSkip), "", 0)
@@ -754,6 +748,12 @@ func buildDistillPrompt(date, convContent string) string {
 context 字段必须包含背景：当时面临什么问题、为什么做这个决策。不要只写结论。
 如果某个维度今天没有有价值的发现，不要硬编，跳过该维度即可。
 
+project 字段：判断这条知识属于哪个项目。根据对话内容中的项目名称、代码路径、技术栈、业务关键词判断：
+- ai-os：AI-OS 项目。特征：代码路径含 ai-os/go-backend/client/web、Go 语言、Electron、Vue3 客户端、知识库、Qdrant 向量库、蒸馏、LLM、AI 资产管理、部署打包等
+- rmp：RMP 项目（机器人 ERP 管理平台）。特征：代码路径含 rmp-api 或 nnd-robot、PHP/ThinkPHP 后端、Vue2 前端。业务领域涵盖：机器人管理（RobotController/robotManage）、客户关系管理 CRM（客户线索/公海池/客户跟进）、物料管理（Material/采购/库存/退货）、工位方案（WorkStation/交付部署）、财务结算（对账单/月结）、人力资源（考勤/员工/部门）、工单流程审批、摄像头远程监控、设备调试等
+- general：跨项目通用知识（个人习惯、环境配置、通用经验、与具体项目无关的工具使用）
+如果不确定，填 general。
+
 ## 二、工作日报（daily_summary）
 以结构化 Markdown 格式总结今天的工作成果：
 - **今日完成**：列出今天完成的主要工作，用列表呈现
@@ -803,7 +803,8 @@ context 字段必须包含背景：当时面临什么问题、为什么做这个
       "context": "背景：当时的情况、面临的问题、为什么",
       "content": "提炼出的知识正文，要自包含",
       "priority": "high|medium|low",
-      "tags": ["标签1", "标签2"]
+      "tags": ["标签1", "标签2"],
+      "project": "ai-os|rmp|general"
     }
   ],
   "suggestions": [

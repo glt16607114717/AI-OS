@@ -53,6 +53,11 @@ func main() {
 	cb := circuit.Init(service.GetDB)
 	go cb.StartMonitor()
 
+	// 初始化 Qdrant 向量库（连接失败不阻塞启动，蒸馏/检索会降级）
+	if err := service.InitQdrant(); err != nil {
+		log.Printf("[init] Qdrant 初始化失败（知识库检索将不可用）: %v", err)
+	}
+
 	// 启动每日知识蒸馏（凌晨3点）
 	c := cron.New()
 	c.AddFunc("0 3 * * *", func() {
@@ -180,6 +185,9 @@ func main() {
 		r.Delete("/api/skills/{code}/connection/{id}", handler.DeleteSkillConnection)
 		r.Get("/api/skills/{code}/permissions", handler.GetSkillPermissions)
 		r.Post("/api/skills/{code}/permission", handler.SetSkillPermission)
+
+		// 知识库迁移（管理员一次性操作）
+		r.Post("/api/rag/migrate", handler.RagMigrate)
 	})
 
 	// 启动

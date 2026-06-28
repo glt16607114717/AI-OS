@@ -5,20 +5,22 @@ import { API_BASE } from '../../api'
 import { formatTimeShort as formatTime } from '../../utils/time'
 import { marked } from 'marked'
 
-interface DocItem {
+interface KnowledgeItem {
   id: number
-  text: string
-  metadata: {
-    source?: string
-    created_at?: string
-  }
-}
-
-interface SearchResult {
-  text: string
-  metadata: Record<string, any>
-  distance: number
-  similarity: number
+  user_id: number
+  username: string
+  project: string
+  category: string
+  title: string
+  summary: string
+  content: string
+  context: string
+  tags: string[]
+  source: string
+  priority: string
+  status: string
+  created_at: string
+  score?: number
 }
 
 interface UploadedFile {
@@ -28,13 +30,17 @@ interface UploadedFile {
 }
 
 const loading = ref(false)
-const documents = ref<DocItem[]>([])
+const documents = ref<KnowledgeItem[]>([])
 const total = ref(0)
 
 const searchQuery = ref('')
-const searchResults = ref<SearchResult[]>([])
+const searchResults = ref<KnowledgeItem[]>([])
 const searching = ref(false)
 const searchMode = ref(false)
+
+// 项目过滤
+const filterProject = ref('')
+const filterCategory = ref('')
 
 // 文件上传
 const uploading = ref(false)
@@ -63,7 +69,11 @@ function goPage(page: number) {
 async function loadDocs() {
   loading.value = true
   try {
-    const res = await fetch(`${API_BASE}/api/rag/list`, {
+    const params = new URLSearchParams()
+    if (filterProject.value) params.set('project', filterProject.value)
+    if (filterCategory.value) params.set('category', filterCategory.value)
+    params.set('limit', '200')
+    const res = await fetch(`${API_BASE}/api/rag/list?${params}`, {
       headers: { 'Authorization': `Bearer ${getToken()}` }
     })
     const data = await res.json()
@@ -108,12 +118,7 @@ async function doSearch() {
     })
     const data = await res.json()
     if (data.ok) {
-      searchResults.value = (data.data?.results || []).map((r: any) => ({
-        text: r.content || r.text,
-        metadata: { source: r.source },
-        distance: 1 - (r.score || 0),
-        similarity: r.score || 0,
-      }))
+      searchResults.value = data.data?.results || []
     }
   } catch (e: any) {
     ElMessage.error('搜索失败: ' + e.message)
@@ -125,6 +130,11 @@ function clearSearch() {
   searchQuery.value = ''
   searchMode.value = false
   searchResults.value = []
+}
+
+function onFilterChange() {
+  currentPage.value = 1
+  loadDocs()
 }
 
 // 文件上传
@@ -159,7 +169,7 @@ async function handleUpload(e: Event) {
     ElMessage.error('上传失败: ' + e.message)
   }
   uploading.value = false
-  input.value = '' // 重置以允许重复上传同一文件
+  input.value = ''
 }
 
 // 删除
@@ -210,11 +220,34 @@ async function deleteDoc(id: number) {
   }
 }
 
-function sourceLabel(source: string | undefined): string {
+const CATEGORY_LABELS: Record<string, string> = {
+  decision: '决策',
+  pitfall: '踩坑',
+  business: '业务',
+  habit: '习惯',
+  document: '文档',
+  other: '其他',
+}
+
+const PROJECT_LABELS: Record<string, string> = {
+  'ai-os': 'AI-OS',
+  'rmp': 'RMP',
+  'general': '通用',
+}
+
+function projectLabel(p: string): string {
+  return PROJECT_LABELS[p] || p || '未知'
+}
+
+function categoryLabel(c: string): string {
+  return CATEGORY_LABELS[c] || c || '未知'
+}
+
+function sourceLabel(source: string): string {
   if (!source) return '未知'
   if (source.startsWith('upload:')) return '📄 ' + source.slice(7)
-  const map: Record<string, string> = { workspace: '工作台', proxy: '代理', manual: '手动' }
-  return map[source] || source
+  if (source.startsWith('distill:')) return '🧠 蒸馏'
+  return source
 }
 
 function renderMarkdown(text: string): string {
@@ -252,7 +285,7 @@ onMounted(() => {
       <button class="btn btn-primary" @click="doSearch" :disabled="searching">
         {{ searching ? '搜索中...' : '搜索' }}
       </button>
-      <button class="btn" @click="loadDocs; loadFiles()" :disabled="loading">
+      <button class="btn" @click="loadDocs(); loadFiles()" :disabled="loading">
         {{ loading ? '加载中...' : '刷新' }}
       </button>
     </div>
@@ -282,14 +315,18 @@ onMounted(() => {
     <!-- Search Results -->
     <template v-if="searchMode">
       <div v-if="searchResults.length" class="doc-list">
-        <div v-for="(r, i) in searchResults" :key="i" class="doc-card search-hit">
+        <div v-for="r in searchResults" :key="r.id" class="doc-card search-hit">
           <div class="doc-meta">
-            <span class="tag similarity" :class="r.similarity >= 0.7 ? 'high' : r.similarity >= 0.4 ? 'mid' : 'low'">
-              相似度 {{ (r.similarity * 100).toFixed(1) }}%
+            <span v-if="r.score" class="tag similarity" :class="r.score >= 0.7 ? 'high' : r.score >= 0.5 ? 'mid' : 'low'">
+              {{ (r.score * 100).toFixed(0) }}%
             </span>
-            <span class="tag source">{{ sourceLabel(r.metadata?.source) }}</span>
+            <span class="tag project">{{ projectLabel(r.project) }}</span>
+            <span class="tag type">{{ categoryLabel(r.category) }}</span>
+            <span v-if="r.username" class="tag user">{{ r.username }}</span>
+            <span class="tag source">{{ sourceLabel(r.source) }}</span>
           </div>
-          <div class="doc-text" v-html="renderMarkdown(r.text)"></div>
+          <div v-if="r.title" class="doc-title">{{ r.title }}</div>
+          <div class="doc-text" v-html="renderMarkdown(r.content)"></div>
         </div>
       </div>
       <div v-else-if="!searching" class="empty-state">
@@ -335,14 +372,42 @@ onMounted(() => {
 
     <!-- All Documents Tab -->
     <template v-else>
+      <!-- Filters -->
+      <div class="filter-bar">
+        <select v-model="filterProject" @change="onFilterChange" class="filter-select">
+          <option value="">全部项目</option>
+          <option value="ai-os">AI-OS</option>
+          <option value="rmp">RMP</option>
+          <option value="general">通用</option>
+        </select>
+        <select v-model="filterCategory" @change="onFilterChange" class="filter-select">
+          <option value="">全部类型</option>
+          <option value="decision">决策</option>
+          <option value="pitfall">踩坑</option>
+          <option value="business">业务</option>
+          <option value="habit">习惯</option>
+          <option value="document">文档</option>
+          <option value="other">其他</option>
+        </select>
+      </div>
+
       <div v-if="documents.length" class="doc-list">
         <div v-for="doc in pagedDocs" :key="doc.id" class="doc-card">
           <div class="doc-meta">
-            <span class="tag source">{{ sourceLabel(doc.metadata?.source) }}</span>
-            <span class="tag time">{{ formatTime(doc.metadata?.created_at) }}</span>
+            <span class="tag project">{{ projectLabel(doc.project) }}</span>
+            <span class="tag type">{{ categoryLabel(doc.category) }}</span>
+            <span v-if="doc.username" class="tag user">{{ doc.username }}</span>
+            <span v-if="doc.priority === 'high'" class="tag priority-high">高优</span>
+            <span class="tag source">{{ sourceLabel(doc.source) }}</span>
+            <span class="tag time">{{ formatTime(doc.created_at) }}</span>
             <button class="btn-delete-sm" @click="deleteDoc(doc.id)" title="删除">✕</button>
           </div>
-          <div class="doc-text" v-html="renderMarkdown(doc.text)"></div>
+          <div v-if="doc.title" class="doc-title">{{ doc.title }}</div>
+          <div v-if="doc.summary && doc.summary !== doc.title" class="doc-summary">{{ doc.summary }}</div>
+          <div class="doc-text" v-html="renderMarkdown(doc.content)"></div>
+          <div v-if="doc.tags && doc.tags.length" class="doc-tags">
+            <span v-for="t in doc.tags" :key="t" class="tag tag-custom">{{ t }}</span>
+          </div>
         </div>
       </div>
       <!-- Pagination -->
@@ -364,9 +429,6 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.knowledge-page {
-}
-
 .page-header {
   margin-bottom: 20px;
 }
@@ -534,6 +596,28 @@ onMounted(() => {
   border-bottom-color: #6366f1;
 }
 
+/* Filter Bar */
+.filter-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.filter-select {
+  padding: 6px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 13px;
+  background: #fff;
+  color: #475569;
+  cursor: pointer;
+  outline: none;
+}
+
+.filter-select:focus {
+  border-color: #6366f1;
+}
+
 /* Upload Area */
 .upload-area {
   border: 2px dashed #cbd5e1;
@@ -666,6 +750,19 @@ onMounted(() => {
   border-left: 3px solid #6366f1;
 }
 
+.doc-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1e293b;
+  margin-bottom: 4px;
+}
+
+.doc-summary {
+  font-size: 12px;
+  color: #64748b;
+  margin-bottom: 6px;
+}
+
 .doc-meta {
   display: flex;
   gap: 6px;
@@ -692,9 +789,29 @@ onMounted(() => {
   color: #22c55e;
 }
 
+.tag.project {
+  background: #faf5ff;
+  color: #9333ea;
+}
+
+.tag.user {
+  background: #fff7ed;
+  color: #ea580c;
+}
+
 .tag.time {
   background: #f8fafc;
   color: #94a3b8;
+}
+
+.tag.priority-high {
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+.tag.tag-custom {
+  background: #f1f5f9;
+  color: #64748b;
 }
 
 .tag.similarity {
@@ -716,6 +833,13 @@ onMounted(() => {
   color: #dc2626;
 }
 
+.doc-tags {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
 .doc-text {
   font-size: 13px;
   color: #334155;
@@ -725,7 +849,7 @@ onMounted(() => {
   overflow-y: auto;
 }
 
-/* Markdown 渲染样式 */
+/* Markdown */
 .doc-text :deep(h1),
 .doc-text :deep(h2),
 .doc-text :deep(h3),

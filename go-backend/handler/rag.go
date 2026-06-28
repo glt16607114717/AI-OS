@@ -18,12 +18,16 @@ func RagStatus(w http.ResponseWriter, r *http.Request) {
 		errResponse(w, "未登录", 401)
 		return
 	}
-	count := service.GetEmbeddingCount(session.UserID)
+	stats, err := service.GetKnowledgeStats()
+	if err != nil {
+		stats = map[string]int{}
+	}
 	okResponse(w, map[string]interface{}{
-		"engine":  "zhipu-embedding-3",
+		"engine":  "zhipu-embedding-3 + qdrant",
 		"dim":     2048,
-		"count":   count,
-		"storage": "mysql",
+		"count":   stats["total"],
+		"storage": "mysql + qdrant",
+		"by_project": stats,
 	})
 }
 
@@ -60,7 +64,7 @@ func RagTestEmbed(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// RagList 知识库列表（按用户过滤）
+// RagList 知识库列表（支持按 project/category 过滤）
 func RagList(w http.ResponseWriter, r *http.Request) {
 	session := middleware.GetSession(r)
 	if session == nil {
@@ -68,39 +72,34 @@ func RagList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := service.GetRecentEmbeddings(session.UserID, 1000)
+	project := r.URL.Query().Get("project")
+	category := r.URL.Query().Get("category")
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil {
+			limit = v
+		}
+	}
+	offset := 0
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if v, err := strconv.Atoi(o); err == nil {
+			offset = v
+		}
+	}
+
+	items, total, err := service.ListKnowledge(project, category, limit, offset)
 	if err != nil {
 		errResponse(w, "查询失败: "+err.Error(), 500)
 		return
 	}
 
-	// 转换为前端需要的格式
-	type DocItem struct {
-		ID       int64  `json:"id"`
-		Text     string `json:"text"`
-		Metadata struct {
-			Source    string `json:"source"`
-			CreatedAt string `json:"created_at"`
-		} `json:"metadata"`
-	}
-
-	docs := make([]DocItem, 0, len(results))
-	for _, r := range results {
-		var doc DocItem
-		doc.ID = r.ID
-		doc.Text = r.Content
-		doc.Metadata.Source = r.Source
-		doc.Metadata.CreatedAt = r.CreatedAt
-		docs = append(docs, doc)
-	}
-
 	okResponse(w, map[string]interface{}{
-		"documents": docs,
-		"total":     len(docs),
+		"documents": items,
+		"total":     total,
 	})
 }
 
-// RagSearch 语义搜索
+// RagSearch 语义搜索（Qdrant 向量检索 + 项目过滤）
 func RagSearch(w http.ResponseWriter, r *http.Request) {
 	session := middleware.GetSession(r)
 	if session == nil {
@@ -116,7 +115,30 @@ func RagSearch(w http.ResponseWriter, r *http.Request) {
 		topK = int(tk)
 	}
 
-	results, err := service.SearchSimilar(query, topK, session.UserID)
+	// 项目过滤：支持前端传入 projects 数组，默认搜全部项目
+	var projects []string
+	if ps, ok := body["projects"].([]interface{}); ok {
+		for _, p := range ps {
+			if s, ok := p.(string); ok && s != "" {
+				projects = append(projects, s)
+			}
+		}
+	}
+	if len(projects) == 0 {
+		projects = []string{"ai-os", "rmp", "general"}
+	}
+
+	// 类型过滤
+	var categories []string
+	if cs, ok := body["categories"].([]interface{}); ok {
+		for _, c := range cs {
+			if s, ok := c.(string); ok && s != "" {
+				categories = append(categories, s)
+			}
+		}
+	}
+
+	results, err := service.SearchKnowledge(query, topK, projects, categories)
 	if err != nil {
 		errResponse(w, "搜索失败: "+err.Error(), 500)
 		return
@@ -205,7 +227,7 @@ func RagUpload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// RagDelete 删除知识库条目
+// RagDelete 删除知识库条目（软删除：归档）
 func RagDelete(w http.ResponseWriter, r *http.Request) {
 	session := middleware.GetSession(r)
 	if session == nil {
@@ -213,35 +235,22 @@ func RagDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 支持按 ID 删除单条
 	idStr := r.URL.Query().Get("id")
-	if idStr != "" {
-		id, err := strconv.ParseInt(idStr, 10, 64)
-		if err != nil {
-			errResponse(w, "无效的 ID", 400)
-			return
-		}
-		if err := service.DeleteEmbedding(id, session.UserID); err != nil {
-			errResponse(w, "删除失败: "+err.Error(), 500)
-			return
-		}
-		okResponse(w, map[string]interface{}{"deleted": id})
+	if idStr == "" {
+		errResponse(w, "请指定 id 参数", 400)
 		return
 	}
 
-	// 支持按 source 批量删除（删除整个文件的所有分块）
-	source := r.URL.Query().Get("source")
-	if source != "" {
-		n, err := service.DeleteEmbeddingsBySource(session.UserID, source)
-		if err != nil {
-			errResponse(w, "删除失败: "+err.Error(), 500)
-			return
-		}
-		okResponse(w, map[string]interface{}{"deleted": n})
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		errResponse(w, "无效的 ID", 400)
 		return
 	}
-
-	errResponse(w, "请指定 id 或 source 参数", 400)
+	if err := service.DeleteKnowledge(id); err != nil {
+		errResponse(w, "删除失败: "+err.Error(), 500)
+		return
+	}
+	okResponse(w, map[string]interface{}{"deleted": id})
 }
 
 // RagFiles 获取已上传文件列表
@@ -260,5 +269,29 @@ func RagFiles(w http.ResponseWriter, r *http.Request) {
 
 	okResponse(w, map[string]interface{}{
 		"files": files,
+	})
+}
+
+// RagMigrate 迁移旧 sys_embedding 数据到 sys_knowledge + Qdrant（管理员一次性操作）
+func RagMigrate(w http.ResponseWriter, r *http.Request) {
+	session := middleware.GetSession(r)
+	if session == nil {
+		errResponse(w, "未登录", 401)
+		return
+	}
+	if !session.IsAdmin {
+		errResponse(w, "需要管理员权限", 403)
+		return
+	}
+
+	migrated, skipped, failed, err := service.MigrateEmbeddingsToKnowledge()
+	if err != nil {
+		errResponse(w, "迁移失败: "+err.Error(), 500)
+		return
+	}
+	okResponse(w, map[string]interface{}{
+		"migrated": migrated,
+		"skipped":  skipped,
+		"failed":   failed,
 	})
 }
