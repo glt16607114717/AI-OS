@@ -255,6 +255,10 @@ onBeforeUnmount(() => {
                 <span class="sub-dot"></span>
                 上帝指令
               </router-link>
+              <router-link to="/llm/prompt-optimize" class="nav-sub-item" active-class="active">
+                <span class="sub-dot"></span>
+                提示词优化
+              </router-link>
               <router-link to="/llm/quota" class="nav-sub-item" active-class="active">
                 <span class="sub-dot"></span>
                 用量统计

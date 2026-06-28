@@ -29,6 +29,11 @@ func SaveGodRules(w http.ResponseWriter, r *http.Request) {
 	enabled, _ := body["enabled"].(bool)
 	rules, _ := body["rules"].(string)
 	promptOptimize, _ := body["prompt_optimize"].(bool)
-	service.SaveGodRules(session.UserID, enabled, rules, promptOptimize)
+	stripNoise, _ := body["strip_noise"].(bool)
+	compressFile, _ := body["compress_file"].(bool)
+	simplifyLang, _ := body["simplify_lang"].(bool)
+	compressToolResult, _ := body["compress_tool_result"].(bool)
+	compressTools, _ := body["compress_tools"].(bool)
+	service.SaveGodRules(session.UserID, enabled, rules, promptOptimize, stripNoise, compressFile, simplifyLang, compressToolResult, compressTools)
 	okResponse(w, "已保存")
 }

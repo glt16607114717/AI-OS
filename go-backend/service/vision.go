@@ -76,103 +76,136 @@ func StripImageContent(messages []map[string]interface{}) {
 
 // ProcessImages 处理 messages 中上传的图片（image_url）
 // 规则：
-//   - 只扫描最后一条 user message
+//   - 扫描所有 user message（不只最后一条，因为历史消息里的图片也需要识别）
 //   - 只处理 content 数组中的 image_url（正经上传的图片）
-//   - 不扫描文本中的图片 URL（已改由前端接口处理）
-//   - 识别结果作为文字追加到 user message 末尾
+//   - 识别结果作为文字追加到对应 user message 末尾
+//   - 同一 URL 在一次请求内只识别一次（缓存）
 func ProcessImages(messages []map[string]interface{}, userID int, username string) ([]map[string]interface{}, *VisionResult) {
 	if len(messages) == 0 {
 		return messages, &VisionResult{}
 	}
 
-	// 找到最后一条 user message
-	lastUserIdx := -1
-	for i := len(messages) - 1; i >= 0; i-- {
-		if role, _ := messages[i]["role"].(string); role == "user" {
-			lastUserIdx = i
-			break
+	urlCache := map[string]string{} // URL → 描述缓存（同一次请求内去重）
+	totalImages := 0
+	modified := false
+
+	// 遍历所有消息，处理每条 user message 中的 image_url
+	for i := range messages {
+		role, _ := messages[i]["role"].(string)
+		if role != "user" {
+			continue
 		}
-	}
-	if lastUserIdx < 0 {
-		return messages, &VisionResult{}
-	}
 
-	lastMsg := messages[lastUserIdx]
-	processed := map[string]bool{} // 已处理的 URL/base64（去重）
-	var descriptions []string      // 图片描述列表
-	imageCount := 0
-
-	// 只处理数组格式的 content（多模态上传）
-	content, ok := lastMsg["content"].([]interface{})
-	if !ok {
-		return messages, &VisionResult{}
-	}
-
-	// 遍历 content，处理 image_url 项，其他项原样保留
-	newContent := make([]interface{}, 0, len(content))
-	for _, item := range content {
-		m, ok := item.(map[string]interface{})
+		content, ok := messages[i]["content"].([]interface{})
 		if !ok {
+			continue
+		}
+
+		// 检查这条消息是否有 image_url
+		hasImage := false
+		for _, item := range content {
+			if m, ok := item.(map[string]interface{}); ok {
+				if t, _ := m["type"].(string); t == "image_url" {
+					hasImage = true
+					break
+				}
+			}
+		}
+		if !hasImage {
+			continue
+		}
+
+		// 处理这条消息中的 image_url
+		var descriptions []string
+		imageCount := 0
+		newContent := make([]interface{}, 0, len(content))
+
+		for _, item := range content {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				newContent = append(newContent, item)
+				continue
+			}
+			t, _ := m["type"].(string)
+
+			if t == "image_url" {
+				imgURL, _ := m["image_url"].(map[string]interface{})
+				if imgURL == nil {
+					continue
+				}
+				url, _ := imgURL["url"].(string)
+				if url == "" {
+					continue
+				}
+
+				// 检查缓存：同一张图片只识别一次
+				if cachedDesc, exists := urlCache[url]; exists {
+					imageCount++
+					if cachedDesc != "" {
+						descriptions = append(descriptions, fmt.Sprintf("[图片 %d 内容：%s]", totalImages+imageCount, cachedDesc))
+					} else {
+						descriptions = append(descriptions, fmt.Sprintf("[图片 %d：识别失败]", totalImages+imageCount))
+					}
+					continue // 不保留 image_url 项
+				}
+
+				urlCache[url] = "" // 标记已处理（即使失败也不重试）
+				desc, err := RecognizeImage(userID, username, url, "")
+				imageSize := len(url)
+				if err != nil {
+					LogVisionRecognize(userID, username, url, imageSize, "", "", visionModelID, false, err.Error())
+					imageCount++
+					descriptions = append(descriptions, fmt.Sprintf("[图片 %d：识别失败]", totalImages+imageCount))
+				} else if desc != "" {
+					urlCache[url] = desc
+					LogVisionRecognize(userID, username, url, imageSize, "", desc, visionModelID, true, "")
+					imageCount++
+					descriptions = append(descriptions, fmt.Sprintf("[图片 %d 内容：%s]", totalImages+imageCount, desc))
+				} else {
+					LogVisionRecognize(userID, username, url, imageSize, "", "", visionModelID, false, "返回空结果")
+					imageCount++
+					descriptions = append(descriptions, fmt.Sprintf("[图片 %d：识别失败]", totalImages+imageCount))
+				}
+				continue // 不保留 image_url 项
+			}
+
 			newContent = append(newContent, item)
-			continue
 		}
-		t, _ := m["type"].(string)
 
-		if t == "image_url" {
-			// image_url 项：尝试识别，但不保留原项（避免下游纯文本模型报错）
-			imgURL, _ := m["image_url"].(map[string]interface{})
-			if imgURL == nil {
-				continue // 无效的 image_url，直接丢弃
-			}
-			url, _ := imgURL["url"].(string)
-			if url == "" || processed[url] {
-				continue // 空 URL 或已处理，丢弃
-			}
-			processed[url] = true
-			desc, err := RecognizeImage(userID, username, url, "")
-			imageSize := len(url)
-			if err != nil {
-				LogVisionRecognize(userID, username, url, imageSize, "", "", visionModelID, false, err.Error())
-				imageCount++
-				descriptions = append(descriptions, fmt.Sprintf("[图片 %d：识别失败]", imageCount))
-			} else if desc != "" {
-				LogVisionRecognize(userID, username, url, imageSize, "", desc, visionModelID, true, "")
-				imageCount++
-				descriptions = append(descriptions, fmt.Sprintf("[图片 %d 内容：%s]", imageCount, desc))
-			} else {
-				LogVisionRecognize(userID, username, url, imageSize, "", "", visionModelID, false, "返回空结果")
-				imageCount++
-				descriptions = append(descriptions, fmt.Sprintf("[图片 %d：识别失败]", imageCount))
-			}
-			// 不把原 item 加回 newContent → 等效删除 image_url 项
+		if imageCount == 0 {
 			continue
 		}
 
-		newContent = append(newContent, item)
-	}
-	// 替换为清理后的 content（image_url 已移除）
-	lastMsg["content"] = newContent
-
-	if imageCount == 0 {
-		return messages, &VisionResult{ImageCount: 0, Modified: false}
-	}
-
-	// 把图片描述追加到最后一条 user message
-	appendText := "\n\n" + strings.Join(descriptions, "\n")
-	switch c := lastMsg["content"].(type) {
-	case string:
-		lastMsg["content"] = c + appendText
-	case []interface{}:
-		lastMsg["content"] = append(c, map[string]interface{}{
+		// 把图片描述追加到这条 user message
+		appendText := "\n\n[系统已通过视觉模型识别了以下图片内容，这就是你看到的图片，请基于此内容回答，不要说自己无法查看图片：]\n" + strings.Join(descriptions, "\n")
+		newContent = append(newContent, map[string]interface{}{
 			"type": "text",
 			"text": appendText,
 		})
+		messages[i]["content"] = newContent
+		totalImages += imageCount
+		modified = true
 	}
-	messages[lastUserIdx] = lastMsg
 
-	log.Printf("[vision] 识别图片 %d 张", imageCount)
+	if !modified {
+		// 调试：记录最后一条 user 消息的情况
+		lastUserContent := ""
+		for i := len(messages) - 1; i >= 0; i-- {
+			if role, _ := messages[i]["role"].(string); role == "user" {
+				lastUserContent = fmt.Sprintf("%v", messages[i]["content"])
+				if len(lastUserContent) > 200 {
+					lastUserContent = lastUserContent[:200]
+				}
+				break
+			}
+		}
+		log.Printf("[vision] 未发现 image_url，最后一条 user 内容前200字符: %s", lastUserContent)
+		return messages, &VisionResult{ImageCount: 0, Modified: false}
+	}
+
+	log.Printf("[vision] 共识别图片 %d 张", totalImages)
 	return messages, &VisionResult{
-		ImageCount: imageCount,
+		ImageCount: totalImages,
 		Modified:   true,
 	}
 }

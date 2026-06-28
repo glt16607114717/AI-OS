@@ -100,6 +100,48 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 		Source: "proxy", IsAdmin: isAdmin, IsStream: isStream, StartTime: startTime,
 	}
 
+	// 提示词优化：清理历史噪音 + 压缩文件信息 + 语言要求去重 + 精简工具定义（仅代理通道，IDE 路径专属）
+	// 工作台完全不动（工作台提示词是我们自定义的，不需要删减）
+	godCfg := service.GetGodRules(userID)
+
+	// 诊断日志：处理前，扫描所有 user 消息的 image_url（排查图片丢失问题）
+	if msgs, ok := req["messages"].([]interface{}); ok {
+		for i, m := range msgs {
+			if mm, ok := m.(map[string]interface{}); ok {
+				if role, _ := mm["role"].(string); role == "user" {
+					if arr, ok := mm["content"].([]interface{}); ok {
+						imgCount := 0
+						textCount := 0
+						for _, item := range arr {
+							if im, ok := item.(map[string]interface{}); ok {
+								t, _ := im["type"].(string)
+								if t == "image_url" {
+									imgCount++
+								} else if t == "text" {
+									textCount++
+								}
+							}
+						}
+						if imgCount > 0 {
+							log.Printf("[诊断] msg[%d] user 含 image_url=%d text=%d（IDE原始数据）", i, imgCount, textCount)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if msgs, ok := req["messages"].([]interface{}); ok && godCfg.PromptOptimize {
+		msgMaps := make([]map[string]interface{}, len(msgs))
+		for i, m := range msgs {
+			msgMaps[i], _ = m.(map[string]interface{})
+		}
+		req["messages"] = service.OptimizeMessages(msgMaps, godCfg)
+	}
+	if clientTools, ok := req["tools"].([]interface{}); ok && len(clientTools) > 0 {
+		req["tools"] = service.OptimizeTools(clientTools, godCfg)
+	}
+
 	// 注入上帝指令 + RAG
 	injectGodRulesAndRAG(req, userMsgRaw, userID, username, convCtx)
 
@@ -241,14 +283,20 @@ func extractLastUserMessage(req map[string]interface{}) (string, string) {
 
 // injectGodRulesAndRAG 注入上帝指令和 RAG 知识库上下文
 func injectGodRulesAndRAG(req map[string]interface{}, userMsgRaw string, userID int, username string, convCtx *ConversationContext) {
-	messages, ok := req["messages"].([]interface{})
-	if !ok {
+	// 兼容两种 messages 类型：[]interface{}（原始请求）和 []map[string]interface{}（OptimizeMessages 返回值）
+	var msgMaps []map[string]interface{}
+	switch msgs := req["messages"].(type) {
+	case []interface{}:
+		msgMaps = make([]map[string]interface{}, len(msgs))
+		for i, m := range msgs {
+			msgMaps[i], _ = m.(map[string]interface{})
+		}
+	case []map[string]interface{}:
+		msgMaps = msgs
+	default:
 		return
 	}
-	msgMaps := make([]map[string]interface{}, len(messages))
-	for i, m := range messages {
-		msgMaps[i], _ = m.(map[string]interface{})
-	}
+	// 上帝指令注入（追加式，Proxy + Workspace 两条路径都需要）
 	msgMaps = service.InjectGodRules(msgMaps, userID)
 	var refs []service.KnowledgeItem
 	msgMaps, refs = injectRAGContext(msgMaps, extractUserQuery(userMsgRaw), userID)

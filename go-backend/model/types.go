@@ -173,10 +173,15 @@ type AISuggestion struct {
 // ── God Rules ──
 
 type GodRulesConfig struct {
-	UserID         int    `json:"user_id"`
-	Enabled        bool   `json:"enabled"`
-	Rules          string `json:"rules"`
-	PromptOptimize bool   `json:"prompt_optimize"`
+	UserID             int    `json:"user_id"`
+	Enabled            bool   `json:"enabled"`
+	Rules              string `json:"rules"`
+	PromptOptimize     bool   `json:"prompt_optimize"`
+	StripNoise         bool   `json:"strip_noise"`
+	CompressFile       bool   `json:"compress_file"`
+	SimplifyLang       bool   `json:"simplify_lang"`
+	CompressToolResult bool   `json:"compress_tool_result"`
+	CompressTools      bool   `json:"compress_tools"`
 }
 
 // ── Quota ──
