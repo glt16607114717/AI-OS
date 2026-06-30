@@ -23,22 +23,23 @@ import (
 type ConversationContext struct {
 	UserID           int
 	Username         string
-	UserMessage      string                   // 用户提问摘要
-	Models           []string                 // 使用的模型列表
-	KeyNames         []string                 // 使用的 API Key 名称列表
-	FailoverCount    int
+	UserMessage      string   // 用户提问摘要
+	Models           []string // 使用的模型列表
+	KeyNames         []string // 使用的 API Key 名称列表
+	FailoverCount    int      // 故障转移次数
 	TotalPrompt      int
 	TotalCompletion  int
 	ToolCallCount    int
 	Errors           []string
-	AssistantContent string                   // 最终助手回复
-	ChatHistoryID    int64                    // sys_chat_history.id，用于下载日志
-	Source           string                   // proxy / workspace
-	IsAdmin          bool                     // 是否管理员
-	IsStream         bool                     // 原始请求是否流式
-	SSEHeaderWritten bool                     // SSE 响应头是否已写入（防止重复 WriteHeader）
+	AssistantContent string // 最终助手回复
+	ChatHistoryID    int64  // sys_chat_history.id，用于下载日志
+	Source           string // proxy / workspace
+	IsAdmin          bool   // 是否管理员
+	IsStream         bool   // 原始请求是否流式
+	SSEHeaderWritten bool   // SSE 响应头是否已写入（防止重复 WriteHeader）
 	StartTime        time.Time
-	KnowledgeRefs    []service.KnowledgeItem  // RAG 检索命中的知识引用
+	SessionID        string // Trae 会话 ID（本地 hook 注入的 [TRACE:session=xxx]）
+	MsgId            string // 消息 ID（[TRACE:msg=xxx]，标识同一次用户输入触发的所有请求）
 }
 
 // SummarizeAndLog 写一条对话汇总日志
@@ -62,6 +63,8 @@ func (c *ConversationContext) SummarizeAndLog() {
 		"user_message":      c.UserMessage,
 		"latency_ms":        latency,
 		"chat_history_id":   c.ChatHistoryID,
+		"session_id":        c.SessionID,
+		"msg_id":            c.MsgId,
 	}
 	detailJSON, _ := json.Marshal(detail)
 	service.WriteLog("conversation",
@@ -83,11 +86,17 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 提取 trace 标记（本地 hook 注入的会话追踪信息，无标记时安全跳过）
+	sessionID, msgId := extractAndStripTrace(req)
+
 	// 提取用户消息
 	userMsgRaw, userMsgSummary := extractLastUserMessage(req)
 	if cleanedMsg := extractUserQuery(userMsgRaw); cleanedMsg != "" {
 		service.AddChatMessage(userID, "user", cleanedMsg)
 	}
+
+	// 注入上帝指令 + RAG
+	injectGodRulesAndRAG(req, userMsgRaw, userID, username)
 
 	// 流式判断
 	isStream := false
@@ -98,52 +107,8 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 	convCtx := &ConversationContext{
 		UserID: userID, Username: username, UserMessage: userMsgSummary,
 		Source: "proxy", IsAdmin: isAdmin, IsStream: isStream, StartTime: startTime,
+		SessionID: sessionID, MsgId: msgId,
 	}
-
-	// 提示词优化：清理历史噪音 + 压缩文件信息 + 语言要求去重 + 精简工具定义（仅代理通道，IDE 路径专属）
-	// 工作台完全不动（工作台提示词是我们自定义的，不需要删减）
-	godCfg := service.GetGodRules(userID)
-
-	// 诊断日志：处理前，扫描所有 user 消息的 image_url（排查图片丢失问题）
-	if msgs, ok := req["messages"].([]interface{}); ok {
-		for i, m := range msgs {
-			if mm, ok := m.(map[string]interface{}); ok {
-				if role, _ := mm["role"].(string); role == "user" {
-					if arr, ok := mm["content"].([]interface{}); ok {
-						imgCount := 0
-						textCount := 0
-						for _, item := range arr {
-							if im, ok := item.(map[string]interface{}); ok {
-								t, _ := im["type"].(string)
-								if t == "image_url" {
-									imgCount++
-								} else if t == "text" {
-									textCount++
-								}
-							}
-						}
-						if imgCount > 0 {
-							log.Printf("[诊断] msg[%d] user 含 image_url=%d text=%d（IDE原始数据）", i, imgCount, textCount)
-						}
-					}
-				}
-			}
-		}
-	}
-
-	if msgs, ok := req["messages"].([]interface{}); ok && godCfg.PromptOptimize {
-		msgMaps := make([]map[string]interface{}, len(msgs))
-		for i, m := range msgs {
-			msgMaps[i], _ = m.(map[string]interface{})
-		}
-		req["messages"] = service.OptimizeMessages(msgMaps, godCfg)
-	}
-	if clientTools, ok := req["tools"].([]interface{}); ok && len(clientTools) > 0 {
-		req["tools"] = service.OptimizeTools(clientTools, godCfg)
-	}
-
-	// 注入上帝指令 + RAG
-	injectGodRulesAndRAG(req, userMsgRaw, userID, username, convCtx)
 
 	// 路由（代理专属：含额度降级）
 	route := service.GetRouteByStrategy(userID)
@@ -184,6 +149,9 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 提取 trace 标记（本地 hook 注入的会话追踪信息，无标记时安全跳过）
+	sessionID, msgId := extractAndStripTrace(req)
+
 	// 提取用户消息
 	userMsgRaw, userMsgSummary := extractLastUserMessage(req)
 	if cleanedMsg := extractUserQuery(userMsgRaw); cleanedMsg != "" {
@@ -191,11 +159,7 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 注入上帝指令 + RAG
-	convCtx := &ConversationContext{
-		UserID: userID, Username: username, UserMessage: userMsgSummary,
-		Source: "workspace", IsAdmin: isAdmin, IsStream: false, StartTime: startTime,
-	}
-	injectGodRulesAndRAG(req, userMsgRaw, userID, username, convCtx)
+	injectGodRulesAndRAG(req, userMsgRaw, userID, username)
 
 	// 注入服务端技能（工作台专属）
 	tools, _ := service.GetBuiltinSkillToolDefinitions(userID, isAdmin)
@@ -208,7 +172,12 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 	if s, ok := req["stream"].(bool); ok && s {
 		isStream = true
 	}
-	convCtx.IsStream = isStream
+
+	convCtx := &ConversationContext{
+		UserID: userID, Username: username, UserMessage: userMsgSummary,
+		Source: "workspace", IsAdmin: isAdmin, IsStream: isStream, StartTime: startTime,
+		SessionID: sessionID, MsgId: msgId,
+	}
 
 	// 路由（工作台专属：含额度降级）
 	route := service.GetRouteByStrategy(userID)
@@ -261,6 +230,72 @@ func parseRequestBody(w http.ResponseWriter, r *http.Request) (map[string]interf
 }
 
 // extractLastUserMessage 提取最后一条 user 消息的原始内容和摘要
+// extractAndStripTrace 从最后一条 user 消息中提取 [TRACE:session=xxx][TRACE:msg=xxx] 标记，
+// 剥离后返回 sessionID/msgId，并将消息内容替换为干净版本。
+// 没有标记时安全跳过（其他用户无 hook 也能正常工作）。
+func extractAndStripTrace(req map[string]interface{}) (sessionID, msgId string) {
+	messages, ok := req["messages"].([]interface{})
+	if !ok {
+		return "", ""
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg, ok := messages[i].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if role, _ := msg["role"].(string); role == "user" {
+			content := stringifyContent(msg["content"])
+			sID, mID, cleaned := extractTraceMarkers(content)
+			if sID != "" {
+				msg["content"] = strings.TrimSpace(cleaned)
+			}
+			return sID, mID
+		}
+	}
+	return "", ""
+}
+
+// extractTraceMarkers 只扫 content 末尾，纯字符串查找提取 trace 标记。
+// 不用正则，不受消息体大小影响。
+func extractTraceMarkers(content string) (sessionID, msgId, cleaned string) {
+	cleaned = content
+	const sessionPrefix = "[TRACE:session="
+	const msgPrefix = "[TRACE:msg="
+
+	sidx := strings.LastIndex(content, sessionPrefix)
+	if sidx < 0 {
+		return "", "", content
+	}
+	midx := strings.LastIndex(content, msgPrefix)
+	if midx < 0 || midx < sidx {
+		return "", "", content
+	}
+
+	// session_id: sidx+len(prefix) 到下一个 ]
+	sStart := sidx + len(sessionPrefix)
+	sEnd := strings.Index(content[sStart:], "]")
+	if sEnd < 0 {
+		return "", "", content
+	}
+	sessionID = content[sStart : sStart+sEnd]
+
+	// msg_id: midx+len(prefix) 到下一个 ]
+	mStart := midx + len(msgPrefix)
+	mEnd := strings.Index(content[mStart:], "]")
+	if mEnd < 0 {
+		return "", "", content
+	}
+	msgId = content[mStart : mStart+mEnd]
+
+	// 剥离标记及其前面的空行
+	stripStart := sidx
+	for stripStart > 0 && (content[stripStart-1] == '\n' || content[stripStart-1] == '\r') {
+		stripStart--
+	}
+	cleaned = content[:stripStart]
+	return sessionID, msgId, cleaned
+}
+
 func extractLastUserMessage(req map[string]interface{}) (string, string) {
 	messages, ok := req["messages"].([]interface{})
 	if !ok {
@@ -282,27 +317,17 @@ func extractLastUserMessage(req map[string]interface{}) (string, string) {
 }
 
 // injectGodRulesAndRAG 注入上帝指令和 RAG 知识库上下文
-func injectGodRulesAndRAG(req map[string]interface{}, userMsgRaw string, userID int, username string, convCtx *ConversationContext) {
-	// 兼容两种 messages 类型：[]interface{}（原始请求）和 []map[string]interface{}（OptimizeMessages 返回值）
-	var msgMaps []map[string]interface{}
-	switch msgs := req["messages"].(type) {
-	case []interface{}:
-		msgMaps = make([]map[string]interface{}, len(msgs))
-		for i, m := range msgs {
-			msgMaps[i], _ = m.(map[string]interface{})
-		}
-	case []map[string]interface{}:
-		msgMaps = msgs
-	default:
+func injectGodRulesAndRAG(req map[string]interface{}, userMsgRaw string, userID int, username string) {
+	messages, ok := req["messages"].([]interface{})
+	if !ok {
 		return
 	}
-	// 上帝指令注入（追加式，Proxy + Workspace 两条路径都需要）
-	msgMaps = service.InjectGodRules(msgMaps, userID)
-	var refs []service.KnowledgeItem
-	msgMaps, refs = injectRAGContext(msgMaps, extractUserQuery(userMsgRaw), userID)
-	if convCtx != nil {
-		convCtx.KnowledgeRefs = refs
+	msgMaps := make([]map[string]interface{}, len(messages))
+	for i, m := range messages {
+		msgMaps[i], _ = m.(map[string]interface{})
 	}
+	msgMaps = service.InjectGodRules(msgMaps, userID)
+	msgMaps = injectRAGContext(msgMaps, extractUserQuery(userMsgRaw), userID)
 
 	// 图片识别预处理：检测最后一条 user message 的图片（上传/URL），识别后追加文字描述
 	msgMaps, visionResult := service.ProcessImages(msgMaps, userID, username)
@@ -425,43 +450,33 @@ func extractUserQuery(raw string) string {
 	return cleaned
 }
 
-// injectRAGContext 检索知识库，将相关内容注入 system prompt 最前面
-// 使用 Qdrant 向量检索 + 项目过滤（忽略 user_id，所有用户共享知识库）
-// 返回命中的知识引用列表（供前端展示）
-func injectRAGContext(messages []map[string]interface{}, userMsg string, userID int) ([]map[string]interface{}, []service.KnowledgeItem) {
-	if userMsg == "" {
-		return messages, nil
+// injectRAGContext 检索知识库（Qdrant），将相关内容注入 system prompt 最前面
+func injectRAGContext(messages []map[string]interface{}, userMsg string, userID int) []map[string]interface{} {
+	if userMsg == "" || userID <= 0 {
+		return messages
 	}
 
-	// 语义搜索知识库（Qdrant，按项目过滤）
-	// TODO: 后续根据上下文自动识别当前项目，暂时检索全部项目
+	// Qdrant 向量检索（忽略用户隔离，全员共享，按项目过滤）
 	results, err := service.SearchKnowledge(userMsg, 5, []string{"ai-os", "rmp", "general"}, nil)
 	if err != nil || len(results) == 0 {
-		return messages, nil
-	}
-
-	// 过滤低分结果
-	var refs []service.KnowledgeItem
-	var valid []service.KnowledgeItem
-	for _, r := range results {
-		if r.Score < 0.5 {
-			continue
-		}
-		refs = append(refs, r)
-		valid = append(valid, r)
-	}
-
-	if len(valid) == 0 {
-		return messages, nil
+		return messages
 	}
 
 	// 构建知识上下文
 	var ctx strings.Builder
 	ctx.WriteString("[HIGHEST PRIORITY - 知识库参考]\n")
-	ctx.WriteString("以下内容来自企业知识库，在回答时必须优先参考。\n")
-	ctx.WriteString("回答时请在引用相关知识的位置标注来源，格式：[参考知识N：标题]。不相关的不要标注。\n\n")
-	for i, r := range valid {
-		ctx.WriteString(fmt.Sprintf("--- 参考 %d（相似度 %.0f%%）[%s] %s ---\n%s\n\n", i+1, r.Score*100, r.Category, r.Title, r.Content))
+	ctx.WriteString("以下内容来自企业知识库，在回答时必须优先参考：\n\n")
+	count := 0
+	for _, r := range results {
+		if r.Score < 0.35 {
+			continue
+		}
+		count++
+		ctx.WriteString(fmt.Sprintf("--- 参考 %d（相似度 %.0f%%）---\n%s\n\n", count, r.Score*100, r.Content))
+	}
+
+	if count == 0 {
+		return messages
 	}
 
 	ragCtx := strings.TrimSpace(ctx.String())
@@ -487,7 +502,7 @@ func injectRAGContext(messages []map[string]interface{}, userMsg string, userID 
 			{"role": "system", "content": ragCtx},
 		}, result...)
 	}
-	return result, refs
+	return result
 }
 
 // ProxyModels 代理 /v1/models 接口

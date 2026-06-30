@@ -2,6 +2,7 @@ package handler
 
 import (
 	"ai-os-server/middleware"
+	"ai-os-server/model"
 	"ai-os-server/service"
 	"encoding/json"
 	"net/http"
@@ -26,14 +27,28 @@ func SaveGodRules(w http.ResponseWriter, r *http.Request) {
 	}
 	var body map[string]interface{}
 	json.NewDecoder(r.Body).Decode(&body)
-	enabled, _ := body["enabled"].(bool)
-	rules, _ := body["rules"].(string)
-	promptOptimize, _ := body["prompt_optimize"].(bool)
-	stripNoise, _ := body["strip_noise"].(bool)
-	compressFile, _ := body["compress_file"].(bool)
-	simplifyLang, _ := body["simplify_lang"].(bool)
-	compressToolResult, _ := body["compress_tool_result"].(bool)
-	compressTools, _ := body["compress_tools"].(bool)
-	service.SaveGodRules(session.UserID, enabled, rules, promptOptimize, stripNoise, compressFile, simplifyLang, compressToolResult, compressTools)
+
+	cfg := &model.GodRulesConfig{
+		UserID:             session.UserID,
+		Enabled:            getBool(body, "enabled"),
+		Rules:              getStr(body, "rules"),
+		PromptOptimize:     getBool(body, "prompt_optimize"),
+		StripNoise:         getBool(body, "strip_noise"),
+		CompressFile:       getBool(body, "compress_file"),
+		SimplifyLang:       getBool(body, "simplify_lang"),
+		CompressToolResult: getBool(body, "compress_tool_result"),
+		CompressTools:      getBool(body, "compress_tools"),
+	}
+	service.SaveGodRulesFull(cfg)
 	okResponse(w, "已保存")
+}
+
+func getBool(m map[string]interface{}, key string) bool {
+	v, _ := m[key].(bool)
+	return v
+}
+
+func getStr(m map[string]interface{}, key string) string {
+	v, _ := m[key].(string)
+	return v
 }

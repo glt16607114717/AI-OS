@@ -138,12 +138,40 @@ func SaveVendorKeys(vendorID int, keys []map[string]interface{}) error {
 		return fmt.Errorf("厂商不存在")
 	}
 
-	// 删除旧密钥
-	if _, err := tx.Exec("DELETE FROM sys_api_key WHERE vendor_id = ?", vendorID); err != nil {
+	// 查现有 key 建立 name→id 映射（不改 ID，保持系统策略硬编码 KeyID 有效）
+	existingRows, err := tx.Query("SELECT id, name FROM sys_api_key WHERE vendor_id = ?", vendorID)
+	if err != nil {
 		return err
 	}
+	defer existingRows.Close()
 
-	// 插入新密钥
+	existingMap := make(map[string]int) // name → id
+	for existingRows.Next() {
+		var id int
+		var name string
+		if err := existingRows.Scan(&id, &name); err != nil {
+			continue
+		}
+		existingMap[name] = id
+	}
+
+	// 传入 key 名称集合
+	incomingNames := make(map[string]bool)
+	for _, k := range keys {
+		name, _ := k["name"].(string)
+		incomingNames[name] = true
+	}
+
+	// 删除不在传入列表中的 key
+	for name, id := range existingMap {
+		if !incomingNames[name] {
+			if _, err := tx.Exec("DELETE FROM sys_api_key WHERE id = ?", id); err != nil {
+				return err
+			}
+		}
+	}
+
+	// 更新已有 key / 插入新 key
 	for _, k := range keys {
 		name, _ := k["name"].(string)
 		apiKey, _ := k["api_key"].(string)
@@ -155,9 +183,18 @@ func SaveVendorKeys(vendorID int, keys []map[string]interface{}) error {
 				enabled = 0
 			}
 		}
-		if _, err := tx.Exec("INSERT INTO sys_api_key (vendor_id, name, api_key, access_key, secret_key, enabled) VALUES (?, ?, ?, ?, ?, ?)",
-			vendorID, name, apiKey, accessKey, secretKey, enabled); err != nil {
-			return err
+		if existingID, ok := existingMap[name]; ok {
+			// UPDATE 已有 key，ID 不变
+			if _, err := tx.Exec("UPDATE sys_api_key SET name=?, api_key=?, access_key=?, secret_key=?, enabled=? WHERE id=?",
+				name, apiKey, accessKey, secretKey, enabled, existingID); err != nil {
+				return err
+			}
+		} else {
+			// INSERT 新 key
+			if _, err := tx.Exec("INSERT INTO sys_api_key (vendor_id, name, api_key, access_key, secret_key, enabled) VALUES (?, ?, ?, ?, ?, ?)",
+				vendorID, name, apiKey, accessKey, secretKey, enabled); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit()
@@ -553,7 +590,7 @@ func enrichRouteInfo(opt *model.StrategyOption) *model.RouteInfo {
 	}
 
 	var apiKey, keyName string
-	if err := conn.QueryRow("SELECT api_key, name FROM sys_api_key WHERE id = ?", opt.KeyID).Scan(&apiKey, &keyName); err != nil || apiKey == "" {
+	if err := conn.QueryRow("SELECT api_key, name FROM sys_api_key WHERE id = ? AND enabled = 1", opt.KeyID).Scan(&apiKey, &keyName); err != nil || apiKey == "" {
 		return nil
 	}
 

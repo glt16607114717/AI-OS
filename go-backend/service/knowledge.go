@@ -314,6 +314,167 @@ func DeleteKnowledge(id int64) error {
 	return nil
 }
 
+// ── 上传文档专用：存储到 sys_knowledge + Qdrant ──
+
+// StoreUploadKnowledge 上传文档分块入库（覆盖上传：先删旧，再插新）
+// 参数：
+//   - userID: 上传者
+//   - filename: 文件名
+//   - chunks: 分块后的文本数组
+// 返回：实际存入的块数、错误
+func StoreUploadKnowledge(userID int, filename string, chunks []string) (int, error) {
+	if len(chunks) == 0 {
+		return 0, nil
+	}
+
+	conn, err := GetDB()
+	if err != nil {
+		return 0, err
+	}
+
+	source := "upload:" + filename
+
+	// 1. 删除旧版本（MySQL + Qdrant 同步）
+	rows, err := conn.Query("SELECT id, qdrant_id FROM sys_knowledge WHERE source = ? AND status = 'active'", source)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var oldID int64
+			var qdrantID string
+			if rows.Scan(&oldID, &qdrantID) == nil {
+				if qdrantID != "" {
+					QdrantDelete(qdrantID)
+				}
+			}
+		}
+	}
+	conn.Exec("UPDATE sys_knowledge SET status = 'archived' WHERE source = ? AND status = 'active'", source)
+
+	// 2. 内容级去重（SHA-256，跨用户）
+	var newChunks []string
+	for _, c := range chunks {
+		hash := sha256Hash(c)
+		var exists int
+		if err := conn.QueryRow("SELECT 1 FROM sys_knowledge WHERE content_hash = ? AND status = 'active'", hash).Scan(&exists); err != nil && err != sql.ErrNoRows {
+			log.Printf("[knowledge] 去重查询失败: %v", err)
+		}
+		if exists == 0 {
+			newChunks = append(newChunks, c)
+		}
+	}
+
+	if len(newChunks) == 0 {
+		return 0, nil
+	}
+
+	// 3. 逐块入库
+	stored := 0
+	for i, chunk := range newChunks {
+		hash := sha256Hash(chunk)
+		title := filename
+		if len(newChunks) > 1 {
+			title = fmt.Sprintf("%s (第%d块)", filename, i+1)
+		}
+		summary := chunk
+		if len(summary) > 200 {
+			summary = summary[:200]
+		}
+
+		// 3a. 写 MySQL
+		res, err := conn.Exec(`INSERT INTO sys_knowledge
+			(user_id, project, category, title, summary, content, context, tags, source, priority, status, content_hash)
+			VALUES (?, 'general', 'document', ?, ?, ?, '', '[]', ?, 'medium', 'active', ?)`,
+			userID, title, summary, chunk, source, hash)
+		if err != nil {
+			log.Printf("[knowledge] 上传入库失败: %v", err)
+			continue
+		}
+		knowledgeID, _ := res.LastInsertId()
+
+		// 3b. 向量化 + 存 Qdrant
+		vector, err := GetEmbedding(chunk)
+		if err != nil {
+			log.Printf("[knowledge] 向量化失败（知识已入库但无向量）: %v", err)
+			stored++
+			continue
+		}
+
+		pointID := GeneratePointID(chunk)
+		if err := QdrantUpsert(pointID, vector, knowledgeID, "general", "document", "active"); err != nil {
+			log.Printf("[knowledge] Qdrant 存入失败: %v", err)
+			stored++
+			continue
+		}
+
+		// 3c. 回填 qdrant_id
+		conn.Exec("UPDATE sys_knowledge SET qdrant_id = ? WHERE id = ?", pointID, knowledgeID)
+		stored++
+	}
+
+	return stored, nil
+}
+
+// GetUploadedFilesFromKnowledge 获取用户上传的文件列表（从 sys_knowledge 按 source 聚合）
+func GetUploadedFilesFromKnowledge(userID int) ([]map[string]interface{}, error) {
+	conn, err := GetDB()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := conn.Query(
+		`SELECT source, COUNT(*) as chunks, MAX(created_at) as uploaded_at
+		 FROM sys_knowledge WHERE user_id = ? AND source LIKE 'upload:%' AND status = 'active'
+		 GROUP BY source ORDER BY uploaded_at DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []map[string]interface{}
+	for rows.Next() {
+		var source string
+		var chunks int
+		var uploadedAt string
+		if err := rows.Scan(&source, &chunks, &uploadedAt); err != nil {
+			continue
+		}
+		filename := strings.TrimPrefix(source, "upload:")
+		files = append(files, map[string]interface{}{
+			"filename":    filename,
+			"chunks":      chunks,
+			"uploaded_at": uploadedAt,
+		})
+	}
+	return files, nil
+}
+
+// DeleteUploadKnowledgeBySource 按来源删除上传文档（MySQL + Qdrant 同步）
+func DeleteUploadKnowledgeBySource(userID int, source string) (int64, error) {
+	conn, err := GetDB()
+	if err != nil {
+		return 0, err
+	}
+
+	// 查所有 qdrant_id 并删除 Qdrant 向量
+	rows, err := conn.Query("SELECT qdrant_id FROM sys_knowledge WHERE user_id = ? AND source = ? AND status = 'active'", userID, source)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var qdrantID string
+			if rows.Scan(&qdrantID) == nil && qdrantID != "" {
+				QdrantDelete(qdrantID)
+			}
+		}
+	}
+
+	// 软删除 MySQL
+	result, err := conn.Exec("UPDATE sys_knowledge SET status = 'archived' WHERE user_id = ? AND source = ? AND status = 'active'", userID, source)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := result.RowsAffected()
+	return n, nil
+}
+
 // GetKnowledgeStats 知识库统计
 func GetKnowledgeStats() (map[string]int, error) {
 	conn, err := GetDB()

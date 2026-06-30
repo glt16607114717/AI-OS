@@ -116,6 +116,26 @@ func ListUsers() ([]map[string]interface{}, error) {
 	return result, nil
 }
 
+// GetUserByID 根据 ID 查询单个用户（普通用户自查用）
+func GetUserByID(userID int) (map[string]interface{}, error) {
+	conn, err := GetDB()
+	if err != nil {
+		return nil, err
+	}
+	var id, status, isAdmin int
+	var username, apiKey, createdAt, updatedAt string
+	err = conn.QueryRow("SELECT id, username, status, is_admin, api_key, created_at, updated_at FROM sys_user WHERE id = ?", userID).
+		Scan(&id, &username, &status, &isAdmin, &apiKey, &createdAt, &updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"id": id, "username": username, "status": status,
+		"is_admin": isAdmin == 1, "api_key": apiKey,
+		"created_at": createdAt, "updated_at": updatedAt,
+	}, nil
+}
+
 func CreateUser(username, password string, isAdmin bool) (map[string]interface{}, error) {
 	conn, err := GetDB()
 	if err != nil {

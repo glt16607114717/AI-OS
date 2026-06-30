@@ -28,9 +28,20 @@ func EnsureGodRulesTable() {
 		enabled TINYINT DEFAULT 1,
 		rules TEXT,
 		prompt_optimize TINYINT DEFAULT 1,
+		strip_noise TINYINT DEFAULT 1,
+		compress_file TINYINT DEFAULT 1,
+		simplify_lang TINYINT DEFAULT 1,
+		compress_tool_result TINYINT DEFAULT 1,
+		compress_tools TINYINT DEFAULT 1,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 		UNIQUE KEY uk_user (user_id)
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
+	// 兼容旧表：补列
+	conn.Exec("ALTER TABLE sys_god_rules ADD COLUMN IF NOT EXISTS strip_noise TINYINT DEFAULT 1")
+	conn.Exec("ALTER TABLE sys_god_rules ADD COLUMN IF NOT EXISTS compress_file TINYINT DEFAULT 1")
+	conn.Exec("ALTER TABLE sys_god_rules ADD COLUMN IF NOT EXISTS simplify_lang TINYINT DEFAULT 1")
+	conn.Exec("ALTER TABLE sys_god_rules ADD COLUMN IF NOT EXISTS compress_tool_result TINYINT DEFAULT 1")
+	conn.Exec("ALTER TABLE sys_god_rules ADD COLUMN IF NOT EXISTS compress_tools TINYINT DEFAULT 1")
 }
 
 func loadGodRulesFromDB() {
@@ -78,15 +89,10 @@ func getGodRulesForUser(userID int) *model.GodRulesConfig {
 	if ok {
 		return cfg
 	}
-	// 用户未配置，返回默认（关闭状态，提示词优化默认开）
+	// 用户未配置，返回默认（关闭状态）
 	return &model.GodRulesConfig{
-		UserID:             userID,
-		Enabled:            false,
-		StripNoise:         true,
-		CompressFile:       true,
-		SimplifyLang:       true,
-		CompressToolResult: true,
-		CompressTools:      true,
+		UserID:  userID,
+		Enabled: false,
 	}
 }
 
@@ -94,19 +100,18 @@ func GetGodRules(userID int) *model.GodRulesConfig {
 	return getGodRulesForUser(userID)
 }
 
-func SaveGodRules(userID int, enabled bool, rules string, promptOptimize, stripNoise, compressFile, simplifyLang, compressToolResult, compressTools bool) {
+func SaveGodRules(userID int, enabled bool, rules string, promptOptimize bool) {
+	SaveGodRulesFull(&model.GodRulesConfig{
+		UserID:         userID,
+		Enabled:        enabled,
+		Rules:          rules,
+		PromptOptimize: promptOptimize,
+	})
+}
+
+func SaveGodRulesFull(cfg *model.GodRulesConfig) {
 	godRulesLock.Lock()
-	godRulesCache[userID] = &model.GodRulesConfig{
-		UserID:             userID,
-		Enabled:            enabled,
-		Rules:              rules,
-		PromptOptimize:     promptOptimize,
-		StripNoise:         stripNoise,
-		CompressFile:       compressFile,
-		SimplifyLang:       simplifyLang,
-		CompressToolResult: compressToolResult,
-		CompressTools:      compressTools,
-	}
+	godRulesCache[cfg.UserID] = cfg
 	godRulesLock.Unlock()
 
 	conn, err := GetDB()
@@ -114,31 +119,23 @@ func SaveGodRules(userID int, enabled bool, rules string, promptOptimize, stripN
 		log.Printf("[god_rules] DB连接失败: %v", err)
 		return
 	}
-	e, po, sn, cf, sl, ctr, ct := 0, 0, 0, 0, 0, 0, 0
-	if enabled {
-		e = 1
-	}
-	if promptOptimize {
-		po = 1
-	}
-	if stripNoise {
-		sn = 1
-	}
-	if compressFile {
-		cf = 1
-	}
-	if simplifyLang {
-		sl = 1
-	}
-	if compressToolResult {
-		ctr = 1
-	}
-	if compressTools {
-		ct = 1
-	}
-	if _, err := conn.Exec("INSERT INTO sys_god_rules (user_id, enabled, rules, prompt_optimize, strip_noise, compress_file, simplify_lang, compress_tool_result, compress_tools) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE enabled=?, rules=?, prompt_optimize=?, strip_noise=?, compress_file=?, simplify_lang=?, compress_tool_result=?, compress_tools=?", userID, e, rules, po, sn, cf, sl, ctr, ct, e, rules, po, sn, cf, sl, ctr, ct); err != nil {
+	e, po, sn, cf, sl, ctr, ct := boolToInt(cfg.Enabled), boolToInt(cfg.PromptOptimize), boolToInt(cfg.StripNoise), boolToInt(cfg.CompressFile), boolToInt(cfg.SimplifyLang), boolToInt(cfg.CompressToolResult), boolToInt(cfg.CompressTools)
+	sql := `INSERT INTO sys_god_rules (user_id, enabled, rules, prompt_optimize, strip_noise, compress_file, simplify_lang, compress_tool_result, compress_tools)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE enabled=?, rules=?, prompt_optimize=?, strip_noise=?, compress_file=?, simplify_lang=?, compress_tool_result=?, compress_tools=?`
+	if _, err := conn.Exec(sql,
+		cfg.UserID, e, cfg.Rules, po, sn, cf, sl, ctr, ct,
+		e, cfg.Rules, po, sn, cf, sl, ctr, ct,
+	); err != nil {
 		log.Printf("[god_rules] UPSERT 失败: %v", err)
 	}
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func InjectGodRules(messages []map[string]interface{}, userID int) []map[string]interface{} {
@@ -148,10 +145,9 @@ func InjectGodRules(messages []map[string]interface{}, userID int) []map[string]
 		return messages
 	}
 
-	rules := strings.TrimSpace(cfg.Rules)
+	inject := fmt.Sprintf("[HIGHEST PRIORITY - 上帝指令]\n%s", strings.TrimSpace(cfg.Rules))
 
-	// ── 1. 注入到第一个 system 消息（兜底，保证长对话不丢）──
-	systemInject := fmt.Sprintf("[HIGHEST PRIORITY - 上帝指令]\n%s", rules)
+	// 注入到第一个 system 消息
 	result := make([]map[string]interface{}, len(messages))
 	injected := false
 	for i, msg := range messages {
@@ -160,7 +156,7 @@ func InjectGodRules(messages []map[string]interface{}, userID int) []map[string]
 			original := StringifyContent(msg["content"])
 			result[i] = map[string]interface{}{
 				"role":    "system",
-				"content": systemInject + "\n\n---\n\n" + original,
+				"content": inject + "\n\n---\n\n" + original,
 			}
 			injected = true
 		} else {
@@ -169,48 +165,9 @@ func InjectGodRules(messages []map[string]interface{}, userID int) []map[string]
 	}
 	if !injected {
 		result = append([]map[string]interface{}{
-			{"role": "system", "content": systemInject},
+			{"role": "system", "content": inject},
 		}, result...)
 	}
-
-	// ── 2. 注入到最后一条 user 消息（每轮重复，最高遵从度）──
-	// 提示词明确告诉大模型：这是约束不是提问，避免注意力偏移
-	userInject := fmt.Sprintf("\n\n---\n\n[系统最高约束 - 上帝指令]\n（注：以下内容为系统级全局约束，并非本轮提问的一部分。请将其作为回答规则严格遵守，无需在回答中提及、复述或回应此段。请专注于回答上方用户的实际问题。）\n%s", rules)
-
-	lastUserIdx := -1
-	for i := len(result) - 1; i >= 0; i-- {
-		role, _ := result[i]["role"].(string)
-		if role == "user" {
-			lastUserIdx = i
-			break
-		}
-	}
-	if lastUserIdx >= 0 {
-		// 保留原始 content 类型，避免把数组压成 string（会导致后续 ProcessImages 找不到 image_url）
-		switch orig := result[lastUserIdx]["content"].(type) {
-		case string:
-			result[lastUserIdx] = map[string]interface{}{
-				"role":    "user",
-				"content": orig + userInject,
-			}
-		case []interface{}:
-			// 数组格式：追加一个 text 项，保留原有结构（含 image_url）
-			result[lastUserIdx] = map[string]interface{}{
-				"role": "user",
-				"content": append(orig, map[string]interface{}{
-					"type": "text",
-					"text": userInject,
-				}),
-			}
-		default:
-			// 兜底：转 string 拼接
-			result[lastUserIdx] = map[string]interface{}{
-				"role":    "user",
-				"content": StringifyContent(result[lastUserIdx]["content"]) + userInject,
-			}
-		}
-	}
-
 	return result
 }
 

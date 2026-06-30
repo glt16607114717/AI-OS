@@ -26,6 +26,7 @@ func GetDefaultRoute() *model.RouteInfo {
 	baseURL, _ := first["base_url"].(string)
 	keyID := first["key_id"] // 可能是 int 或 float64
 	apiKey, _ := first["api_key"].(string)
+	keyName, _ := first["key_name"].(string)
 	modelID, _ := first["model_id"].(string)
 
 	keyIDStr := ""
@@ -44,6 +45,7 @@ func GetDefaultRoute() *model.RouteInfo {
 		BaseURL:    baseURL,
 		APIKey:     apiKey,
 		KeyID:      keyIDStr,
+		KeyName:    keyName,
 		ModelID:    modelID,
 	}
 }

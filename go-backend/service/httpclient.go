@@ -21,7 +21,7 @@ var SharedHTTPClient = &http.Client{
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   20,
 		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second, // 首字节超时：30秒内没响应头 = 卡死
+		ResponseHeaderTimeout: 60 * time.Second, // 首字节超时：60秒
 		ExpectContinueTimeout: 1 * time.Second,
 		ForceAttemptHTTP2:     true,
 	},

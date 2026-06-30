@@ -53,11 +53,6 @@ func main() {
 	cb := circuit.Init(service.GetDB)
 	go cb.StartMonitor()
 
-	// 初始化 Qdrant 向量库（连接失败不阻塞启动，蒸馏/检索会降级）
-	if err := service.InitQdrant(); err != nil {
-		log.Printf("[init] Qdrant 初始化失败（知识库检索将不可用）: %v", err)
-	}
-
 	// 启动每日知识蒸馏（凌晨3点）
 	c := cron.New()
 	c.AddFunc("0 3 * * *", func() {
@@ -155,6 +150,13 @@ func main() {
 		r.Post("/api/llm/delete-strategy", handler.DeleteStrategy)
 		r.Post("/api/llm/set-active-strategy", handler.SetActiveStrategy)
 
+		// 用户管理（普通用户可访问，handler 内做权限隔离）
+		r.Get("/api/users", handler.ListUsers)
+		r.Post("/api/users/update-password", handler.UpdateUserPassword)
+
+		// 额度监控（普通用户可强制检查自己的额度）
+		r.Post("/api/quota/force-check", handler.ForceQuotaCheck)
+
 		// 退出
 		r.Post("/api/logout", handler.Logout)
 	})
@@ -169,12 +171,9 @@ func main() {
 
 		// 额度监控
 		r.Post("/api/quota/set-enabled", handler.SetQuotaEnabled)
-		r.Post("/api/quota/force-check", handler.ForceQuotaCheck)
 
-		// 用户管理
-		r.Get("/api/users", handler.ListUsers)
+		// 用户管理（仅管理员）
 		r.Post("/api/users/create", handler.CreateUser)
-		r.Post("/api/users/update-password", handler.UpdateUserPassword)
 		r.Post("/api/users/toggle-status", handler.ToggleUserStatus)
 		r.Post("/api/users/toggle-admin", handler.ToggleUserAdmin)
 		r.Post("/api/users/delete", handler.DeleteUser)
@@ -185,9 +184,6 @@ func main() {
 		r.Delete("/api/skills/{code}/connection/{id}", handler.DeleteSkillConnection)
 		r.Get("/api/skills/{code}/permissions", handler.GetSkillPermissions)
 		r.Post("/api/skills/{code}/permission", handler.SetSkillPermission)
-
-		// 知识库迁移（管理员一次性操作）
-		r.Post("/api/rag/migrate", handler.RagMigrate)
 	})
 
 	// 启动

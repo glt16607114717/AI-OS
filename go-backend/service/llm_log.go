@@ -149,17 +149,18 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 		}
 	}
 
-	// 按用户
+	// 按用户（只按 user_id 分组，JOIN sys_user 取最新用户名，避免改名后数据分裂）
 	byUser := map[string]interface{}{}
-	uRows, _ := conn.Query(`SELECT user_id, COALESCE(username, CONCAT('user_', user_id)) as username,
+	uRows, _ := conn.Query(`SELECT s.user_id, COALESCE(u.username, CONCAT('user_', s.user_id)) as username,
 		COUNT(*) as requests,
-		COALESCE(SUM(total_tokens),0) as tokens,
-		COALESCE(SUM(prompt_tokens),0) as prompt_tokens,
-		COALESCE(SUM(completion_tokens),0) as completion_tokens,
-		COALESCE(AVG(CASE WHEN success=1 THEN latency_ms END),0) as avg_latency_ms,
-		SUM(success) as success_count,
-		SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) as errors
-		FROM sys_llm_stats WHERE ts >= ? GROUP BY user_id, username ORDER BY requests DESC`, cutoff)
+		COALESCE(SUM(s.total_tokens),0) as tokens,
+		COALESCE(SUM(s.prompt_tokens),0) as prompt_tokens,
+		COALESCE(SUM(s.completion_tokens),0) as completion_tokens,
+		COALESCE(AVG(CASE WHEN s.success=1 THEN s.latency_ms END),0) as avg_latency_ms,
+		SUM(s.success) as success_count,
+		SUM(CASE WHEN s.success=0 THEN 1 ELSE 0 END) as errors
+		FROM sys_llm_stats s LEFT JOIN sys_user u ON s.user_id = u.id
+		WHERE s.ts >= ? GROUP BY s.user_id ORDER BY requests DESC`, cutoff)
 	if uRows != nil {
 		defer uRows.Close()
 		for uRows.Next() {
@@ -198,12 +199,13 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 		}
 	}
 
-	// 图片识别按用户统计
+	// 图片识别按用户统计（只按 user_id 分组，JOIN sys_user 取最新用户名）
 	visionByUser := map[string]interface{}{}
-	vRows2, _ := conn.Query(`SELECT user_id, COALESCE(username, CONCAT('user_', user_id)),
-		COUNT(*) as count, SUM(success) as success_count,
-		SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) as fail_count
-		FROM sys_vision_log WHERE created_at >= ? GROUP BY user_id, username ORDER BY count DESC`, cutoff)
+	vRows2, _ := conn.Query(`SELECT v.user_id, COALESCE(u.username, CONCAT('user_', v.user_id)),
+		COUNT(*) as count, SUM(v.success) as success_count,
+		SUM(CASE WHEN v.success=0 THEN 1 ELSE 0 END) as fail_count
+		FROM sys_vision_log v LEFT JOIN sys_user u ON v.user_id = u.id
+		WHERE v.created_at >= ? GROUP BY v.user_id ORDER BY count DESC`, cutoff)
 	if vRows2 != nil {
 		defer vRows2.Close()
 		for vRows2.Next() {
@@ -525,8 +527,15 @@ func GetErrorLog(page, pageSize int, modelFilter, userFilter string) ([]map[stri
 		args = append(args, modelFilter)
 	}
 	if userFilter != "" {
-		where += " AND username = ?"
-		args = append(args, userFilter)
+		// 先查 user_id，避免改名后旧用户名匹配不到
+		var uid int
+		if err := conn.QueryRow("SELECT id FROM sys_user WHERE username = ?", userFilter).Scan(&uid); err == nil && uid > 0 {
+			where += " AND user_id = ?"
+			args = append(args, uid)
+		} else {
+			// 查不到用户，返回空
+			return []map[string]interface{}{}, 0, nil
+		}
 	}
 
 	// 查总数

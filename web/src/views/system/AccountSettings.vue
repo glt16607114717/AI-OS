@@ -24,6 +24,8 @@ const editTarget = ref<User | null>(null)
 
 // 当前登录用户的 API Key
 const myApiKey = ref('')
+// 当前登录用户是否管理员
+const isAdmin = ref(false)
 
 const addForm = reactive({ username: '', password: '', is_admin: 0 })
 const editForm = reactive({ password: '' })
@@ -66,6 +68,7 @@ async function fetchMyInfo() {
     const data = await res.json()
     if (data.ok && data.data) {
       myApiKey.value = data.data.api_key || ''
+      isAdmin.value = data.data.is_admin === true || data.data.is_admin === 1
     }
   } catch (e) {
     console.error('[AccountSettings] fetchMyInfo error:', e)
@@ -259,9 +262,9 @@ onMounted(() => {
     <div class="page-header">
       <div>
         <h2 class="page-title">账户设置</h2>
-        <p class="page-desc">管理系统登录账户</p>
+        <p class="page-desc">{{ isAdmin ? '管理系统登录账户' : '管理我的账户' }}</p>
       </div>
-      <el-button type="primary" :icon="CirclePlus" @click="openAddDialog">添加用户</el-button>
+      <el-button v-if="isAdmin" type="primary" :icon="CirclePlus" @click="openAddDialog">添加用户</el-button>
     </div>
 
     <!-- 我的 API Key -->
@@ -294,14 +297,14 @@ onMounted(() => {
           <code class="cell-apikey">{{ row.api_key || '-' }}</code>
         </template>
       </el-table-column>
-      <el-table-column label="管理员" width="100">
+      <el-table-column v-if="isAdmin" label="管理员" width="100">
         <template #default="{ row }">
           <el-tag :type="row.is_admin ? 'danger' : 'info'" size="small" style="cursor:pointer" @click="toggleAdmin(row)">
             {{ row.is_admin ? '管理员' : '普通' }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="状态" width="100">
+      <el-table-column v-if="isAdmin" label="状态" width="100">
         <template #default="{ row }">
           <el-tag :type="row.status === 1 ? 'success' : 'danger'" size="small">
             {{ row.status === 1 ? '启用' : '停用' }}
@@ -311,13 +314,15 @@ onMounted(() => {
       <el-table-column label="创建时间" width="180">
         <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
       </el-table-column>
-      <el-table-column label="操作" min-width="240">
+      <el-table-column label="操作" min-width="120">
         <template #default="{ row }">
           <el-button size="small" :icon="Edit" @click="openEditDialog(row)">改密码</el-button>
-          <el-button size="small" :type="row.status === 1 ? 'warning' : 'success'" @click="toggleStatus(row)">
-            {{ row.status === 1 ? '停用' : '启用' }}
-          </el-button>
-          <el-button size="small" type="danger" :icon="Delete" @click="doDelete(row)">删除</el-button>
+          <template v-if="isAdmin">
+            <el-button size="small" :type="row.status === 1 ? 'warning' : 'success'" @click="toggleStatus(row)">
+              {{ row.status === 1 ? '停用' : '启用' }}
+            </el-button>
+            <el-button size="small" type="danger" :icon="Delete" @click="doDelete(row)">删除</el-button>
+          </template>
         </template>
       </el-table-column>
     </el-table>

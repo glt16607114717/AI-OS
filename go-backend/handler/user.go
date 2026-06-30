@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"ai-os-server/middleware"
 	"ai-os-server/service"
 	"encoding/json"
 	"net/http"
@@ -39,6 +40,17 @@ func Logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func ListUsers(w http.ResponseWriter, r *http.Request) {
+	// 普通用户只返回自己；管理员返回全部
+	session := middleware.GetSessionFromCtx(r)
+	if session != nil && !session.IsAdmin {
+		user, err := service.GetUserByID(session.UserID)
+		if err != nil {
+			errResponse(w, err.Error(), 500)
+			return
+		}
+		okResponse(w, map[string]interface{}{"users": []map[string]interface{}{user}})
+		return
+	}
 	users, err := service.ListUsers()
 	if err != nil {
 		errResponse(w, err.Error(), 500)
@@ -77,6 +89,12 @@ func UpdateUserPassword(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(r.Body).Decode(&body)
 	id := intFloat(body["id"])
 	password, _ := body["password"].(string)
+	// 普通用户只能改自己的密码
+	session := middleware.GetSessionFromCtx(r)
+	if session != nil && !session.IsAdmin && id != session.UserID {
+		errResponse(w, "只能修改自己的密码", 403)
+		return
+	}
 	if err := service.UpdateUserPassword(id, password); err != nil {
 		errResponse(w, err.Error(), 500)
 		return

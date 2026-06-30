@@ -212,9 +212,8 @@ func RagUpload(w http.ResponseWriter, r *http.Request) {
 		chunks = []string{text}
 	}
 
-	// 批量向量化入库（上传文件不做提炼，原样存储）
-	source := "upload:" + filename
-	err = service.StoreEmbeddingsRaw(session.UserID, chunks, source)
+	// 向量化入库（sys_knowledge + Qdrant，覆盖上传）
+	stored, err := service.StoreUploadKnowledge(session.UserID, filename, chunks)
 	if err != nil {
 		errResponse(w, "向量化入库失败: "+err.Error(), 500)
 		return
@@ -222,7 +221,7 @@ func RagUpload(w http.ResponseWriter, r *http.Request) {
 
 	okResponse(w, map[string]interface{}{
 		"filename": filename,
-		"chunks":   len(chunks),
+		"chunks":   stored,
 		"size":     len(text),
 	})
 }
@@ -261,7 +260,7 @@ func RagFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	files, err := service.GetUploadedFiles(session.UserID)
+	files, err := service.GetUploadedFilesFromKnowledge(session.UserID)
 	if err != nil {
 		errResponse(w, "查询失败: "+err.Error(), 500)
 		return

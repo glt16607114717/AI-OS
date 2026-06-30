@@ -890,41 +890,31 @@ func EnsureDistillTable() {
 		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
 }
 
-// DistillKnowledgeByDate 获取指定日期的用户蒸馏知识
+// DistillKnowledgeByDate 获取指定日期的用户蒸馏知识（从 sys_knowledge 查询）
 func DistillKnowledgeByDate(userID int, date string) ([]map[string]interface{}, error) {
 	conn, err := GetDB()
 	if err != nil {
 		return nil, err
 	}
-	query := `SELECT id, dimension, title, context, content, priority, source, created_at FROM (
-		SELECT id, 
-			CASE 
-				WHEN source LIKE 'distill:%%:decisions:%%' THEN 'decisions'
-				WHEN source LIKE 'distill:%%:pitfalls:%%' THEN 'pitfalls'
-				WHEN source LIKE 'distill:%%:business:%%' THEN 'business'
-				WHEN source LIKE 'distill:%%:habits:%%' THEN 'habits'
-				ELSE 'other'
-			END as dimension,
-			REPLACE(REPLACE(SUBSTRING_INDEX(source, ':', -1), '_', ' '), '-', ' ') as title,
-			'' as context,
-			content,
-			'medium' as priority,
-			source,
-			created_at
-		FROM sys_embedding 
-		WHERE user_id = ? AND source LIKE 'distill:%%'
-		%s
-	) t ORDER BY created_at DESC LIMIT 50`
 
 	var rows *sql.Rows
-	var err2 error
 	if date != "" {
-		rows, err2 = conn.Query(fmt.Sprintf(query, "AND source LIKE ?"), userID, "distill:"+date+":%")
+		rows, err = conn.Query(
+			`SELECT id, category as dimension, title, context, content, priority, source, created_at
+			 FROM sys_knowledge
+			 WHERE user_id = ? AND source LIKE 'distill:%' AND source LIKE ? AND status = 'active'
+			 ORDER BY created_at DESC LIMIT 50`,
+			userID, "distill:"+date+":%")
 	} else {
-		rows, err2 = conn.Query(fmt.Sprintf(query, ""), userID)
+		rows, err = conn.Query(
+			`SELECT id, category as dimension, title, context, content, priority, source, created_at
+			 FROM sys_knowledge
+			 WHERE user_id = ? AND source LIKE 'distill:%' AND status = 'active'
+			 ORDER BY created_at DESC LIMIT 50`,
+			userID)
 	}
-	if err2 != nil {
-		return nil, err2
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 

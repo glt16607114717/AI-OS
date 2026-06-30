@@ -318,8 +318,8 @@ onBeforeUnmount(() => {
           </transition>
         </div>
 
-        <!-- System Settings (expandable, admin only) -->
-        <div class="nav-group" v-if="isAdmin">
+        <!-- System Settings (expandable) -->
+        <div class="nav-group">
           <div class="nav-item" :class="{ active: isSystemActive }" @click="toggleSystemMenu">
             <div class="nav-icon">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

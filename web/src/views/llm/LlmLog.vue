@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { API_BASE } from '../../api'
 import { formatTime } from '../../utils/time'
@@ -39,14 +39,43 @@ const maxId = ref(0)
 const paused = ref(false)
 const expandedIds = ref<Set<number>>(new Set())
 
-// 分页
+// 筛选
+const filterUser = ref('')
+const filterDateRange = ref<[string, string] | null>(null)
+
+// 用户选项（从已加载数据提取）
+const userOptions = computed(() => {
+  const names = new Set<string>()
+  for (const l of logs.value) {
+    if (l.parsed?.username) names.add(l.parsed.username)
+  }
+  return Array.from(names).sort()
+})
+
+// 筛选后的日志
+const filteredLogs = computed(() => {
+  let result = logs.value
+  if (filterUser.value) {
+    result = result.filter(l => l.parsed?.username === filterUser.value)
+  }
+  if (filterDateRange.value && filterDateRange.value.length === 2) {
+    const [start, end] = filterDateRange.value
+    result = result.filter(l => {
+      const d = l.ts.substring(0, 10)
+      return d >= start && d <= end
+    })
+  }
+  return result
+})
+
+// 分页（基于筛选后数据）
 const logPageSize = 50
 const logCurrentPage = ref(1)
 const pagedLogs = computed(() => {
   const start = (logCurrentPage.value - 1) * logPageSize
-  return logs.value.slice(start, start + logPageSize)
+  return filteredLogs.value.slice(start, start + logPageSize)
 })
-const logTotalPages = computed(() => Math.ceil(logs.value.length / logPageSize))
+const logTotalPages = computed(() => Math.ceil(filteredLogs.value.length / logPageSize))
 function goLogPage(page: number) {
   if (page >= 1 && page <= logTotalPages.value) logCurrentPage.value = page
 }
@@ -170,6 +199,28 @@ function formatTokens(n: number) {
   return String(n)
 }
 
+// 筛选变化时重置页码
+watch([filterUser, filterDateRange], () => { logCurrentPage.value = 1 })
+
+function updateDateRange(idx: number, val: string) {
+  const cur = filterDateRange.value || ['', '']
+  cur[idx] = val
+  // 只有两个日期都有值才生效，否则清空
+  if (cur[0] && cur[1]) {
+    filterDateRange.value = [cur[0], cur[1]]
+  } else if (!cur[0] && !cur[1]) {
+    filterDateRange.value = null
+  } else {
+    // 临时存一个不完整的值
+    filterDateRange.value = [cur[0], cur[1]]
+  }
+}
+
+function clearFilters() {
+  filterUser.value = ''
+  filterDateRange.value = null
+}
+
 onMounted(() => {
   fetchLogs(false)
   refreshTimer = setInterval(() => fetchLogs(true), 3000)
@@ -189,9 +240,23 @@ onUnmounted(() => {
           <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
         </svg>
         <span>对话记录</span>
-        <span class="log-count">{{ logs.length }} 条</span>
+        <span class="log-count">{{ filterUser || (filterDateRange && filterDateRange[0]) ? `${filteredLogs.length}/${logs.length} 条` : `${logs.length} 条` }}</span>
       </div>
       <div class="log-actions">
+        <!-- 用户筛选 -->
+        <select v-model="filterUser" class="filter-select" title="按用户筛选">
+          <option value="">全部用户</option>
+          <option v-for="u in userOptions" :key="u" :value="u">{{ u }}</option>
+        </select>
+        <!-- 时间筛选 -->
+        <div class="date-filter">
+          <input type="date" :value="filterDateRange?.[0] || ''" @input="updateDateRange(0, ($event.target as HTMLInputElement).value)" class="filter-date" title="开始日期">
+          <span class="date-sep">~</span>
+          <input type="date" :value="filterDateRange?.[1] || ''" @input="updateDateRange(1, ($event.target as HTMLInputElement).value)" class="filter-date" title="结束日期">
+          <button v-if="filterUser || (filterDateRange && (filterDateRange[0] || filterDateRange[1]))" class="filter-clear" @click="clearFilters" title="清除筛选">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
         <button class="btn-icon" :class="{ active: paused }" @click="togglePause" :title="paused ? '继续刷新' : '暂停刷新'">
           <svg v-if="!paused" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
           <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -311,7 +376,7 @@ onUnmounted(() => {
             <span v-else-if="p === 2 && logCurrentPage > 3 || p === logTotalPages - 1 && logCurrentPage < logTotalPages - 2" class="pg-ellipsis">...</span>
           </template>
           <button class="pg-btn" :disabled="logCurrentPage >= logTotalPages" @click="goLogPage(logCurrentPage + 1)">下一页</button>
-          <span class="pg-info">共 {{ logs.length }} 条，第 {{ logCurrentPage }}/{{ logTotalPages }} 页</span>
+          <span class="pg-info">共 {{ filteredLogs.length }} 条，第 {{ logCurrentPage }}/{{ logTotalPages }} 页</span>
         </div>
       </template>
     </div>
@@ -359,7 +424,54 @@ onUnmounted(() => {
 .log-actions {
   display: flex;
   gap: 6px;
+  align-items: center;
 }
+
+.filter-select {
+  font-size: 12px;
+  padding: 4px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 5px;
+  background: #fff;
+  color: #475569;
+  cursor: pointer;
+  max-width: 100px;
+}
+.filter-select:focus { outline: none; border-color: #6366f1; }
+
+.date-filter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.filter-date {
+  font-size: 12px;
+  padding: 4px 6px;
+  border: 1px solid #e2e8f0;
+  border-radius: 5px;
+  background: #fff;
+  color: #475569;
+  width: 120px;
+}
+.filter-date:focus { outline: none; border-color: #6366f1; }
+.date-sep {
+  font-size: 11px;
+  color: #94a3b8;
+}
+.filter-clear {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  border: 1px solid #fee2e2;
+  background: #fef2f2;
+  color: #ef4444;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.filter-clear:hover { background: #fee2e2; }
 
 .btn-icon {
   width: 32px;

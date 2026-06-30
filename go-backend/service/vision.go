@@ -236,7 +236,7 @@ func RecognizeImage(userID int, username, imageURL, prompt string) (string, erro
 			},
 		},
 		"temperature": 0.1,
-		"max_tokens":  1000,
+		"max_tokens":  4096,
 	}
 
 	bodyJSON, err := json.Marshal(reqBody)
@@ -253,12 +253,13 @@ func RecognizeImage(userID int, username, imageURL, prompt string) (string, erro
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	// 使用 SharedHTTPClient（有 30s 首字节超时），而非 SharedHTTPClientLong（无超时）
+	// 视觉模型是非流式请求，图片解码+推理可能超过 30 秒首字节超时，
+	// 用 SharedHTTPClientLong（无首字节超时），靠 context 的 120 秒兜底
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	req = req.WithContext(ctx)
 
-	resp, err := SharedHTTPClient.Do(req)
+	resp, err := SharedHTTPClientLong.Do(req)
 	if err != nil {
 		errMsg := fmt.Sprintf("调用智谱视觉模型失败: %v", err)
 		log.Printf("[vision] %s", errMsg)
