@@ -93,6 +93,7 @@ func main() {
 		r.Get("/api/chat/history", handler.GetChatHistory)
 		r.Post("/api/chat/clear", handler.ClearChatHistory)
 		r.Get("/api/chat/download/{id}", handler.DownloadConversationLog)
+		r.Get("/api/chat/sessions", handler.GetChatSessions)
 
 		// 技能管理
 		r.Get("/api/skills", handler.GetBuiltinSkills)

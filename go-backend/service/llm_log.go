@@ -28,12 +28,12 @@ func RecordStat(stat *model.LLMStat) {
 		errMsg = errMsg[:512]
 	}
 	conn.Exec(`INSERT INTO sys_llm_stats (ts, user_id, username, vendor_id, key_id, model_id,
-		prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error, session_id, msg_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		time.Now().Format("2006-01-02 15:04:05"),
 		stat.UserID, stat.Username, stat.VendorID, stat.KeyID, stat.ModelID,
 		stat.PromptTokens, stat.CompletionTokens, stat.TotalTokens,
-		stat.LatencyMs, success, errMsg)
+		stat.LatencyMs, success, errMsg, stat.SessionID, stat.MsgID)
 }
 
 func CleanupStats() int {
@@ -281,7 +281,7 @@ func EnsureLogTable() {
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
 }
 
-func WriteLog(category, message, level, detail string, userID int) {
+func WriteLog(category, message, level, detail string, userID int, sessionID, msgID string) {
 	conn, err := GetDB()
 	if err != nil {
 		return
@@ -289,8 +289,8 @@ func WriteLog(category, message, level, detail string, userID int) {
 	if level == "" {
 		level = "info"
 	}
-	conn.Exec("INSERT INTO sys_llm_log (category, level, message, detail, user_id) VALUES (?, ?, ?, ?, ?)",
-		category, level, message, detail, userID)
+	conn.Exec("INSERT INTO sys_llm_log (category, level, message, detail, user_id, session_id, msg_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		category, level, message, detail, userID, sessionID, msgID)
 
 	// 自动清理超过 1000 条
 	conn.Exec("DELETE FROM sys_llm_log WHERE id IN (SELECT id FROM (SELECT id FROM sys_llm_log ORDER BY ts ASC LIMIT 999) t) AND (SELECT COUNT(*) FROM sys_llm_log) > 1000")
@@ -377,12 +377,12 @@ func EnsureChatTable() {
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
 }
 
-func AddChatMessage(userID int, role, content string) int64 {
+func AddChatMessage(userID int, role, content, sessionID, msgID string) int64 {
 	conn, err := GetDB()
 	if err != nil {
 		return 0
 	}
-	res, err := conn.Exec("INSERT INTO sys_chat_history (user_id, role, content) VALUES (?, ?, ?)", userID, role, content)
+	res, err := conn.Exec("INSERT INTO sys_chat_history (user_id, role, content, session_id, msg_id) VALUES (?, ?, ?, ?, ?)", userID, role, content, sessionID, msgID)
 	if err != nil {
 		return 0
 	}
@@ -704,4 +704,185 @@ func GetErrorStats(days int) (map[string]interface{}, error) {
 		"by_category": byCategory,
 		"by_day":      byDay,
 	}, nil
+}
+
+// ── 按消息维度聚合的对话记录 ──
+
+// ChatSessionRow 一条 msg_id 聚合后的对话记录
+type ChatSessionRow struct {
+	MsgID            string            `json:"msg_id"`
+	SessionID        string            `json:"session_id"`
+	Username         string            `json:"username"`
+	FirstTs          string            `json:"first_ts"`
+	TotalPrompt      int               `json:"total_prompt"`
+	TotalCompletion  int               `json:"total_completion"`
+	TotalTokens      int               `json:"total_tokens"`
+	LatencySec       int               `json:"latency_sec"`
+	RequestCount     int               `json:"request_count"`
+	ErrorCount       int               `json:"error_count"`
+	Models           []string          `json:"models"`
+	UserMessage      string            `json:"user_message"`
+	RequestChain     []RequestChainItem `json:"request_chain"`
+}
+
+// RequestChainItem 请求链路中的单次请求
+type RequestChainItem struct {
+	Ts          string `json:"ts"`
+	ModelID     string `json:"model_id"`
+	KeyName     string `json:"key_name"`
+	Success     bool   `json:"success"`
+	Error       string `json:"error,omitempty"`
+	LatencyMs   int    `json:"latency_ms"`
+	TotalTokens int    `json:"total_tokens"`
+}
+
+// GetChatSessions 按 msg_id 聚合查询对话记录
+func GetChatSessions(limit int, userID int, isAdmin bool) ([]ChatSessionRow, error) {
+	conn, err := GetDB()
+	if err != nil {
+		return nil, err
+	}
+
+	// 1. 按 msg_id 聚合 stats
+	baseWhere := "msg_id != ''"
+	args := []interface{}{}
+	if !isAdmin {
+		baseWhere += " AND user_id = ?"
+		args = append(args, userID)
+	}
+
+	aggSQL := `SELECT msg_id, MIN(session_id), MIN(username), MAX(ts),
+		SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens),
+		COUNT(*), SUM(CASE WHEN success=0 THEN 1 ELSE 0 END),
+		TIMESTAMPDIFF(SECOND, MIN(ts), MAX(ts))
+		FROM sys_llm_stats WHERE ` + baseWhere + `
+		GROUP BY msg_id ORDER BY MAX(ts) DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := conn.Query(aggSQL, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	var sessions []ChatSessionRow
+	msgIDs := make([]string, 0)
+	for rows.Next() {
+		var s ChatSessionRow
+		var errCount int
+		var latencySec sql.NullInt64
+		if err := rows.Scan(&s.MsgID, &s.SessionID, &s.Username, &s.FirstTs,
+			&s.TotalPrompt, &s.TotalCompletion, &s.TotalTokens,
+			&s.RequestCount, &errCount, &latencySec); err != nil {
+			continue
+		}
+		s.ErrorCount = errCount
+		s.LatencySec = int(latencySec.Int64)
+		sessions = append(sessions, s)
+		msgIDs = append(msgIDs, s.MsgID)
+	}
+	rows.Close()
+
+	if len(sessions) == 0 {
+		return sessions, nil
+	}
+
+	// 2. 批量取用户问题（每个 msg_id 的第一条 user 消息）
+	userMsgMap := batchGetFirstUserMessages(conn, msgIDs)
+
+	// 3. 批量取请求链路 + 模型列表
+	chainMap, modelMap := batchGetRequestChains(conn, msgIDs)
+
+	// 4. 填充到 sessions
+	for i := range sessions {
+		sessions[i].UserMessage = userMsgMap[sessions[i].MsgID]
+		sessions[i].RequestChain = chainMap[sessions[i].MsgID]
+		sessions[i].Models = modelMap[sessions[i].MsgID]
+	}
+
+	return sessions, nil
+}
+
+// batchGetFirstUserMessages 批量获取每个 msg_id 的第一条 user 消息
+func batchGetFirstUserMessages(conn *sql.DB, msgIDs []string) map[string]string {
+	result := map[string]string{}
+	if len(msgIDs) == 0 {
+		return result
+	}
+	placeholders := strings.Repeat("?,", len(msgIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]interface{}, len(msgIDs))
+	for i, id := range msgIDs {
+		args[i] = id
+	}
+	// 取每个 msg_id 的第一条 user 消息（用子查询 MIN(id)）
+	query := `SELECT msg_id, content FROM sys_chat_history 
+		WHERE role='user' AND msg_id IN (` + placeholders + `)
+		AND id IN (SELECT MIN(id) FROM sys_chat_history WHERE role='user' AND msg_id IN (` + placeholders + `) GROUP BY msg_id)`
+	// 双倍 args（两个 IN 子句）
+	doubleArgs := append(args, args...)
+	rows, err := conn.Query(query, doubleArgs...)
+	if err != nil {
+		log.Printf("[chat-sessions] 批量取用户消息失败: %v", err)
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var msgID, content string
+		if err := rows.Scan(&msgID, &content); err != nil {
+			continue
+		}
+		result[msgID] = content
+	}
+	return result
+}
+
+// batchGetRequestChains 批量获取请求链路和模型列表
+func batchGetRequestChains(conn *sql.DB, msgIDs []string) (map[string][]RequestChainItem, map[string][]string) {
+	chainResult := map[string][]RequestChainItem{}
+	modelResult := map[string][]string{}
+	if len(msgIDs) == 0 {
+		return chainResult, modelResult
+	}
+	placeholders := strings.Repeat("?,", len(msgIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]interface{}, len(msgIDs))
+	for i, id := range msgIDs {
+		args[i] = id
+	}
+	query := `SELECT s.msg_id, s.ts, s.model_id, COALESCE(k.name, s.key_id), s.success, s.error, s.latency_ms, s.total_tokens
+		FROM sys_llm_stats s LEFT JOIN sys_api_key k ON s.key_id = k.id
+		WHERE s.msg_id IN (` + placeholders + `) ORDER BY s.msg_id, s.ts DESC`
+	rows, err := conn.Query(query, args...)
+	if err != nil {
+		log.Printf("[chat-sessions] 批量取请求链路失败: %v", err)
+		return chainResult, modelResult
+	}
+	defer rows.Close()
+
+	modelSet := map[string]map[string]bool{} // msg_id -> model set
+	for rows.Next() {
+		var msgID, ts, modelID, errMsg string
+		var success bool
+		var latencyMs, totalTokens int
+		var successInt int
+		var keyName string
+		if err := rows.Scan(&msgID, &ts, &modelID, &keyName, &successInt, &errMsg, &latencyMs, &totalTokens); err != nil {
+			continue
+		}
+		success = successInt == 1
+		item := RequestChainItem{
+			Ts: ts, ModelID: modelID, KeyName: keyName, Success: success,
+			Error: errMsg, LatencyMs: latencyMs, TotalTokens: totalTokens,
+		}
+		chainResult[msgID] = append(chainResult[msgID], item)
+
+		if modelSet[msgID] == nil {
+			modelSet[msgID] = map[string]bool{}
+		}
+		if !modelSet[msgID][modelID] {
+			modelSet[msgID][modelID] = true
+			modelResult[msgID] = append(modelResult[msgID], modelID)
+		}
+	}
+	return chainResult, modelResult
 }

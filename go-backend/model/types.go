@@ -103,18 +103,20 @@ type Session struct {
 }
 
 type LLMStat struct {
-	Ts              string `json:"ts"`
-	UserID          int    `json:"user_id"`
-	Username        string `json:"username"`
-	VendorID        int    `json:"vendor_id"`
-	KeyID           string `json:"key_id"`
-	ModelID         string `json:"model_id"`
-	PromptTokens    int    `json:"prompt_tokens"`
-	CompletionTokens int   `json:"completion_tokens"`
-	TotalTokens     int    `json:"total_tokens"`
-	LatencyMs       int    `json:"latency_ms"`
-	Success         bool   `json:"success"`
-	Error           string `json:"error,omitempty"`
+	Ts               string `json:"ts"`
+	UserID           int    `json:"user_id"`
+	Username         string `json:"username"`
+	VendorID         int    `json:"vendor_id"`
+	KeyID            string `json:"key_id"`
+	ModelID          string `json:"model_id"`
+	PromptTokens     int    `json:"prompt_tokens"`
+	CompletionTokens int    `json:"completion_tokens"`
+	TotalTokens      int    `json:"total_tokens"`
+	LatencyMs        int    `json:"latency_ms"`
+	Success          bool   `json:"success"`
+	Error            string `json:"error,omitempty"`
+	SessionID        string `json:"session_id,omitempty"`
+	MsgID            string `json:"msg_id,omitempty"`
 }
 
 type RouteInfo struct {

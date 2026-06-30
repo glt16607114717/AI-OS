@@ -69,7 +69,7 @@ func (c *ConversationContext) SummarizeAndLog() {
 	detailJSON, _ := json.Marshal(detail)
 	service.WriteLog("conversation",
 		fmt.Sprintf("对话完成 | %s | 输入%d/输出%d/耗时%dms", models, c.TotalPrompt, c.TotalCompletion, latency),
-		level, string(detailJSON), c.UserID)
+		level, string(detailJSON), c.UserID, c.SessionID, c.MsgId)
 }
 
 // ProxyChatCompletions LLM 代理转发入口（供 TRAE 等 OpenAI 兼容客户端调用）
@@ -92,7 +92,7 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 提取用户消息
 	userMsgRaw, userMsgSummary := extractLastUserMessage(req)
 	if cleanedMsg := extractUserQuery(userMsgRaw); cleanedMsg != "" {
-		service.AddChatMessage(userID, "user", cleanedMsg)
+		service.AddChatMessage(userID, "user", cleanedMsg, sessionID, msgId)
 	}
 
 	// 注入上帝指令 + RAG
@@ -155,7 +155,7 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 	// 提取用户消息
 	userMsgRaw, userMsgSummary := extractLastUserMessage(req)
 	if cleanedMsg := extractUserQuery(userMsgRaw); cleanedMsg != "" {
-		service.AddChatMessage(userID, "user", cleanedMsg)
+		service.AddChatMessage(userID, "user", cleanedMsg, sessionID, msgId)
 	}
 
 	// 注入上帝指令 + RAG

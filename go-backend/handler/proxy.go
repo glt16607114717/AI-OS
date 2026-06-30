@@ -64,7 +64,7 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 		content := extractContentFromLLM(result.Data)
 		if content != "" {
 			convCtx.AssistantContent = content
-			chatID := service.AddChatMessage(userID, "assistant", content)
+			chatID := service.AddChatMessage(userID, "assistant", content, convCtx.SessionID, convCtx.MsgId)
 			convCtx.ChatHistoryID = chatID
 			latency := int(time.Since(startTime).Milliseconds())
 			go service.SaveConversationLogWithUser(chatID, userID, username, req, content, route.ModelID, route.VendorID,
@@ -135,6 +135,7 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 			service.RecordStat(&service.LLMStatType{
 				UserID: userID, Username: username,
 				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+				SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
 				LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: err.Error(),
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 网络错误: %s", route.VendorName, err.Error()))
@@ -152,6 +153,7 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 			service.RecordStat(&service.LLMStatType{
 				UserID: userID, Username: username,
 				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+				SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
 				LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: errMsg,
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
@@ -199,6 +201,7 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 				service.RecordStat(&service.LLMStatType{
 					UserID: userID, Username: username,
 					VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+					SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
 					LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false,
 					Error: fmt.Sprintf("SSE 流 60s 无输出，判定卡死"),
 				})
@@ -215,6 +218,7 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 					service.RecordStat(&service.LLMStatType{
 						UserID: userID, Username: username,
 						VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+						SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
 						LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false,
 						Error: fmt.Sprintf("SSE 流异常中断: %s", rr.err.Error()),
 					})
@@ -224,6 +228,7 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 					service.RecordStat(&service.LLMStatType{
 						UserID: userID, Username: username,
 						VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+						SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
 						LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false,
 						Error: "SSE 流未收到 [DONE] 即关闭",
 					})
@@ -333,13 +338,14 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 	service.RecordStat(&service.LLMStatType{
 		UserID: userID, Username: username,
 		VendorID: finalRoute.VendorID, KeyID: finalRoute.KeyID, ModelID: finalRoute.ModelID,
+		SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
 		PromptTokens: promptTokens, CompletionTokens: completionTokens,
 		TotalTokens: totalTokens, LatencyMs: latency, Success: true,
 	})
 
 	if content != "" {
 		convCtx.AssistantContent = content
-		chatID := service.AddChatMessage(userID, "assistant", content)
+		chatID := service.AddChatMessage(userID, "assistant", content, convCtx.SessionID, convCtx.MsgId)
 		convCtx.ChatHistoryID = chatID
 		go service.SaveConversationLogWithUser(chatID, userID, username, req, content, finalRoute.ModelID, finalRoute.VendorID, promptTokens, completionTokens, totalTokens, latency)
 	}

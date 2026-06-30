@@ -88,10 +88,11 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 		if err != nil {
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
-				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
-				LatencyMs: latency, Success: false, Error: err.Error(),
-			})
+			UserID: userID, Username: username,
+			VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+			SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
+			LatencyMs: latency, Success: false, Error: err.Error(),
+		})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 网络错误: %s", route.VendorName, err.Error()))
 			failedKeys[route.KeyID] = true
 			lastError = err.Error()
@@ -108,10 +109,11 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 			errMsg = errMsg[:500]
 		}
 		service.RecordStat(&service.LLMStatType{
-			UserID: userID, Username: username,
-			VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
-			LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: errMsg,
-		})
+		UserID: userID, Username: username,
+		VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+		SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
+		LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: errMsg,
+	})
 		convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
 		failedKeys[route.KeyID] = true
 		lastError = errMsg
@@ -127,19 +129,21 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 			completionTokens := intFloat(usage["completion_tokens"])
 			totalTokens := intFloat(usage["total_tokens"])
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
-				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
-				PromptTokens: promptTokens, CompletionTokens: completionTokens,
-				TotalTokens: totalTokens, LatencyMs: int(time.Since(startTime).Milliseconds()), Success: true,
-			})
+			UserID: userID, Username: username,
+			VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+			SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
+			PromptTokens: promptTokens, CompletionTokens: completionTokens,
+			TotalTokens: totalTokens, LatencyMs: int(time.Since(startTime).Milliseconds()), Success: true,
+		})
 			convCtx.TotalPrompt += promptTokens
 			convCtx.TotalCompletion += completionTokens
 		} else {
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
-				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
-				LatencyMs: int(time.Since(startTime).Milliseconds()), Success: true,
-			})
+			UserID: userID, Username: username,
+			VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+			SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
+			LatencyMs: int(time.Since(startTime).Milliseconds()), Success: true,
+		})
 		}
 
 		log.Printf("[llm] normal vendor=%s model=%s source=%s", route.VendorName, route.ModelID, source)
