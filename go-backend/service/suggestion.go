@@ -33,13 +33,14 @@ func EnsureSuggestionTable() {
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
 }
 
-// GetSuggestions 获取用户的建议列表（API 调用）
-func GetSuggestions(userID int, status, date string) ([]map[string]interface{}, error) {
+// GetSuggestions 获取用户的建议列表（API 调用，支持分页）
+func GetSuggestions(userID int, status, date string, page, pageSize int) ([]map[string]interface{}, int, error) {
 	conn, err := GetDB()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	query := "SELECT id, user_id, report_date, category, project, title, content, priority, status, created_at, processed_at FROM sys_ai_suggestion"
+
+	// 查询条件
 	var conditions []string
 	var args []interface{}
 	conditions = append(conditions, "user_id = ?")
@@ -52,14 +53,34 @@ func GetSuggestions(userID int, status, date string) ([]map[string]interface{}, 
 		conditions = append(conditions, "report_date = ?")
 		args = append(args, date)
 	}
+	whereClause := ""
 	if len(conditions) > 0 {
-		query += " WHERE " + strings.Join(conditions, " AND ")
+		whereClause = " WHERE " + strings.Join(conditions, " AND ")
 	}
-	query += " ORDER BY id DESC"
+
+	// 先查总数
+	var total int
+	countSQL := "SELECT COUNT(*) FROM sys_ai_suggestion" + whereClause
+	if err := conn.QueryRow(countSQL, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	// 默认分页
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	offset := (page - 1) * pageSize
+
+	query := "SELECT id, user_id, report_date, category, project, title, content, priority, status, created_at, processed_at FROM sys_ai_suggestion" +
+		whereClause + " ORDER BY id DESC LIMIT ? OFFSET ?"
+	args = append(args, pageSize, offset)
 
 	rows, err := conn.Query(query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -82,11 +103,11 @@ func GetSuggestions(userID int, status, date string) ([]map[string]interface{}, 
 			"status": status2, "created_at": createdAt, "processed_at": pa,
 		})
 	}
-	return result, nil
+	return result, total, nil
 }
 
-// MarkSuggestionProcessed 标记建议已处理
-func MarkSuggestionProcessed(id int) error {
+// UpdateSuggestionStatus 更新建议状态（processed=已处理 / ignored=已忽略）
+func UpdateSuggestionStatus(id int, status string) error {
 	conn, err := GetDB()
 	if err != nil {
 		return err
@@ -95,6 +116,9 @@ func MarkSuggestionProcessed(id int) error {
 	if err := conn.QueryRow("SELECT 1 FROM sys_ai_suggestion WHERE id = ?", id).Scan(&exists); err != nil {
 		return fmt.Errorf("建议不存在")
 	}
-	_, err = conn.Exec("UPDATE sys_ai_suggestion SET status='processed', processed_at=NOW() WHERE id = ?", id)
+	if status != "processed" && status != "ignored" {
+		status = "processed"
+	}
+	_, err = conn.Exec("UPDATE sys_ai_suggestion SET status=?, processed_at=NOW() WHERE id = ?", status, id)
 	return err
 }

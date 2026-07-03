@@ -20,40 +20,71 @@ func GetSuggestions(w http.ResponseWriter, r *http.Request) {
 	}
 	status := r.URL.Query().Get("status")
 	date := r.URL.Query().Get("date")
-	suggestions, err := service.GetSuggestions(userID, status, date)
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	suggestions, total, err := service.GetSuggestions(userID, status, date, page, pageSize)
 	if err != nil {
 		errResponse(w, err.Error(), 500)
 		return
 	}
-	okResponse(w, suggestions)
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	okResponse(w, map[string]interface{}{
+		"data":     suggestions,
+		"total":    total,
+		"page":     page,
+		"page_size": pageSize,
+	})
 }
 
-// MarkSuggestionProcessed 标记建议已处理
+// MarkSuggestionProcessed 标记建议状态（processed=已处理 / ignored=已忽略）
 func MarkSuggestionProcessed(w http.ResponseWriter, r *http.Request) {
 	idStr := r.URL.Query().Get("id")
-	if idStr == "" {
+	status := r.URL.Query().Get("status")
+
+	if idStr == "" || status == "" {
 		var body struct {
-			SuggestionID int `json:"suggestion_id"`
-			ID           int `json:"id"`
+			SuggestionID int    `json:"suggestion_id"`
+			ID           int    `json:"id"`
+			Status       string `json:"status"`
 		}
 		if json.NewDecoder(r.Body).Decode(&body) == nil {
-			if body.SuggestionID > 0 {
-				idStr = strconv.Itoa(body.SuggestionID)
-			} else if body.ID > 0 {
-				idStr = strconv.Itoa(body.ID)
+			if idStr == "" {
+				if body.SuggestionID > 0 {
+					idStr = strconv.Itoa(body.SuggestionID)
+				} else if body.ID > 0 {
+					idStr = strconv.Itoa(body.ID)
+				}
+			}
+			if status == "" {
+				status = body.Status
 			}
 		}
 	}
+
 	id, _ := strconv.Atoi(idStr)
 	if id <= 0 {
 		errResponse(w, "缺少建议 id", 400)
 		return
 	}
-	if err := service.MarkSuggestionProcessed(id); err != nil {
+	if status == "" {
+		status = "processed"
+	}
+
+	if err := service.UpdateSuggestionStatus(id, status); err != nil {
 		errResponse(w, err.Error(), 400)
 		return
 	}
-	okResponse(w, "已标记为已处理")
+
+	if status == "ignored" {
+		okResponse(w, "已忽略")
+	} else {
+		okResponse(w, "已标记为已处理")
+	}
 }
 
 // GetDistillKnowledge 获取蒸馏知识

@@ -2,25 +2,36 @@ package service
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
 
-// ── 每日知识蒸馏 ──
+// ── 每日知识蒸馏（Map-Reduce 架构）──
+
+// SessionData 一个 session 的对话数据
+type SessionData struct {
+	SessionID  string      `json:"session_id"`
+	Msgs       []MsgGroup  `json:"msgs"`
+	TotalChars int         `json:"total_chars"`
+}
+
+// MsgGroup 一个 msg_id 下的对话内容
+type MsgGroup struct {
+	MsgID   string `json:"msg_id"`
+	Content string `json:"content"`
+}
 
 // DistillResult 蒸馏结果
 type DistillResult struct {
-	Knowledge     []DistillKnowledge
-	Suggestions   []DistillSuggestion
-	DailySummary  string `json:"daily_summary"`
+	Knowledge      []DistillKnowledge  `json:"knowledge"`
+	Suggestions    []DistillSuggestion `json:"suggestions"`
+	DailySummary   string              `json:"daily_summary"`
+	SessionSummary string              `json:"session_summary"` // 当前 session 摘要，≤500字，用于下一片前情提要
 }
 
 // DistillKnowledge 提炼的知识
@@ -42,6 +53,19 @@ type DistillSuggestion struct {
 	Suggestion string `json:"suggestion"`
 	Priority   string `json:"priority"`
 }
+
+// ── Map 阶段汇总 ──
+
+// mapResult 单个 session 的 Map 阶段产出
+type mapResult struct {
+	SessionID      string
+	Knowledge      []DistillKnowledge
+	Suggestions    []DistillSuggestion
+	DailySummary   string
+	SessionSummary string // 整个 session 的摘要
+}
+
+// ── 定时任务入口 ──
 
 // RunDailyDistill 定时任务：蒸馏昨日对话（遍历所有活跃用户）
 func RunDailyDistill() error {
@@ -97,339 +121,419 @@ func RunDailyDistill() error {
 	return nil
 }
 
-// RunDistillForDate 指定日期蒸馏：查询对话 → 提炼知识 + 生成建议
-func RunDistillForDate(userID int, username, date string) error {
-	return RunDistillForDateWithTrigger(userID, username, date, "cron")
+// ══════════════════════════════════════════════
+// LLM 调用 + Prompt
+// ══════════════════════════════════════════════
+
+// buildDistillPrompt 构建 Map 阶段蒸馏 Prompt
+func buildDistillPrompt(date, convContent string) string {
+	return fmt.Sprintf(`你是一个技术知识提炼专家。请分析以下用户在 %s 的一段完整工作对话，提炼知识、生成日报片段和会话摘要。
+
+【输出要求】
+返回一个 JSON 对象：
+{
+  "knowledge": [                       // 提炼的知识条目
+    {
+      "dimension": "技术规范/架构决策/开发流程/Bug修复/工具技巧/环境配置",
+      "title": "知识标题（≤30字）",
+      "context": "这条知识产生的原因和背景",
+      "content": "知识的具体内容（≤1500字，超过请拆分为多条）",
+      "priority": "高/中/低",
+      "tags": ["标签1", "标签2"],
+      "project": "项目名称（AI-OS/rmp-api/未知）"
+    }
+  ],
+  "suggestions": [                     // 工作流程优化建议
+    {
+      "category": "skill|bug|tech_vision|rule|workflow|env|prompt|other",
+      "title": "建议标题",
+      "problem": "当前存在的问题",
+      "suggestion": "具体的改进建议",
+      "priority": "high|medium|low"
+    }
+  ],
+  "daily_summary": "今天这个对话 session 的工作摘要（100-500字）",
+  "session_summary": "这个对话 session 的简洁摘要（≤500字），用于给下一个分片提供上下文。如果对话内容很少，可以不填"
 }
 
-// RunDistillForDateWithTrigger 带触发类型的蒸馏
-func RunDistillForDateWithTrigger(userID int, username, date, triggerType string) error {
-	overallStart := time.Now()
+【重要规则】
+1. 每条 knowledge.content 必须 ≤ 1500 个中文字符，超过请拆分为多条
+2. 只提炼有价值的技术知识，不要提炼闲聊内容
+3. suggestions 的 title、problem、suggestion 三个字段都必须填写，不能留空或省略。title 用简短概括的一句话（≤30字），problem 描述当前存在的问题（不能只重复 title），suggestion 给出具体可执行的改进方案
+4. suggestions.category 必须使用以下枚举值之一：skill(技能封装)、bug(Bug归因)、tech_vision(技术视野)、rule(规则加强)、workflow(流程工具)、env(环境配置)、prompt(提示词优化)、other(其他)。严禁使用其他值
+5. suggestions.priority 必须使用以下枚举值之一：high(高)、medium(中)、low(低)
+6. 每条 knowledge 的 content 字段必须自成一体、可独立被理解，不得使用"如前所述"等指代性表述
+7. 当提供了 session 摘要时，仅从中提取知识概要，不逐句复述
+8. 不要编造对话中不存在的内容
+9. session_summary 用于连接多段对话，必须概括当前对话的核心内容
 
-	if userID <= 0 {
-		var err error
-		userID, err = getDefaultDistillUserID()
-		if err != nil {
-			distillLog(0, username, date, triggerType, "error", "fail", "获取默认用户失败: "+err.Error(), "", 0)
-			return err
-		}
-	}
-	if username == "" {
-		username = getDistillUsername()
-	}
+【对话内容】
+%s`, date, convContent)
+}
 
-	collectStart := time.Now()
-	convContent, count, err := collectConversationForDate(userID, date)
-	collectMs := int(time.Since(collectStart).Milliseconds())
-	if err != nil {
-		distillLog(userID, username, date, triggerType, "collect", "fail",
-			"查询对话失败: "+err.Error(), "", collectMs)
-		return fmt.Errorf("查询对话失败: %v", err)
-	}
+// buildReducePrompt 构建 Reduce 阶段精炼 Prompt
+func buildReducePrompt(date, reduceContent string) string {
+	return fmt.Sprintf(`你是一个技术知识精炼专家。以下是从用户 %s 的多个对话 session 中独立蒸馏出的知识、摘要和日报片段。
 
-	if len(convContent) < 100 {
-		distillLog(userID, username, date, triggerType, "collect", "info",
-			fmt.Sprintf("无对话或对话过少，跳过。记录数=%d, 字符数=%d", count, len(convContent)), "", collectMs)
-		return nil
-	}
+请进行二次精炼，完成以下任务：
+1. 合并重复或相似的知识条目
+2. 补全碎片化知识的因果关系（不同 session 讨论了同一件事的不同方面）
+3. 跨 session 发现工作脉络
+4. 生成一份完整的工作日报
 
-	distillLog(userID, username, date, triggerType, "collect", "success",
-		fmt.Sprintf("记录数=%d, 字符数=%d", count, len(convContent)), "", collectMs)
+【输出要求】
+返回一个 JSON 对象：
+{
+  "knowledge": [...],        // 精炼后的知识条目（格式同前）
+  "suggestions": [...],      // 精炼后的建议（格式同前）
+  "daily_summary": "今天所有对话的工作日报（200-1000字）"
+}
 
-	log.Printf("[distill] 开始蒸馏，日期=%s，user=%d，记录数=%d，字符数=%d", date, userID, count, len(convContent))
+【重要规则】
+1. suggestions 的 title、problem、suggestion 三个字段都必须填写，不能留空或省略
+2. suggestions.category 必须使用以下枚举值之一：skill、bug、tech_vision、rule、workflow、env、prompt、other
+3. suggestions.priority 必须使用以下枚举值之一：high、medium、low
+4. 每条 knowledge.content 必须 ≤ 1500 个中文字符
+5. 只输出 JSON，不要添加任何解释文字
 
+【原始蒸馏结果】
+%s`, date, reduceContent)
+}
+
+// callDistillLLM Map 阶段 LLM 调用
+func callDistillLLM(userID int, date, convContent string) (*DistillResult, error) {
 	conn, err := GetDB()
 	if err != nil {
-		distillLog(userID, username, date, triggerType, "error", "fail", "连接数据库失败: "+err.Error(), "", 0)
-		return fmt.Errorf("连接数据库失败: %v", err)
+		return nil, err
 	}
 
-	// 分段调用 LLM 蒸馏
-	log.Printf("[distill] 开始分段蒸馏，日期=%s，总字符数=%d", date, len(convContent))
+	var apiKey, baseURL string
+	err = conn.QueryRow(`SELECT k.api_key, v.base_url FROM sys_api_key k
+		JOIN sys_vendor v ON k.vendor_id = v.id
+		WHERE v.code = 'zhipu' AND k.enabled = 1 AND k.api_key != ''
+		LIMIT 1`).Scan(&apiKey, &baseURL)
+	if err != nil || apiKey == "" {
+		return nil, fmt.Errorf("未找到智谱 API Key")
+	}
+	if baseURL == "" {
+		baseURL = "https://open.bigmodel.cn/api/coding/paas/v4"
+	}
+	apiURL := strings.TrimRight(baseURL, "/") + "/chat/completions"
 
-	chunks := splitConversationIntoChunks(convContent, 25000)
-	log.Printf("[distill] 分割为 %d 段", len(chunks))
+	prompt := buildDistillPrompt(date, convContent)
 
-	var allKnowledge []DistillKnowledge
-	var allSuggestions []DistillSuggestion
-	var allDailySummaries []string
+	body := map[string]interface{}{
+		"model":          "glm-5.2",
+		"messages":       []map[string]string{{"role": "user", "content": prompt}},
+		"temperature":    0.3,
+		"response_format": map[string]string{"type": "json_object"},
+	}
+	bodyJSON, _ := json.Marshal(body)
 
-	for i, chunk := range chunks {
-		chunkStart := time.Now()
-		result, err := callDistillLLM(userID, date, chunk)
-		chunkMs := int(time.Since(chunkStart).Milliseconds())
+	req, err := http.NewRequest("POST", apiURL,
+		bytes.NewReader(bodyJSON))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 
-		if err != nil {
-			log.Printf("[distill] 第 %d/%d 段蒸馏失败: %v", i+1, len(chunks), err)
-			distillLog(userID, username, date, triggerType, "llm_call", "fail",
-				fmt.Sprintf("第 %d/%d 段失败: %v", i+1, len(chunks), err), "", chunkMs)
-			continue
-		}
+	client := SharedHTTPClientLong
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("请求智谱 API 失败: %v", err)
+	}
+	defer resp.Body.Close()
 
-		ds := result.DailySummary
-		if len(ds) > 50 { ds = ds[:50] }
-		log.Printf("[distill] 第 %d/%d 段完成：知识=%d，建议=%d，日报=%q", i+1, len(chunks), len(result.Knowledge), len(result.Suggestions), ds)
-		distillLog(userID, username, date, triggerType, "llm_call", "success",
-			fmt.Sprintf("第 %d/%d 段: 知识=%d, 建议=%d, 耗时=%dms", i+1, len(chunks), len(result.Knowledge), len(result.Suggestions), chunkMs),
-			"", chunkMs)
-
-		allKnowledge = append(allKnowledge, result.Knowledge...)
-		allSuggestions = append(allSuggestions, result.Suggestions...)
-		if result.DailySummary != "" {
-			allDailySummaries = append(allDailySummaries, result.DailySummary)
-		}
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
 	}
 
-	if len(allKnowledge) == 0 && len(allSuggestions) == 0 && len(allDailySummaries) == 0 {
-		distillLog(userID, username, date, triggerType, "error", "fail", "所有段落蒸馏均失败", "", int(time.Since(overallStart).Milliseconds()))
-		return fmt.Errorf("所有段落蒸馏均失败")
+	if resp.StatusCode != 200 {
+		detail := string(respBody)
+		if len(detail) > 500 {
+			detail = detail[:500]
+		}
+		return nil, fmt.Errorf("智谱 API 返回 %d: %s", resp.StatusCode, detail)
 	}
 
-	log.Printf("[distill] 分段蒸馏完成，汇总：知识=%d，建议=%d，日报段数=%d", len(allKnowledge), len(allSuggestions), len(allDailySummaries))
-
-	// 存储知识（去重 + 向量化 + 存全字段）
-	knowledgeCount := 0
-	knowledgeSkip := 0
-	for _, k := range allKnowledge {
-		if k.Content == "" || k.Dimension == "" {
-			knowledgeSkip++
-			continue
-		}
-		stored, err := StoreDistillKnowledge(userID, date, k)
-		if err != nil {
-			log.Printf("[distill] 知识入库失败: %v", err)
-			distillLog(userID, username, date, triggerType, "save_knowledge", "warn",
-				"入库失败: "+err.Error(), k.Title, 0)
-			continue
-		}
-		if stored {
-			knowledgeCount++
-		} else {
-			knowledgeSkip++
-		}
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
 	}
-	distillLog(userID, username, date, triggerType, "save_knowledge", "success",
-		fmt.Sprintf("保存=%d, 跳过=%d", knowledgeCount, knowledgeSkip), "", 0)
-
-	// 存储建议
-	suggestionCount := 0
-	for _, s := range allSuggestions {
-		if s.Title == "" || s.Suggestion == "" {
-			continue
-		}
-		content := fmt.Sprintf("问题：%s\n\n建议：%s", s.Problem, s.Suggestion)
-		conn.Exec(`INSERT INTO sys_ai_suggestion (user_id, report_date, category, title, content, priority) VALUES (?, ?, ?, ?, ?, ?)`,
-			userID, date, s.Category, s.Title, content, s.Priority)
-		suggestionCount++
-	}
-	distillLog(userID, username, date, triggerType, "save_suggestion", "success",
-		fmt.Sprintf("保存=%d", suggestionCount), "", 0)
-
-	// 存储工作日报
-	if len(allDailySummaries) > 0 {
-		summary := mergeDailyReports(allDailySummaries)
-		title := fmt.Sprintf("%s 工作日报", date)
-		log.Printf("[distill] 保存日报: user=%d, date=%s, content_len=%d", userID, date, len(summary))
-		_, err = conn.Exec(`INSERT INTO sys_work_diary (user_id, username, report_date, title, content) VALUES (?, ?, ?, ?, ?)
-			ON DUPLICATE KEY UPDATE title=VALUES(title), content=VALUES(content), updated_at=NOW()`,
-			userID, username, date, title, summary)
-		if err != nil {
-			log.Printf("[distill] 日报保存失败: %v", err)
-			distillLog(userID, username, date, triggerType, "save_diary", "fail",
-				"日报保存失败: "+err.Error(), "", 0)
-		} else {
-			log.Printf("[distill] 工作日报已保存，长度=%d", len(summary))
-			distillLog(userID, username, date, triggerType, "save_diary", "success",
-				fmt.Sprintf("日报长度=%d", len(summary)), "", 0)
-		}
-	} else {
-		distillLog(userID, username, date, triggerType, "save_diary", "info", "无日报内容，跳过", "", 0)
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %v", err)
 	}
 
-	totalMs := int(time.Since(overallStart).Milliseconds())
-	log.Printf("[distill] 蒸馏完成：日期=%s，知识=%d，建议=%d，耗时=%dms", date, knowledgeCount, suggestionCount, totalMs)
-	distillLog(userID, username, date, triggerType, "done", "success",
-		fmt.Sprintf("知识=%d, 建议=%d, 耗时=%dms", knowledgeCount, suggestionCount, totalMs), "", totalMs)
+	if len(result.Choices) == 0 || result.Choices[0].Message.Content == "" {
+		return nil, fmt.Errorf("AI 未返回有效内容")
+	}
 
-	return nil
+	content := result.Choices[0].Message.Content
+
+	distillResult, err := parseDistillResult(content)
+	if err != nil {
+		log.Printf("[distill] JSON 解析失败: %v, content[:200]=%s", err, content[:min(200, len(content))])
+		return nil, err
+	}
+
+	if len(distillResult.Knowledge) == 0 && len(distillResult.Suggestions) == 0 && distillResult.DailySummary == "" {
+		log.Printf("[distill] LLM 返回空结果: content[:200]=%s", content[:min(200, len(content))])
+	}
+
+	return distillResult, nil
 }
 
-// mergeDailyReports 将多段日报合并为一份干净格式
-// 逻辑：每个段落的 ### 子标题作为独立主题，收集所有段落中同主题的内容，去重后输出
-// 不输出"明日计划"板块
-func mergeDailyReports(segments []string) string {
-	// 按主题分组收集内容
-	// key=主题名(如"华庄客户全貌梳理"), value=去重后的条目集合
-	topics := make(map[string]map[string]bool)
-
-	// 一级分类名称规范化
-	normalizeLevel1 := func(h string) string {
-		h = strings.TrimSpace(h)
-		switch {
-		case strings.Contains(h, "今日完成") || strings.Contains(h, "今日工作") || strings.Contains(h, "工作内容") || strings.Contains(h, "今日产出"):
-			return "今日完成"
-		case strings.Contains(h, "遇到的问题") || strings.Contains(h, "问题与困难") || strings.Contains(h, "难点") || strings.Contains(h, "障碍"):
-			return "遇到的问题"
-		case strings.Contains(h, "明日计划") || strings.Contains(h, "明日工作") || strings.Contains(h, "后续计划") || strings.Contains(h, "工作计划"):
-			return "明日计划" // 跳过，不输出
-		}
-		return ""
+// callReduceLLM Reduce 阶段 LLM 调用
+func callReduceLLM(userID int, date, reduceContent string) (*DistillResult, error) {
+	conn, err := GetDB()
+	if err != nil {
+		return nil, err
 	}
 
-	// 提取主题名（去除编号前缀如"1. ""2. ""- ""等）
-	extractTopic := func(s string) string {
-		s = strings.TrimSpace(s)
-		// 去掉常见前缀
-		s = strings.TrimPrefix(s, "1.")
-		s = strings.TrimPrefix(s, "2.")
-		s = strings.TrimPrefix(s, "3.")
-		s = strings.TrimPrefix(s, "4.")
-		s = strings.TrimPrefix(s, "5.")
-		s = strings.TrimPrefix(s, "6.")
-		s = strings.TrimPrefix(s, "7.")
-		s = strings.TrimPrefix(s, "8.")
-		s = strings.TrimPrefix(s, "9.")
-		s = strings.TrimPrefix(s, ".")
-		s = strings.TrimSpace(s)
-		// 去掉多余空格
-		for strings.Contains(s, "  ") {
-			s = strings.ReplaceAll(s, "  ", " ")
-		}
-		return s
+	var apiKey, baseURL string
+	err = conn.QueryRow(`SELECT k.api_key, v.base_url FROM sys_api_key k
+		JOIN sys_vendor v ON k.vendor_id = v.id
+		WHERE v.code = 'zhipu' AND k.enabled = 1 AND k.api_key != ''
+		LIMIT 1`).Scan(&apiKey, &baseURL)
+	if err != nil || apiKey == "" {
+		return nil, fmt.Errorf("未找到智谱 API Key")
+	}
+	if baseURL == "" {
+		baseURL = "https://open.bigmodel.cn/api/coding/paas/v4"
+	}
+	apiURL := strings.TrimRight(baseURL, "/") + "/chat/completions"
+
+	prompt := buildReducePrompt(date, reduceContent)
+
+	body := map[string]interface{}{
+		"model":          "glm-5.2",
+		"messages":       []map[string]string{{"role": "user", "content": prompt}},
+		"temperature":    0.3,
+		"response_format": map[string]string{"type": "json_object"},
+	}
+	bodyJSON, _ := json.Marshal(body)
+
+	req, err := http.NewRequest("POST", apiURL,
+		bytes.NewReader(bodyJSON))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	client := SharedHTTPClientLong
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("请求智谱 API 失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
 	}
 
-	// 逐段解析
-	for _, seg := range segments {
-		lines := strings.Split(seg, "\n")
-		currentL1 := ""  // 当前一级分类
-		currentTopic := "" // 当前主题名
-
-		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" || trimmed == "---" || trimmed == "***" {
-				continue
-			}
-
-			// ## 一级标题
-			if strings.HasPrefix(trimmed, "## ") {
-				normalized := normalizeLevel1(strings.TrimPrefix(trimmed, "## "))
-				if normalized == "__明日计划__" {
-					currentL1 = "" // 跳过明日计划
-					currentTopic = ""
-					continue
-				}
-				currentL1 = normalized
-				currentTopic = "" // 一级标题后重置主题
-				continue
-			}
-
-			// ### 二级标题 → 新的主题
-			if strings.HasPrefix(trimmed, "### ") {
-				topicRaw := strings.TrimPrefix(trimmed, "### ")
-				topicName := extractTopic(topicRaw)
-				// 跳过明日计划相关标题
-				if strings.Contains(strings.ToLower(topicName), "明日") || strings.Contains(strings.ToLower(topicName), "后续") {
-					continue
-				}
-				if topicName != "" {
-					currentTopic = topicName
-					if topics[topicName] == nil {
-						topics[topicName] = make(map[string]bool)
-					}
-				}
-				continue
-			}
-
-			// 跳过明日计划下的列表项
-			if currentL1 == "__明日计划__" || currentL1 == "" {
-				continue
-			}
-
-			// 列表项
-			item := strings.TrimLeft(trimmed, "-*·")
-			item = strings.TrimSpace(item)
-			if item == "" {
-				continue
-			}
-			// 跳过明日计划相关的文本
-			lower := strings.ToLower(item)
-			if strings.Contains(lower, "明日") && (strings.Contains(lower, "计划") || strings.Contains(lower, "工作")) {
-				continue
-			}
-
-			// 分配到当前主题；若无主题名，用一级分类名作主题
-			// "明日计划" section 不输出
-			if currentL1 == "明日计划" {
-				currentTopic = "" // 跳过
-				continue
-			}
-			if currentTopic == "" {
-				if currentL1 == "" || currentL1 == "__明日计划__" {
-					currentTopic = "其他工作"
-				} else {
-					currentTopic = currentL1
-				}
-				if topics[currentTopic] == nil {
-					topics[currentTopic] = make(map[string]bool)
-				}
-			}
-
-			// 去重后加入
-			topics[currentTopic][item] = true
+	if resp.StatusCode != 200 {
+		detail := string(respBody)
+		if len(detail) > 500 {
+			detail = detail[:500]
 		}
+		return nil, fmt.Errorf("智谱 API 返回 %d: %s", resp.StatusCode, detail)
 	}
 
-	// 重建 Markdown
-	var out strings.Builder
-	for topic, items := range topics {
-		if len(items) == 0 {
-			continue
-		}
-		out.WriteString("## ")
-		out.WriteString(topic)
-		out.WriteString("\n\n")
-		for item := range items {
-			out.WriteString("- ")
-			out.WriteString(item)
-			out.WriteString("\n")
-		}
-		out.WriteString("\n")
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
 	}
-	return strings.TrimSpace(out.String())
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %v", err)
+	}
+
+	if len(result.Choices) == 0 || result.Choices[0].Message.Content == "" {
+		return nil, fmt.Errorf("AI 未返回有效内容")
+	}
+
+	content := result.Choices[0].Message.Content
+
+	distillResult, err := parseDistillResult(content)
+	if err != nil {
+		log.Printf("[distill] Reduce JSON 解析失败: %v, content[:200]=%s", err, content[:min(200, len(content))])
+		return nil, err
+	}
+
+	return distillResult, nil
 }
 
-// splitConversationIntoChunks 按段落分割对话，每段不超过 maxLen 字符
-func splitConversationIntoChunks(content string, maxLen int) []string {
-	if len(content) <= maxLen {
-		return []string{content}
+// extractJSONBlock 从内容中提取 JSON 块（去除 markdown 标记）
+func extractJSONBlock(content string) string {
+	content = strings.TrimSpace(content)
+	if strings.HasPrefix(content, "```json") {
+		content = strings.TrimPrefix(content, "```json")
+		content = strings.TrimSuffix(content, "```")
+		content = strings.TrimSpace(content)
+	} else if strings.HasPrefix(content, "```") {
+		content = strings.TrimPrefix(content, "```")
+		content = strings.TrimSuffix(content, "```")
+		content = strings.TrimSpace(content)
 	}
+	// 兜底：取第一个 { 到最后一个 } 之间的内容
+	start := strings.Index(content, "{")
+	end := strings.LastIndex(content, "}")
+	if start >= 0 && end > start {
+		content = content[start : end+1]
+	}
+	return content
+}
 
-	var chunks []string
-	lines := strings.Split(content, "\n")
-	var current strings.Builder
-
-	for _, line := range lines {
-		// 如果当前块加上这行超过限制，先保存当前块
-		if current.Len()+len(line) > maxLen && current.Len() > 0 {
-			chunks = append(chunks, current.String())
-			current.Reset()
+// cleanJSONForParsing 清洗 LLM 返回 JSON 的常见非法字符
+// 解决 GLM 偶尔在 JSON 中输出 \w \s \d 等非标准转义、以及多余尾部字符
+func cleanJSONForParsing(content string) string {
+	// 1. 去除非打印字符（保留空格、换行、制表符）
+	var b strings.Builder
+	for _, r := range content {
+		if r >= 32 && r < 127 || r == '\n' || r == '\r' || r == '\t' {
+			b.WriteRune(r)
+		} else if r >= 0x4E00 && r <= 0x9FFF { // 中文字符
+			b.WriteRune(r)
+		} else if r >= 0x3000 && r <= 0x303F { // 中文标点
+			b.WriteRune(r)
+		} else if r >= 0xFF00 && r <= 0xFFEF { // 全角字符
+			b.WriteRune(r)
 		}
-		current.WriteString(line)
-		current.WriteString("\n")
+	}
+	content = b.String()
+
+	// 2. 修复非标准 JSON 转义（\w \s \d 等正则转义）
+	//    在 JSON 字符串值内部，这些需要双写反斜杠
+	invalidEscapes := []string{`\w`, `\s`, `\d`, `\b`, `\a`, `\v`, `\x`}
+	for _, esc := range invalidEscapes {
+		content = strings.ReplaceAll(content, esc, `\\`+esc[1:])
 	}
 
-	// 处理最后一块
-	if current.Len() > 0 {
-		chunks = append(chunks, current.String())
+	return content
+}
+
+// parseDistillResult 尝试解析 LLM 返回的蒸馏结果，带多级降级
+func parseDistillResult(content string) (*DistillResult, error) {
+	// 第1级：直接解析
+	var result DistillResult
+	if err := json.Unmarshal([]byte(content), &result); err == nil {
+		return &result, nil
 	}
 
-	// 如果分段过多，每段取更多内容
-	if len(chunks) > 10 {
-		chunkLen := (len(content) / 8) + 1
-		chunks = splitConversationIntoChunks(content, chunkLen)
+	// 第2级：extractJSONBlock 后解析
+	clean := extractJSONBlock(content)
+	if err := json.Unmarshal([]byte(clean), &result); err == nil {
+		return &result, nil
 	}
 
-	return chunks
+	// 第3级：字符清洗后解析
+	clean = cleanJSONForParsing(content)
+	if err := json.Unmarshal([]byte(clean), &result); err == nil {
+		log.Printf("[distill] JSON 经清洗后解析成功")
+		return &result, nil
+	}
+
+	return nil, fmt.Errorf("JSON 解析失败（3级降级均失败）")
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// ══════════════════════════════════════════════
+// 日志 + 存储
+// ══════════════════════════════════════════════
+
+// distillLog 记录蒸馏日志到 sys_distill_log
+func distillLog(userID int, username, date, triggerType, stage, status, message, detail string, durationMs int, sessionID string) {
+	conn, err := GetDB()
+	if err != nil || conn == nil {
+		log.Printf("[distill-log] DB 连接失败，降级 stdout: [user=%d] [stage=%s] [status=%s] %s", userID, stage, status, message)
+		return
+	}
+	_, err = conn.Exec(
+		`INSERT INTO sys_distill_log (user_id, username, report_date, trigger_type, stage, status, message, detail, duration_ms, session_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		userID, username, date, triggerType, stage, status, message, detail, durationMs, sessionID,
+	)
+	if err != nil {
+		log.Printf("[distill-log] 写入失败: %v", err)
+	}
+}
+
+// storeSuggestion 保存建议到 sys_ai_suggestion
+func storeSuggestion(userID int, date string, s DistillSuggestion) (int64, error) {
+	conn, err := GetDB()
+	if err != nil {
+		return 0, err
+	}
+	// 拼装 content
+	content := strings.TrimSpace(s.Problem)
+	if strings.TrimSpace(s.Suggestion) != "" {
+		if content != "" {
+			content += "\n\n建议：" + strings.TrimSpace(s.Suggestion)
+		} else {
+			content = strings.TrimSpace(s.Suggestion)
+		}
+	}
+	if content == "" {
+		log.Printf("[distill] 跳过空建议: title=%s category=%s", s.Title, s.Category)
+		return 0, nil
+	}
+
+	// title 兜底：LLM 没填则从 content 截取前 30 字
+	title := strings.TrimSpace(s.Title)
+	if title == "" {
+		runes := []rune(content)
+		if len(runes) > 30 {
+			title = string(runes[:30])
+		} else {
+			title = string(runes)
+		}
+		log.Printf("[distill] title 为空，从 content 截取: %s", title)
+	}
+
+	result, err := conn.Exec(
+		`INSERT INTO sys_ai_suggestion (user_id, report_date, category, project, title, content, priority)
+		 VALUES (?, ?, ?, '未知', ?, ?, ?)`,
+		userID, date, s.Category, title, content, s.Priority,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+// storeWorkDiary 保存工作日报到 sys_work_diary
+func storeWorkDiary(userID int, date, summary string) (int64, error) {
+	conn, err := GetDB()
+	if err != nil {
+		return 0, err
+	}
+	// 表结构：user_id, username, report_date, title, content
+	title := fmt.Sprintf("工作日报 %s", date)
+	result, err := conn.Exec(
+		`INSERT INTO sys_work_diary (user_id, username, report_date, title, content)
+		 VALUES (?, '', ?, ?, ?)
+		 ON DUPLICATE KEY UPDATE title = VALUES(title), content = VALUES(content)`,
+		userID, date, title, summary,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
 }
 
 func getDefaultDistillUserID() (int, error) {
@@ -452,541 +556,56 @@ func getDistillUsername() string {
 	return username
 }
 
-// collectConversationForDate 从 chat_history 收集指定用户指定日期的对话
-func collectConversationForDate(userID int, date string) (string, int, error) {
-	conn, err := GetDB()
-	if err != nil {
-		return "", 0, err
-	}
-
-	var convBuilder strings.Builder
-	count := 0
-
-	rows, err := conn.Query(`
-		SELECT role, content, created_at FROM sys_chat_history
-		WHERE user_id = ? AND DATE(created_at) = ?
-		ORDER BY created_at ASC`, userID, date)
-	if err != nil {
-		return "", 0, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var role, content, createdAt string
-		if err := rows.Scan(&role, &content, &createdAt); err != nil {
-			continue
-		}
-		ts := createdAt
-		if len(ts) > 16 {
-			ts = ts[:16]
-		}
-		convBuilder.WriteString(fmt.Sprintf("[%s] %s: %s\n", ts, role, content))
-		count++
-	}
-
-	// chat_history 不足时，从对话日志 JSON 补充（含完整 messages）
-	if convBuilder.Len() < 100 {
-		logCount, logContent := collectConversationFromLogs(userID, date)
-		if logContent != "" {
-			if convBuilder.Len() > 0 {
-				convBuilder.WriteString("\n--- 对话日志补充 ---\n")
-			}
-			convBuilder.WriteString(logContent)
-			count += logCount
-		}
-	}
-
-	return convBuilder.String(), count, nil
-}
-
-func collectConversationFromLogs(userID int, date string) (int, string) {
-	files, err := filepath.Glob(filepath.Join(CONVERSATION_LOG_DIR, "*.json"))
-	if err != nil || len(files) == 0 {
-		return 0, ""
-	}
-
-	var builder strings.Builder
-	count := 0
-	for _, f := range files {
-		data, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
-		var logData map[string]interface{}
-		if json.Unmarshal(data, &logData) != nil {
-			continue
-		}
-
-		// 按用户过滤（user_id=0 的旧文件不属于任何用户，跳过）
-		logUserID, _ := logData["user_id"].(float64)
-		if int(logUserID) != userID {
-			continue
-		}
-
-		ts, _ := logData["timestamp"].(string)
-		if ts == "" || !strings.HasPrefix(ts, date) {
-			continue
-		}
-
-		req, _ := logData["request"].(map[string]interface{})
-		messages, _ := req["messages"].([]interface{})
-		if len(messages) == 0 {
-			continue
-		}
-
-		builder.WriteString(fmt.Sprintf("\n=== 对话 %s ===\n", ts[:19]))
-		for _, m := range messages {
-			msg, ok := m.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			role, _ := msg["role"].(string)
-			content := extractMessageContent(msg["content"])
-			if role == "" || content == "" {
-				continue
-			}
-			builder.WriteString(fmt.Sprintf("[%s] %s: %s\n", ts[:16], role, content))
-			count++
-		}
-
-		if resp, ok := logData["response"].(map[string]interface{}); ok {
-			if content, _ := resp["content"].(string); content != "" {
-				builder.WriteString(fmt.Sprintf("[%s] assistant: %s\n", ts[:16], content))
-				count++
-			}
-		}
-	}
-	return count, builder.String()
-}
-
-func extractMessageContent(content interface{}) string {
-	switch v := content.(type) {
-	case string:
-		return v
-	case []interface{}:
-		var parts []string
-		for _, item := range v {
-			if m, ok := item.(map[string]interface{}); ok {
-				if text, ok := m["text"].(string); ok && text != "" {
-					parts = append(parts, text)
-				}
-			}
-		}
-		return strings.Join(parts, "\n")
-	default:
-		return fmt.Sprintf("%v", content)
-	}
-}
-
-// callDistillLLM 调用智谱 GLM-5.2 进行蒸馏
-func callDistillLLM(userID int, date, convContent string) (*DistillResult, error) {
-	conn, err := GetDB()
-	if err != nil {
-		return nil, err
-	}
-
-	// 获取智谱 API Key
-	var apiKey string
-	err = conn.QueryRow(`SELECT k.api_key FROM sys_api_key k
-		JOIN sys_vendor v ON k.vendor_id = v.id
-		WHERE v.code = 'zhipu' AND k.enabled = 1 AND k.api_key != ''
-		LIMIT 1`).Scan(&apiKey)
-	if err != nil || apiKey == "" {
-		return nil, fmt.Errorf("未找到智谱 API Key")
-	}
-
-	prompt := buildDistillPrompt(date, convContent)
-
-	body := map[string]interface{}{
-		"model":          "glm-5.2",
-		"messages":       []map[string]string{{"role": "user", "content": prompt}},
-		"temperature":    0.3,
-		"response_format": map[string]string{"type": "json_object"},
-	}
-	bodyJSON, _ := json.Marshal(body)
-
-	req, _ := http.NewRequest("POST",
-		"https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
-		bytes.NewReader(bodyJSON))
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := SharedHTTPClientLong.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("API 调用失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		errMsg := fmt.Sprintf("API 返回 %d: %s", resp.StatusCode, string(respBody)[:min(500, len(respBody))])
-		log.Printf("[distill] %s", errMsg)
-		distillLog(userID, "", date, "cron", "llm_call", "fail", errMsg, string(respBody)[:min(1000, len(respBody))], 0)
-		return nil, fmt.Errorf("%s", errMsg)
-	}
-
-	var respData map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&respData); err != nil {
-		distillLog(userID, "", date, "cron", "json_parse", "fail", "响应解析失败: "+err.Error(), "", 0)
-		return nil, fmt.Errorf("响应解析失败: %v", err)
-	}
-
-	content := ""
-	if choices, ok := respData["choices"].([]interface{}); ok && len(choices) > 0 {
-		if choice, ok := choices[0].(map[string]interface{}); ok {
-			if msg, ok := choice["message"].(map[string]interface{}); ok {
-				content, _ = msg["content"].(string)
-			}
-		}
-	}
-	if content == "" {
-		return nil, fmt.Errorf("AI 未返回有效内容")
-	}
-
-	// 解析 JSON（处理 LLM 返回的 markdown 代码块等情况）
-	result := &DistillResult{}
-	cleanContent := strings.TrimSpace(content)
-
-	// 去除 markdown 代码块标记（含语言标识）
-	if idx := strings.Index(cleanContent, "```"); idx >= 0 {
-		// 找到 ``` 之后第一个换行，去掉整行
-		rest := cleanContent[idx+3:]
-		if nl := strings.Index(rest, "\n"); nl >= 0 {
-			rest = rest[nl+1:]
-		}
-		// 去掉尾部 ```
-		if last := strings.LastIndex(rest, "```"); last >= 0 {
-			rest = rest[:last]
-		}
-		cleanContent = strings.TrimSpace(rest)
-	}
-
-	// 用花括号计数找到 JSON 边界（感知字符串，避免字符串内的花括号干扰）
-	jsonBlock := extractJSONBlock(cleanContent)
-	if jsonBlock == "" {
-		jsonBlock = cleanContent
-	}
-
-	// 尝试直接解析
-	if err := json.Unmarshal([]byte(jsonBlock), result); err != nil {
-		log.Printf("[distill] JSON 解析失败: %v，原始内容前300字符: %s", err, content[:min(300, len(content))])
-		distillLog(userID, "", date, "cron", "json_parse", "fail",
-			"JSON 解析失败: "+err.Error(),
-			content[:min(500, len(content))], 0)
-	}
-
-	// 检查是否有有效数据
-	if len(result.Knowledge) == 0 && len(result.Suggestions) == 0 && result.DailySummary == "" {
-		log.Printf("[distill] 解析结果为空，原始内容前300字符: %s", content[:min(300, len(content))])
-		distillLog(userID, "", date, "cron", "json_parse", "warn",
-			"解析结果为空",
-			content[:min(500, len(content))], 0)
-	}
-
-	return result, nil
-}
-
-// extractJSONBlock 用花括号计数提取最外层 JSON 对象（感知字符串）
-func extractJSONBlock(s string) string {
-	start := strings.Index(s, "{")
-	if start < 0 {
-		return ""
-	}
-	depth := 0
-	inString := false
-	escaped := false
-	for i := start; i < len(s); i++ {
-		c := s[i]
-		if escaped {
-			escaped = false
-			continue
-		}
-		if inString {
-			if c == '\\' {
-				escaped = true
-			} else if c == '"' {
-				inString = false
-			}
-			continue
-		}
-		if c == '"' {
-			inString = true
-		} else if c == '{' {
-			depth++
-		} else if c == '}' {
-			depth--
-			if depth == 0 {
-				return s[start : i+1]
-			}
-		}
-	}
-	return ""
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// buildDistillPrompt 构建蒸馏 prompt
-func buildDistillPrompt(date, convContent string) string {
-	return fmt.Sprintf(`你是用户的专属 AI 效能教练。以下是用户今天（%s）的完整工作对话记录。
-
-请基于对话内容，提炼两类产出：
-
-## 一、知识蒸馏（knowledge）
-从今天的对话中提炼有长期参考价值的知识，分四个维度：
-
-- decisions（决策）：技术选型、架构决策、方案取舍。必须包含：面临什么问题、有哪些选项、为什么选这个、否定了什么
-- pitfalls（踩坑）：踩坑记录、bug根因。必须包含：触发现象、根因、解法、预防措施
-- business（业务）：业务规则、表结构、领域知识。必须包含：业务背景、适用场景
-- habits（习惯）：用户的工作习惯和偏好。必须包含：从哪些对话观察到的
-
-每条知识的 content 要自包含——脱离今天的对话上下文，单独看这条知识也能理解。
-context 字段必须包含背景：当时面临什么问题、为什么做这个决策。不要只写结论。
-如果某个维度今天没有有价值的发现，不要硬编，跳过该维度即可。
-
-project 字段：判断这条知识属于哪个项目。根据对话内容中的项目名称、代码路径、技术栈、业务关键词判断：
-- ai-os：AI-OS 项目。特征：代码路径含 ai-os/go-backend/client/web、Go 语言、Electron、Vue3 客户端、知识库、Qdrant 向量库、蒸馏、LLM、AI 资产管理、部署打包等
-- rmp：RMP 项目（机器人 ERP 管理平台）。特征：代码路径含 rmp-api 或 nnd-robot、PHP/ThinkPHP 后端、Vue2 前端。业务领域涵盖：机器人管理（RobotController/robotManage）、客户关系管理 CRM（客户线索/公海池/客户跟进）、物料管理（Material/采购/库存/退货）、工位方案（WorkStation/交付部署）、财务结算（对账单/月结）、人力资源（考勤/员工/部门）、工单流程审批、摄像头远程监控、设备调试等
-- general：跨项目通用知识（个人习惯、环境配置、通用经验、与具体项目无关的工具使用）
-如果不确定，填 general。
-
-## 二、工作日报（daily_summary）
-以结构化 Markdown 格式总结今天的工作成果：
-- **今日完成**：列出今天完成的主要工作，用列表呈现
-- **遇到的问题**：记录遇到的技术难点、业务问题及解决思路
-- **明日计划**：基于今天的进展，预判明天的工作方向
-只总结有价值的内容，避免流水账。如果对话内容很少，可以只输出简短的日报。
-
-## 三、优化建议（suggestions）
-只提两类建议：规则和技能。这两类可以直接落地执行。
-
-### 规则建议（rule）
-当 AI 反复犯同类错误时，指出：
-- 犯了什么错（引用具体对话）
-- 错误模式是什么（偶发还是反复）
-- 建议约束什么（不要替用户写规则文本，只描述问题和建议方向）
-
-### 技能建议（skill）
-当发现重复操作或技能缺陷时，指出：
-- 什么操作在重复（引用具体对话）
-- 哪个技能有问题、问题是什么
-- 建议封装什么 / 修改什么（描述方向，不给具体代码）
-
-### Bug 归因（bug）
-当对话中出现 bug 或错误时，指出：
-- 什么错误、根因是什么
-- 怎么修复的或建议怎么修复
-- 怎么预防
-
-### 技术视野（tech_vision）
-当发现用户的实现方式较为原始、有更成熟的替代方案时：
-- 指出当前做法（引用对话中的具体实现）
-- 指出业界主流做法或更优方案
-- 说明换方案能带来什么提升（性能/可维护性/开发效率）
-- 注意：只在确实有显著更优方案时才提，不要为了凑数而建议"换框架"这种大动作
-
-要求：
-- 只输出你确信有价值的建议，宁缺毋滥
-- 每条建议和问题必须引用今天的具体对话作为依据
-- 不要替用户写最终方案，只描述问题和方向
-
-## 输出格式（严格 JSON，不要输出其他内容）
-{
-  "knowledge": [
-    {
-      "dimension": "decisions|pitfalls|business|habits",
-      "title": "简洁的标题",
-      "context": "背景：当时的情况、面临的问题、为什么",
-      "content": "提炼出的知识正文，要自包含",
-      "priority": "high|medium|low",
-      "tags": ["标签1", "标签2"],
-      "project": "ai-os|rmp|general"
-    }
-  ],
-  "suggestions": [
-    {
-      "category": "rule|skill|bug|tech_vision",
-      "title": "一句话概括",
-      "problem": "观察到的具体问题，引用对话证据",
-      "suggestion": "具体建议方向，点到为止，不给最终方案",
-      "priority": "high|medium|low"
-    }
-  ],
-  "daily_summary": "Markdown 格式的工作日报，包含今日完成、遇到的问题、明日计划"
-}
-
-## 今天（%s）的对话记录：
-%s`, date, date, convContent)
-}
-
-// GetDistillSuggestions 获取用户的蒸馏建议
-func GetDistillSuggestions(userID int, date string) ([]map[string]interface{}, error) {
-	conn, err := GetDB()
-	if err != nil {
-		return nil, err
-	}
-	query := "SELECT id, user_id, report_date, category, title, content, priority, status, created_at FROM sys_ai_suggestion"
-	var conditions []string
-	var args []interface{}
-	conditions = append(conditions, "user_id = ?")
-	args = append(args, userID)
-	if date != "" {
-		conditions = append(conditions, "report_date = ?")
-		args = append(args, date)
-	}
-	if len(conditions) > 0 {
-		query += " WHERE " + strings.Join(conditions, " AND ")
-	}
-	query += " ORDER BY id DESC"
-
-	rows, err := conn.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []map[string]interface{}
-	for rows.Next() {
-		var id, uid int
-		var reportDate, category, title, content, priority, status2, createdAt string
-		if err := rows.Scan(&id, &uid, &reportDate, &category, &title, &content, &priority, &status2, &createdAt); err != nil {
-			continue
-		}
-		result = append(result, map[string]interface{}{
-			"id": id, "user_id": uid, "report_date": reportDate, "category": category,
-			"title": title, "content": content, "priority": priority,
-			"status": status2, "created_at": createdAt,
-		})
-	}
-	return result, nil
-}
-
-// EnsureDistillTable 确保建议表有 category 字段
+// EnsureDistillTable 确保蒸馏相关表存在
 func EnsureDistillTable() {
-	conn, _ := GetDB()
-	if conn == nil {
-		return
-	}
-	// 确保 sys_ai_suggestion 表存在（已在 suggestion.go 创建，此处只做字段补充）
-	conn.Exec("CREATE TABLE IF NOT EXISTS sys_ai_suggestion (" +
-		"id INT AUTO_INCREMENT PRIMARY KEY," +
-		"user_id INT NOT NULL DEFAULT 0," +
-		"report_date DATE NOT NULL," +
-		"category VARCHAR(50) NOT NULL," +
-		"project VARCHAR(200) DEFAULT ''," +
-		"title VARCHAR(500) NOT NULL," +
-		"content TEXT NOT NULL," +
-		"priority VARCHAR(20) DEFAULT 'medium'," +
-		"status VARCHAR(20) DEFAULT 'pending'," +
-		"created_at DATETIME DEFAULT CURRENT_TIMESTAMP," +
-		"processed_at DATETIME NULL," +
-		"INDEX idx_user_id (user_id)," +
-		"INDEX idx_date (report_date)," +
-		"INDEX idx_status (status)" +
-		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
-}
-
-// DistillKnowledgeByDate 获取指定日期的用户蒸馏知识（从 sys_knowledge 查询）
-func DistillKnowledgeByDate(userID int, date string) ([]map[string]interface{}, error) {
 	conn, err := GetDB()
 	if err != nil {
-		return nil, err
-	}
-
-	var rows *sql.Rows
-	if date != "" {
-		rows, err = conn.Query(
-			`SELECT id, category as dimension, title, context, content, priority, source, created_at
-			 FROM sys_knowledge
-			 WHERE user_id = ? AND source LIKE 'distill:%' AND source LIKE ? AND status = 'active'
-			 ORDER BY created_at DESC LIMIT 50`,
-			userID, "distill:"+date+":%")
-	} else {
-		rows, err = conn.Query(
-			`SELECT id, category as dimension, title, context, content, priority, source, created_at
-			 FROM sys_knowledge
-			 WHERE user_id = ? AND source LIKE 'distill:%' AND status = 'active'
-			 ORDER BY created_at DESC LIMIT 50`,
-			userID)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []map[string]interface{}
-	for rows.Next() {
-		var id int
-		var dimension, title, context, content, priority, source, createdAt string
-		if err := rows.Scan(&id, &dimension, &title, &context, &content, &priority, &source, &createdAt); err != nil {
-			continue
-		}
-		result = append(result, map[string]interface{}{
-			"id": id, "dimension": dimension, "title": title,
-			"context": context, "content": content,
-			"priority": priority, "source": source, "created_at": createdAt,
-		})
-	}
-	return result, nil
-}
-
-// ── 蒸馏日志（持久化到 sys_distill_log）──
-
-// distillLog 写一条蒸馏日志到数据库
-// stage: collect / llm_call / json_parse / save_knowledge / save_suggestion / save_diary / done / error
-// status: success / fail / warn / info
-// detail: 详细信息（错误内容、原始响应等），可空
-func distillLog(userID int, username, date, triggerType, stage, status, message, detail string, durationMs int) {
-	conn, err := GetDB()
-	if err != nil || conn == nil {
-		log.Printf("[distill-log] DB 连接失败，降级 stdout: user=%d date=%s stage=%s status=%s msg=%s",
-			userID, date, stage, status, message)
 		return
 	}
-	_, err = conn.Exec(
-		`INSERT INTO sys_distill_log (user_id, username, report_date, trigger_type, stage, status, message, detail, duration_ms)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		userID, username, date, triggerType, stage, status, message, detail, durationMs,
-	)
-	if err != nil {
-		log.Printf("[distill-log] 写入失败: %v", err)
-	}
+	conn.Exec(`CREATE TABLE IF NOT EXISTS sys_ai_suggestion (
+		id INT AUTO_INCREMENT PRIMARY KEY,
+		user_id INT NOT NULL,
+		report_date DATE NOT NULL,
+		category VARCHAR(50) DEFAULT '',
+		title VARCHAR(200) DEFAULT '',
+		problem TEXT,
+		suggestion TEXT,
+		priority VARCHAR(10) DEFAULT '中',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		INDEX idx_user_date (user_id, report_date)
+	)`)
 }
 
-// GetDistillLogs 查询蒸馏日志（管理员可查所有用户，普通用户只查自己）
+// GetDistillLogs 查询蒸馏日志
 func GetDistillLogs(userID int, isAdmin bool, date string, limit int) ([]map[string]interface{}, error) {
 	conn, err := GetDB()
 	if err != nil {
 		return nil, err
 	}
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
 
-	query := `SELECT id, user_id, username, report_date, trigger_type, stage, status, message, detail, duration_ms, created_at
-		FROM sys_distill_log`
-	var conditions []string
+	var query string
 	var args []interface{}
 
-	if !isAdmin {
-		conditions = append(conditions, "user_id = ?")
-		args = append(args, userID)
-	}
-	if date != "" {
-		conditions = append(conditions, "report_date = ?")
-		args = append(args, date)
-	}
-
-	if len(conditions) > 0 {
-		query += " WHERE " + strings.Join(conditions, " AND ")
-	}
-	query += " ORDER BY created_at DESC"
-	if limit > 0 && limit <= 500 {
-		query += fmt.Sprintf(" LIMIT %d", limit)
+	if isAdmin {
+		query = `SELECT id, user_id, username, report_date, trigger_type, stage, status, message, detail, duration_ms, session_id, created_at FROM sys_distill_log`
+		if date != "" {
+			query += " WHERE report_date = ?"
+			args = append(args, date)
+		}
+		query += " ORDER BY id DESC LIMIT ?"
 	} else {
-		query += " LIMIT 100"
+		query = `SELECT id, user_id, username, report_date, trigger_type, stage, status, message, detail, duration_ms, session_id, created_at FROM sys_distill_log WHERE user_id = ?`
+		args = append(args, userID)
+		if date != "" {
+			query += " AND report_date = ?"
+			args = append(args, date)
+		}
+		query += " ORDER BY id DESC LIMIT ?"
 	}
+	args = append(args, limit)
 
 	rows, err := conn.Query(query, args...)
 	if err != nil {
@@ -997,8 +616,9 @@ func GetDistillLogs(userID int, isAdmin bool, date string, limit int) ([]map[str
 	var result []map[string]interface{}
 	for rows.Next() {
 		var id, uid, dur int
-		var username, reportDate, triggerType, stage, status, message, detail, createdAt string
-		if err := rows.Scan(&id, &uid, &username, &reportDate, &triggerType, &stage, &status, &message, &detail, &dur, &createdAt); err != nil {
+		var username, reportDate, triggerType, stage, status, message, detail, sessionID string
+		var createdAt time.Time
+		if err := rows.Scan(&id, &uid, &username, &reportDate, &triggerType, &stage, &status, &message, &detail, &dur, &sessionID, &createdAt); err != nil {
 			continue
 		}
 		result = append(result, map[string]interface{}{
@@ -1012,8 +632,581 @@ func GetDistillLogs(userID int, isAdmin bool, date string, limit int) ([]map[str
 			"message":      message,
 			"detail":       detail,
 			"duration_ms":  dur,
-			"created_at":   createdAt,
+			"session_id":   sessionID,
+			"created_at":   createdAt.Format("2006-01-02 15:04:05"),
 		})
 	}
 	return result, nil
+}
+
+// DistillKnowledgeByDate 查询指定日期的蒸馏知识
+func DistillKnowledgeByDate(userID int, date string) ([]map[string]interface{}, error) {
+	conn, err := GetDB()
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := conn.Query(`
+		SELECT id, title, content, context, category, priority, tags, project, session_id, created_at
+		FROM sys_knowledge
+		WHERE user_id = ? AND report_date = ? AND status = 'active'
+		ORDER BY id DESC`, userID, date)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]interface{}
+	for rows.Next() {
+		var id int
+		var title, content, context, category, priority, tags, project, sessionID string
+		var createdAt time.Time
+		if err := rows.Scan(&id, &title, &content, &context, &category, &priority, &tags, &project, &sessionID, &createdAt); err != nil {
+			continue
+		}
+		result = append(result, map[string]interface{}{
+			"id":         id,
+			"title":      title,
+			"content":    content,
+			"context":    context,
+			"category":   category,
+			"priority":   priority,
+			"tags":       tags,
+			"project":    project,
+			"session_id": sessionID,
+			"created_at": createdAt.Format("2006-01-02 15:04:05"),
+		})
+	}
+	return result, nil
+}
+
+// ══════════════════════════════════════════════
+// 辅助函数
+// ══════════════════════════════════════════════
+
+// collectSessionsForDate 收集指定用户指定日期的 session 对话（无 session_id 的跳过）
+func collectSessionsForDate(userID int, date string) ([]SessionData, error) {
+	conn, err := GetDB()
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := conn.Query(`
+		SELECT session_id, msg_id, role, content, created_at
+		FROM sys_chat_history
+		WHERE user_id = ? AND DATE(created_at) = ? AND session_id != ''
+		ORDER BY session_id, created_at ASC`, userID, date)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	sessionMap := make(map[string][]MsgGroup)
+	msgContentMap := make(map[string]map[string]*strings.Builder) // session_id -> msg_id -> content builder
+	sessionOrder := []string{}                                     // 保持 session 出现顺序
+	msgOrderMap := make(map[string][]string)                       // session_id -> msg_id 顺序
+
+	for rows.Next() {
+		var sessionID, msgID, role, content, createdAt string
+		if err := rows.Scan(&sessionID, &msgID, &role, &content, &createdAt); err != nil {
+			continue
+		}
+
+		// 初始化 session
+		if _, exists := sessionMap[sessionID]; !exists {
+			sessionMap[sessionID] = []MsgGroup{}
+			msgContentMap[sessionID] = make(map[string]*strings.Builder)
+			msgOrderMap[sessionID] = []string{}
+			sessionOrder = append(sessionOrder, sessionID)
+		}
+
+		// 初始化 msg
+		if _, exists := msgContentMap[sessionID][msgID]; !exists {
+			msgContentMap[sessionID][msgID] = &strings.Builder{}
+			msgOrderMap[sessionID] = append(msgOrderMap[sessionID], msgID)
+		}
+
+		// 追加内容
+		ts := createdAt
+		if len(ts) > 16 {
+			ts = ts[:16]
+		}
+		msgContentMap[sessionID][msgID].WriteString(fmt.Sprintf("[%s] %s: %s\n", ts, role, content))
+	}
+
+	// 构建 SessionData 列表
+	var sessions []SessionData
+	for _, sid := range sessionOrder {
+		var msgs []MsgGroup
+		totalChars := 0
+		for _, mid := range msgOrderMap[sid] {
+			content := msgContentMap[sid][mid].String()
+			msgs = append(msgs, MsgGroup{MsgID: mid, Content: content})
+			totalChars += len(content)
+		}
+		sessions = append(sessions, SessionData{
+			SessionID:  sid,
+			Msgs:       msgs,
+			TotalChars: totalChars,
+		})
+	}
+
+	log.Printf("[distill] [stage=collect] user=%d date=%s sessions=%d totalChars=%d",
+		userID, date, len(sessions), func() int {
+			total := 0
+			for _, s := range sessions {
+				total += s.TotalChars
+			}
+			return total
+		}())
+
+	return sessions, nil
+}
+
+// splitSessionIntoChunks 按 msg_id 边界切分 session，每片 ≤ 70000 字符
+func splitSessionIntoChunks(sess SessionData) []string {
+	const maxChunkSize = 70000
+
+	if sess.TotalChars <= maxChunkSize {
+		// 不需要分片，拼接所有 msg
+		var builder strings.Builder
+		for _, msg := range sess.Msgs {
+			builder.WriteString(msg.Content)
+		}
+		return []string{builder.String()}
+	}
+
+	var chunks []string
+	var current strings.Builder
+
+	for _, msg := range sess.Msgs {
+		// 如果当前块加上这条 msg 超限，且当前块非空，先保存
+		if current.Len()+len(msg.Content) > maxChunkSize && current.Len() > 0 {
+			chunks = append(chunks, current.String())
+			current.Reset()
+		}
+		current.WriteString(msg.Content)
+	}
+
+	if current.Len() > 0 {
+		chunks = append(chunks, current.String())
+	}
+
+	return chunks
+}
+
+// callDistillLLMWithRetry 带 3 次重试的 Map 阶段 LLM 调用
+func callDistillLLMWithRetry(userID int, date, convContent, sessionID string) (*DistillResult, int, error) {
+	maxRetries := 3
+	retryDelays := []time.Duration{3 * time.Second, 6 * time.Second, 12 * time.Second}
+
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			log.Printf("[distill] [user=%d] [session=%s] [stage=map] 第 %d 次重试（等待 %v）",
+				userID, sessionID, attempt, retryDelays[attempt-1])
+			time.Sleep(retryDelays[attempt-1])
+		}
+
+		result, err := callDistillLLM(userID, date, convContent)
+		if err == nil {
+			return result, attempt, nil
+		}
+		lastErr = err
+		log.Printf("[distill] [user=%d] [session=%s] [stage=map] 第 %d 次尝试失败: %v",
+			userID, sessionID, attempt+1, err)
+	}
+
+	return nil, maxRetries - 1, lastErr
+}
+
+// callReduceLLMWithRetry 带 3 次重试的 Reduce 阶段 LLM 调用
+func callReduceLLMWithRetry(userID int, date, reduceContent string) (*DistillResult, int, error) {
+	maxRetries := 3
+	retryDelays := []time.Duration{3 * time.Second, 6 * time.Second, 12 * time.Second}
+
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			log.Printf("[distill] [user=%d] [stage=reduce] 第 %d 次重试（等待 %v）",
+				userID, attempt, retryDelays[attempt-1])
+			time.Sleep(retryDelays[attempt-1])
+		}
+
+		result, err := callReduceLLM(userID, date, reduceContent)
+		if err == nil {
+			return result, attempt, nil
+		}
+		lastErr = err
+		log.Printf("[distill] [user=%d] [stage=reduce] 第 %d 次尝试失败: %v",
+			userID, attempt+1, err)
+	}
+
+	return nil, maxRetries - 1, lastErr
+}
+
+// buildReduceInput 构建 Reduce 阶段的输入文本
+func buildReduceInput(results []mapResult, date string) string {
+	var builder strings.Builder
+	builder.WriteString(fmt.Sprintf("日期：%s\n\n", date))
+	builder.WriteString(fmt.Sprintf("共有 %d 个对话 session 的蒸馏结果需要精炼：\n\n", len(results)))
+
+	for i, mr := range results {
+		builder.WriteString(fmt.Sprintf("═══ Session %d (session_id=%s) ═══\n", i+1, mr.SessionID))
+		builder.WriteString(fmt.Sprintf("【摘要】%s\n", mr.SessionSummary))
+		builder.WriteString(fmt.Sprintf("【日报片段】%s\n", mr.DailySummary))
+
+		builder.WriteString("【知识条目】\n")
+		for j, k := range mr.Knowledge {
+			builder.WriteString(fmt.Sprintf("  %d. [%s] %s\n     %s\n", j+1, k.Dimension, k.Title, k.Content))
+		}
+
+		builder.WriteString("【建议】\n")
+		for j, s := range mr.Suggestions {
+			builder.WriteString(fmt.Sprintf("  %d. [%s] %s\n     %s\n", j+1, s.Category, s.Title, s.Suggestion))
+		}
+		builder.WriteString("\n")
+	}
+
+	return builder.String()
+}
+
+// splitReduceInput 硬切 Reduce 输入（按字符数）
+func splitReduceInput(content string, maxLen int) []string {
+	if len(content) <= maxLen {
+		return []string{content}
+	}
+
+	var chunks []string
+	for i := 0; i < len(content); i += maxLen {
+		end := i + maxLen
+		if end > len(content) {
+			end = len(content)
+		}
+		chunks = append(chunks, content[i:end])
+	}
+	return chunks
+}
+
+// RunDistillForDate 指定日期蒸馏
+func RunDistillForDate(userID int, username, date string) error {
+	return RunDistillForDateWithTrigger(userID, username, date, "cron")
+}
+
+// RunDistillForDateWithTrigger Map-Reduce 蒸馏流程
+func RunDistillForDateWithTrigger(userID int, username, date, triggerType string) error {
+	overallStart := time.Now()
+
+	if userID <= 0 {
+		var err error
+		userID, err = getDefaultDistillUserID()
+		if err != nil {
+			distillLog(userID, username, date, triggerType, "error", "fail", "获取默认用户失败: "+err.Error(), "", 0, "")
+			return err
+		}
+	}
+	if username == "" {
+		username = getDistillUsername()
+	}
+
+	// ══════════════════════════════════════════════
+	// 阶段 1：收集 sessions
+	// ══════════════════════════════════════════════
+	collectStart := time.Now()
+	sessions, err := collectSessionsForDate(userID, date)
+	collectMs := int(time.Since(collectStart).Milliseconds())
+
+	if err != nil {
+		distillLog(userID, username, date, triggerType, "collect", "fail",
+			"查询 session 对话失败: "+err.Error(), "", collectMs, "")
+		return fmt.Errorf("查询 session 对话失败: %v", err)
+	}
+
+	// 构建 session 详情日志
+	var sessionDetails []string
+	for _, s := range sessions {
+		sessionDetails = append(sessionDetails, fmt.Sprintf("session=%s msgs=%d chars=%d", s.SessionID, len(s.Msgs), s.TotalChars))
+	}
+	log.Printf("[distill] [user=%d] [stage=collect] 收集到 %d 个 session: %s", userID, len(sessions), strings.Join(sessionDetails, "; "))
+
+	if len(sessions) == 0 {
+		distillLog(userID, username, date, triggerType, "collect", "info",
+			fmt.Sprintf("无有效 session 对话，跳过。sessions=%d", len(sessions)), "", collectMs, "")
+		return nil
+	}
+
+	distillLog(userID, username, date, triggerType, "collect", "success",
+		fmt.Sprintf("sessions=%d", len(sessions)), "", collectMs, "")
+
+	// ══════════════════════════════════════════════
+	// 阶段 2：Map — 每个 session 独立蒸馏
+	// ══════════════════════════════════════════════
+	mapStart := time.Now()
+	var mapResults []mapResult
+	totalChunks := 0
+	successChunks := 0
+	failChunks := 0
+
+	for si, sess := range sessions {
+		log.Printf("[distill] [user=%d] [session=%s] [stage=map] 开始 Map 蒸馏 (%d/%d)，msgs=%d，chars=%d",
+			userID, sess.SessionID, si+1, len(sessions), len(sess.Msgs), sess.TotalChars)
+
+		// 过滤：< 500 字符跳过
+		if sess.TotalChars < 500 {
+			log.Printf("[distill] [user=%d] [session=%s] [stage=map] 跳过：字符数不足 500（实际=%d）",
+				userID, sess.SessionID, sess.TotalChars)
+			distillLog(userID, username, date, triggerType, "map", "info",
+				fmt.Sprintf("session=%s 跳过：字符数不足500（%d）", sess.SessionID, sess.TotalChars), "", 0, sess.SessionID)
+			continue
+		}
+
+		// 分片
+		chunks := splitSessionIntoChunks(sess)
+		needSplit := len(chunks) > 1
+		if needSplit {
+			log.Printf("[distill] [user=%d] [session=%s] [stage=map] 需要分片：%d 片",
+				userID, sess.SessionID, len(chunks))
+		} else {
+			log.Printf("[distill] [user=%d] [session=%s] [stage=map] 无需分片，直接蒸馏", userID, sess.SessionID)
+		}
+		totalChunks += len(chunks)
+
+		var prevSummary string // 上一片的 session_summary，用作下一片的前情提要
+
+		var sessionKnowledge []DistillKnowledge
+		var sessionSuggestions []DistillSuggestion
+		var sessionSummaries []string
+		var sessionDailySummaries []string
+		sessionRetries := 0
+
+		for ci, chunk := range chunks {
+			chunkChars := len(chunk)
+			log.Printf("[distill] [user=%d] [session=%s] [stage=map] 第 %d/%d 片，chars=%d",
+				userID, sess.SessionID, ci+1, len(chunks), chunkChars)
+
+			// 第 2+ 片注入前情提要
+			if ci > 0 && prevSummary != "" {
+				injectPrefix := fmt.Sprintf("【前情提要】以下是对前面内容的摘要，请结合此上下文理解当前对话：\n%s\n\n--- 以下是第 %d 段对话 ---\n\n", prevSummary, ci+1)
+				chunk = injectPrefix + chunk
+			}
+
+			chunkStart := time.Now()
+			result, retries, err := callDistillLLMWithRetry(userID, date, chunk, sess.SessionID)
+			chunkMs := int(time.Since(chunkStart).Milliseconds())
+			sessionRetries += retries
+
+			if err != nil {
+				log.Printf("[distill] [user=%d] [session=%s] [stage=map] 第 %d/%d 片蒸馏失败（重试%d次后放弃）: %v",
+					userID, sess.SessionID, ci+1, len(chunks), retries, err)
+				distillLog(userID, username, date, triggerType, "map", "fail",
+					fmt.Sprintf("session=%s 第%d/%d片失败（重试%d次）: %v", sess.SessionID, ci+1, len(chunks), retries, err),
+					"", chunkMs, sess.SessionID)
+				failChunks++
+				continue
+			}
+
+			successChunks++
+			ds := result.DailySummary
+			if len(ds) > 50 {
+				ds = ds[:50]
+			}
+			log.Printf("[distill] [user=%d] [session=%s] [stage=map] 第 %d/%d 片完成：知识=%d，建议=%d，日报=%q，摘要=%d字，耗时=%dms，重试=%d",
+				userID, sess.SessionID, ci+1, len(chunks), len(result.Knowledge), len(result.Suggestions), ds,
+				len(result.SessionSummary), chunkMs, retries)
+			distillLog(userID, username, date, triggerType, "map", "success",
+				fmt.Sprintf("session=%s 第%d/%d片: 知识=%d 建议=%d 摘要=%d字 耗时=%dms 重试=%d",
+					sess.SessionID, ci+1, len(chunks), len(result.Knowledge), len(result.Suggestions),
+					len(result.SessionSummary), chunkMs, retries),
+				"", chunkMs, sess.SessionID)
+
+			// 保存当前片的摘要作为下一片的前情提要
+			if result.SessionSummary != "" {
+				prevSummary = result.SessionSummary
+				sessionSummaries = append(sessionSummaries, result.SessionSummary)
+			}
+
+			sessionKnowledge = append(sessionKnowledge, result.Knowledge...)
+			sessionSuggestions = append(sessionSuggestions, result.Suggestions...)
+			if result.DailySummary != "" {
+				sessionDailySummaries = append(sessionDailySummaries, result.DailySummary)
+			}
+		}
+
+		if len(sessionKnowledge) == 0 && len(sessionSuggestions) == 0 && len(sessionDailySummaries) == 0 {
+			log.Printf("[distill] [user=%d] [session=%s] [stage=map] 该 session 所有片蒸馏均无产出", userID, sess.SessionID)
+			continue
+		}
+
+		// 整个 session 的摘要：取最后一片的（最完整），或合并所有摘要
+		finalSummary := ""
+		if len(sessionSummaries) > 0 {
+			finalSummary = sessionSummaries[len(sessionSummaries)-1]
+		}
+
+		mapResults = append(mapResults, mapResult{
+			SessionID:      sess.SessionID,
+			Knowledge:      sessionKnowledge,
+			Suggestions:    sessionSuggestions,
+			DailySummary:   strings.Join(sessionDailySummaries, "\n"),
+			SessionSummary: finalSummary,
+		})
+
+		log.Printf("[distill] [user=%d] [session=%s] [stage=map] Map 完成：知识=%d，建议=%d，摘要=%d字，总重试=%d",
+			userID, sess.SessionID, len(sessionKnowledge), len(sessionSuggestions), len(finalSummary), sessionRetries)
+	}
+
+	mapMs := int(time.Since(mapStart).Milliseconds())
+	log.Printf("[distill] [user=%d] [stage=map] Map 阶段完成：sessions=%d，chunks=%d，成功=%d，失败=%d，耗时=%dms",
+		userID, len(sessions), totalChunks, successChunks, failChunks, mapMs)
+	distillLog(userID, username, date, triggerType, "map", "success",
+		fmt.Sprintf("sessions=%d chunks=%d success=%d fail=%d 耗时=%dms", len(sessions), totalChunks, successChunks, failChunks, mapMs),
+		"", mapMs, "")
+
+	if len(mapResults) == 0 {
+		distillLog(userID, username, date, triggerType, "error", "fail",
+			"所有 session 蒸馏均无产出", "", int(time.Since(overallStart).Milliseconds()), "")
+		return fmt.Errorf("所有 session 蒸馏均无产出")
+	}
+
+	// ══════════════════════════════════════════════
+	// 阶段 3：Reduce — 合并精炼
+	// ══════════════════════════════════════════════
+	reduceStart := time.Now()
+
+	var allKnowledge []DistillKnowledge
+	var allSuggestions []DistillSuggestion
+	var allDailySummaries []string
+
+	for _, mr := range mapResults {
+		allKnowledge = append(allKnowledge, mr.Knowledge...)
+		allSuggestions = append(allSuggestions, mr.Suggestions...)
+		if mr.DailySummary != "" {
+			allDailySummaries = append(allDailySummaries, mr.DailySummary)
+		}
+	}
+
+	// 构建 Reduce 输入
+	reduceInput := buildReduceInput(mapResults, date)
+	reduceInputLen := len(reduceInput)
+	log.Printf("[distill] [user=%d] [stage=reduce] Reduce 输入大小=%d 字符，原始知识=%d，原始建议=%d",
+		userID, reduceInputLen, len(allKnowledge), len(allSuggestions))
+
+	// 如果 Reduce 输入 > 80000，硬切
+	reduceChunks := splitReduceInput(reduceInput, 80000)
+	log.Printf("[distill] [user=%d] [stage=reduce] Reduce 分 %d 批", userID, len(reduceChunks))
+
+	var reducedKnowledge []DistillKnowledge
+	var reducedSuggestions []DistillSuggestion
+	var finalDailySummary string
+
+	for ci, rc := range reduceChunks {
+		chunkStart := time.Now()
+		result, retries, err := callReduceLLMWithRetry(userID, date, rc)
+		chunkMs := int(time.Since(chunkStart).Milliseconds())
+
+		if err != nil {
+			log.Printf("[distill] [user=%d] [stage=reduce] 第 %d/%d 批 Reduce 失败（重试%d次后放弃）: %v",
+				userID, ci+1, len(reduceChunks), retries, err)
+			distillLog(userID, username, date, triggerType, "reduce", "fail",
+				fmt.Sprintf("第%d/%d批失败（重试%d次）: %v", ci+1, len(reduceChunks), retries, err),
+				"", chunkMs, "")
+			// Reduce 失败不丢弃 Map 结果，回退到原始数据
+			continue
+		}
+
+		log.Printf("[distill] [user=%d] [stage=reduce] 第 %d/%d 批完成：知识=%d，建议=%d，日报=%d字，耗时=%dms，重试=%d",
+			userID, ci+1, len(reduceChunks), len(result.Knowledge), len(result.Suggestions),
+			len(result.DailySummary), chunkMs, retries)
+		distillLog(userID, username, date, triggerType, "reduce", "success",
+			fmt.Sprintf("第%d/%d批: 知识=%d 建议=%d 耗时=%dms 重试=%d",
+				ci+1, len(reduceChunks), len(result.Knowledge), len(result.Suggestions), chunkMs, retries),
+			"", chunkMs, "")
+
+		reducedKnowledge = append(reducedKnowledge, result.Knowledge...)
+		reducedSuggestions = append(reducedSuggestions, result.Suggestions...)
+		if result.DailySummary != "" {
+			finalDailySummary = result.DailySummary
+		}
+	}
+
+	reduceMs := int(time.Since(reduceStart).Milliseconds())
+	log.Printf("[distill] [user=%d] [stage=reduce] Reduce 完成：精炼知识=%d，建议=%d，日报=%d字，耗时=%dms",
+		userID, len(reducedKnowledge), len(reducedSuggestions), len(finalDailySummary), reduceMs)
+	distillLog(userID, username, date, triggerType, "reduce", "success",
+		fmt.Sprintf("精炼知识=%d 建议=%d 日报=%d字 耗时=%dms", len(reducedKnowledge), len(reducedSuggestions), len(finalDailySummary), reduceMs),
+		"", reduceMs, "")
+
+	// Reduce 失败时回退到 Map 原始数据
+	if len(reducedKnowledge) == 0 && len(reducedSuggestions) == 0 {
+		log.Printf("[distill] [user=%d] [stage=reduce] Reduce 无产出，回退到 Map 原始数据", userID)
+		reducedKnowledge = allKnowledge
+		reducedSuggestions = allSuggestions
+	}
+	if finalDailySummary == "" && len(allDailySummaries) > 0 {
+		finalDailySummary = strings.Join(allDailySummaries, "\n")
+	}
+
+	// ══════════════════════════════════════════════
+	// 阶段 4：入库
+	// ══════════════════════════════════════════════
+	storeStart := time.Now()
+
+	// 知识入库（关联 session_id）
+	knowledgeStored := 0
+	knowledgeSkipped := 0
+	for _, mr := range mapResults {
+		for _, k := range mr.Knowledge {
+			saved, err := StoreDistillKnowledge(userID, date, k, mr.SessionID)
+			if err != nil {
+				log.Printf("[distill] [user=%d] [session=%s] [stage=store] 知识入库失败: %v, title=%s", userID, mr.SessionID, err, k.Title)
+				distillLog(userID, username, date, triggerType, "save_knowledge", "fail",
+					fmt.Sprintf("session=%s 知识入库失败: %v, title=%s", mr.SessionID, err, k.Title), "", 0, mr.SessionID)
+				continue
+			}
+			if saved {
+				knowledgeStored++
+			} else {
+				knowledgeSkipped++
+			}
+		}
+	}
+	log.Printf("[distill] [user=%d] [stage=store] 知识入库完成：新增=%d，跳过(重复)=%d", userID, knowledgeStored, knowledgeSkipped)
+	distillLog(userID, username, date, triggerType, "save_knowledge", "success",
+		fmt.Sprintf("新增=%d 跳过=%d", knowledgeStored, knowledgeSkipped), "", int(time.Since(storeStart).Milliseconds()), "")
+
+	// 建议入库
+	suggestionStored := 0
+	for _, s := range reducedSuggestions {
+		if _, err := storeSuggestion(userID, date, s); err != nil {
+			log.Printf("[distill] [user=%d] [stage=store] 建议入库失败: %v, title=%s", userID, err, s.Title)
+			continue
+		}
+		suggestionStored++
+	}
+	log.Printf("[distill] [user=%d] [stage=store] 建议入库完成：新增=%d", userID, suggestionStored)
+
+	// 工作日报入库
+	diaryStored := 0
+	if finalDailySummary != "" {
+		if _, err := storeWorkDiary(userID, date, finalDailySummary); err != nil {
+			log.Printf("[distill] [user=%d] [stage=store] 日报保存失败: %v", userID, err)
+			distillLog(userID, username, date, triggerType, "save_diary", "fail",
+				"日报保存失败: "+err.Error(), "", 0, "")
+		} else {
+			diaryStored = 1
+			log.Printf("[distill] [user=%d] [stage=store] 日报保存成功，%d字", userID, len(finalDailySummary))
+		}
+	}
+	distillLog(userID, username, date, triggerType, "save_diary", "success",
+		fmt.Sprintf("日报=%d字", len(finalDailySummary)), "", 0, "")
+
+	totalMs := int(time.Since(overallStart).Milliseconds())
+	log.Printf("[distill] [user=%d] [stage=done] 蒸馏完成：sessions=%d map知识=%d reduce精炼=%d 入库=%d 建议=%d 日报=%d 总耗时=%dms",
+		userID, len(sessions), len(allKnowledge), len(reducedKnowledge), knowledgeStored, suggestionStored, diaryStored, totalMs)
+	distillLog(userID, username, date, triggerType, "done", "success",
+		fmt.Sprintf("sessions=%d map知识=%d reduce精炼=%d 入库=%d 建议=%d 日报=%d 总耗时=%dms",
+			len(sessions), len(allKnowledge), len(reducedKnowledge), knowledgeStored, suggestionStored, diaryStored, totalMs),
+		"", totalMs, "")
+
+	return nil
 }

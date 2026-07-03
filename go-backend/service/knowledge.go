@@ -53,8 +53,9 @@ func sha256Hash(s string) string {
 //   - userID: 入库者（记录用，检索不按用户隔离）
 //   - date: 蒸馏日期
 //   - k: 蒸馏产出的结构化知识
+//   - sessionID: 来源对话 session，不同 session 的同标题知识视为不同条目
 // 返回：是否新存入（false=重复跳过）
-func StoreDistillKnowledge(userID int, date string, k DistillKnowledge) (bool, error) {
+func StoreDistillKnowledge(userID int, date string, k DistillKnowledge, sessionID string) (bool, error) {
 	if k.Content == "" || k.Dimension == "" {
 		return false, nil
 	}
@@ -82,10 +83,10 @@ func StoreDistillKnowledge(userID int, date string, k DistillKnowledge) (bool, e
 		project = "general"
 	}
 
-	// 内容去重（SHA-256，跨用户去重——所有用户共享一套知识库）
+	// 内容去重（SHA-256 + session_id：不同 session 的同标题知识不视为重复）
 	hash := sha256Hash(k.Content)
 	var exists int
-	if err := conn.QueryRow("SELECT 1 FROM sys_knowledge WHERE content_hash = ? AND status = 'active'", hash).Scan(&exists); err != nil && err != sql.ErrNoRows {
+	if err := conn.QueryRow("SELECT 1 FROM sys_knowledge WHERE content_hash = ? AND session_id = ? AND status = 'active'", hash, sessionID).Scan(&exists); err != nil && err != sql.ErrNoRows {
 		log.Printf("[knowledge] 去重查询失败: %v", err)
 	}
 	if exists == 1 {
@@ -117,9 +118,9 @@ func StoreDistillKnowledge(userID int, date string, k DistillKnowledge) (bool, e
 
 	// 1. 先写入 MySQL（拿到自增 id）
 	res, err := conn.Exec(`INSERT INTO sys_knowledge
-		(user_id, project, category, title, summary, content, context, tags, source, priority, status, content_hash)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
-		userID, project, category, k.Title, summary, k.Content, k.Context, tagsJSON, source, priority, hash)
+		(user_id, project, category, title, summary, content, context, tags, source, priority, status, content_hash, session_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+		userID, project, category, k.Title, summary, k.Content, k.Context, tagsJSON, source, priority, hash, sessionID)
 	if err != nil {
 		return false, fmt.Errorf("写入 sys_knowledge 失败: %v", err)
 	}

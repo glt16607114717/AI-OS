@@ -17,27 +17,6 @@ import (
 // 超过此时间无新 chunk 输出，视为上游卡死，切换到下一个模型
 const sseIdleTimeout = 60 * time.Second
 
-// estimatePromptTokens 从请求 messages 中估算 prompt token 数
-func estimatePromptTokens(req map[string]interface{}) int {
-	messages, ok := req["messages"].([]interface{})
-	if !ok {
-		return 0
-	}
-	totalChars := 0
-	for _, m := range messages {
-		msg, ok := m.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		totalChars += len([]rune(extractContent(msg["content"])))
-	}
-	tokens := totalChars * 2 / 3
-	if tokens == 0 {
-		tokens = 1
-	}
-	return tokens
-}
-
 // ── 代理通道：纯透传（无工具时走这里，真流式零延迟）──
 
 // proxyForward 纯透明代理
@@ -317,8 +296,12 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 		promptTokens = intFloat(usage["prompt_tokens"])
 		completionTokens = intFloat(usage["completion_tokens"])
 		totalTokens = intFloat(usage["total_tokens"])
+		// 厂商返回 0 时用 tiktoken 估算
 		if promptTokens == 0 {
-			promptTokens = estimatePromptTokens(req)
+			promptTokens = estimatePromptTokensV2(req)
+		}
+		if completionTokens == 0 {
+			completionTokens = estimateCompletionTokens(content)
 		}
 		if totalTokens == 0 {
 			totalTokens = promptTokens + completionTokens
@@ -326,11 +309,9 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 		convCtx.TotalPrompt += promptTokens
 		convCtx.TotalCompletion += completionTokens
 	} else {
-		completionTokens = len([]rune(content)) * 2 / 3
-		if completionTokens == 0 {
-			completionTokens = 1
-		}
-		promptTokens = estimatePromptTokens(req)
+		// usage 完全缺失：prompt 和 completion 都用 tiktoken 估算
+		promptTokens = estimatePromptTokensV2(req)
+		completionTokens = estimateCompletionTokens(content)
 		totalTokens = promptTokens + completionTokens
 	}
 

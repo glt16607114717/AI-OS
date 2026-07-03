@@ -55,7 +55,7 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	cutoff := time.Now().AddDate(0, 0, -days).Format("2006-01-02 15:04:05")
+	cutoff := time.Now().AddDate(0, 0, -days+1).Format("2006-01-02") + " 00:00:00"
 
 	// 总览
 	var totalReqs, totalTokens, totalPrompt, totalCompletion, successCount, errorCount int

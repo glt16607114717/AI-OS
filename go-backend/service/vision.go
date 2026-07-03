@@ -3,6 +3,8 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,10 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/redis/go-redis/v9"
+
+	"ai-os-server/middleware"
 )
 
 // VisionResult 图片识别结果
@@ -25,6 +31,58 @@ var (
 	visionModelID = "glm-4.6v"
 	visionAPIURL  = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 )
+
+// ── 全局图片识别缓存（Redis，24 小时有效）──
+// Trae 编辑器每次请求都带完整对话历史（含 base64 图片），导致同一张图被重复识别数十次
+// 用图片内容 hash 做 key，24 小时内只识别一次
+
+const imageCacheTTL = 24 * time.Hour
+
+// imageCacheKey 根据图片 URL 生成缓存 key
+// base64 data URL：取前 1024 字符做 md5（足够区分不同图片）
+// http URL：直接用 URL 本身做 key
+func imageCacheKey(url string) string {
+	if strings.HasPrefix(url, "data:image/") {
+		prefix := url
+		if len(prefix) > 1024 {
+			prefix = prefix[:1024]
+		}
+		h := md5.Sum([]byte(prefix))
+		return "img:" + hex.EncodeToString(h[:])
+	}
+	return "url:" + url
+}
+
+// getRedisClient 获取 Redis 客户端，连接失败返回 nil
+func getRedisClient() *redis.Client {
+	return middleware.GetRedis()
+}
+
+// getCachedImage 从 Redis 查询缓存，未命中返回 ("", false)
+func getCachedImage(key string) (string, bool) {
+	rdb := getRedisClient()
+	if rdb == nil {
+		return "", false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	desc, err := rdb.Get(ctx, "vision_cache:"+key).Result()
+	if err != nil {
+		return "", false
+	}
+	return desc, true
+}
+
+// setCachedImage 写入 Redis 缓存
+func setCachedImage(key, desc string) {
+	rdb := getRedisClient()
+	if rdb == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	rdb.Set(ctx, "vision_cache:"+key, desc, imageCacheTTL)
+}
 
 // getZhipuAPIKey 获取智谱 API Key（复用系统已配置的）
 func getZhipuAPIKey() string {
@@ -149,6 +207,19 @@ func ProcessImages(messages []map[string]interface{}, userID int, username strin
 					continue // 不保留 image_url 项
 				}
 
+				// 查 Redis 全局缓存（24 小时内同一张图不重复识别）
+				redisKey := imageCacheKey(url)
+				if cachedDesc, found := getCachedImage(redisKey); found {
+					urlCache[url] = cachedDesc
+					imageCount++
+					if cachedDesc != "" {
+						descriptions = append(descriptions, fmt.Sprintf("[图片 %d 内容：%s]", totalImages+imageCount, cachedDesc))
+					} else {
+						descriptions = append(descriptions, fmt.Sprintf("[图片 %d：识别失败]", totalImages+imageCount))
+					}
+					continue // 不保留 image_url 项，不记录日志（避免重复）
+				}
+
 				urlCache[url] = "" // 标记已处理（即使失败也不重试）
 				desc, err := RecognizeImage(userID, username, url, "")
 				imageSize := len(url)
@@ -158,6 +229,7 @@ func ProcessImages(messages []map[string]interface{}, userID int, username strin
 					descriptions = append(descriptions, fmt.Sprintf("[图片 %d：识别失败]", totalImages+imageCount))
 				} else if desc != "" {
 					urlCache[url] = desc
+					setCachedImage(redisKey, desc) // 写入 Redis 缓存
 					LogVisionRecognize(userID, username, url, imageSize, "", desc, visionModelID, true, "")
 					imageCount++
 					descriptions = append(descriptions, fmt.Sprintf("[图片 %d 内容：%s]", totalImages+imageCount, desc))

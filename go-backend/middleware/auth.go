@@ -28,6 +28,11 @@ var (
 	rdb        *redis.Client
 )
 
+// GetRedis 导出 Redis 客户端供其他包使用
+func GetRedis() *redis.Client {
+	return rdb
+}
+
 // InitRedis 初始化 Redis 连接，并从 Redis 加载未过期的 session 到内存
 func InitRedis() {
 	rdb = redis.NewClient(&redis.Options{

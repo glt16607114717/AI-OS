@@ -128,6 +128,16 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 			promptTokens := intFloat(usage["prompt_tokens"])
 			completionTokens := intFloat(usage["completion_tokens"])
 			totalTokens := intFloat(usage["total_tokens"])
+			// 厂商返回 0 时用 tiktoken 估算
+			if promptTokens == 0 {
+				promptTokens = estimatePromptTokensV2FromMessages(messages)
+			}
+			if completionTokens == 0 {
+				completionTokens = estimateCompletionTokens(extractContentFromLLM(respData))
+			}
+			if totalTokens == 0 {
+				totalTokens = promptTokens + completionTokens
+			}
 			service.RecordStat(&service.LLMStatType{
 			UserID: userID, Username: username,
 			VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
@@ -138,12 +148,19 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 			convCtx.TotalPrompt += promptTokens
 			convCtx.TotalCompletion += completionTokens
 		} else {
+			// usage 缺失：用 tiktoken 估算
+			promptTokens := estimatePromptTokensV2FromMessages(messages)
+			completionTokens := estimateCompletionTokens(extractContentFromLLM(respData))
+			totalTokens := promptTokens + completionTokens
 			service.RecordStat(&service.LLMStatType{
 			UserID: userID, Username: username,
 			VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 			SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
-			LatencyMs: int(time.Since(startTime).Milliseconds()), Success: true,
+			PromptTokens: promptTokens, CompletionTokens: completionTokens,
+			TotalTokens: totalTokens, LatencyMs: int(time.Since(startTime).Milliseconds()), Success: true,
 		})
+			convCtx.TotalPrompt += promptTokens
+			convCtx.TotalCompletion += completionTokens
 		}
 
 		log.Printf("[llm] normal vendor=%s model=%s source=%s", route.VendorName, route.ModelID, source)

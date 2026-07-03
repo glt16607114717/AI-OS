@@ -3,6 +3,8 @@ import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { formatTimeShort as formatTime } from '../../utils/time'
 
+const totalPages = computed(() => Math.ceil(totalSuggestions.value / pageSize.value) || 1)
+
 interface Suggestion {
   id: number
   report_date: string
@@ -18,11 +20,14 @@ interface Suggestion {
 import { API_BASE } from '../../api'
 
 const suggestions = ref<Suggestion[]>([])
+const totalSuggestions = ref(0)
+const currentPage = ref(1)
+const pageSize = ref(20)
 const loading = ref(false)
 const analyzing = ref(false)
 const processingIds = ref<Set<number>>(new Set())
 
-const filterStatus = ref<'all' | 'pending' | 'processed'>('all')
+const filterStatus = ref<'all' | 'pending' | 'processed' | 'ignored'>('pending')
 const filterDate = ref('')
 const expandedIds = ref<Set<number>>(new Set())
 
@@ -32,7 +37,8 @@ const categoryMap: Record<string, string> = {
   bug: 'Bug 归因',
   tech_vision: '技术视野',
   prompt: '提示词优化',
-  workflow: '工作流优化',
+  workflow: '流程工具',
+  env: '环境配置',
   other: '其他建议',
 }
 
@@ -42,7 +48,8 @@ const categoryColorMap: Record<string, string> = {
   bug: '#e6a23c',
   tech_vision: '#67c23a',
   prompt: '#67c23a',
-  workflow: '#e6a23c',
+  workflow: '#9b59b6',
+  env: '#1abc9c',
   other: '#909399',
 }
 
@@ -80,23 +87,30 @@ function authHeaders() {
 }
 
 async function fetchSuggestions() {
+  loading.value = true
   try {
     const params = new URLSearchParams()
     if (filterStatus.value !== 'all') params.set('status', filterStatus.value)
     if (filterDate.value) params.set('date', filterDate.value)
+    params.set('page', String(currentPage.value))
+    params.set('page_size', String(pageSize.value))
     const qs = params.toString()
     const res = await fetch(`${API_BASE}/api/ai-advisor/suggestions${qs ? '?' + qs : ''}`, {
       headers: authHeaders()
     })
     const data = await res.json()
     if (data?.ok) {
-      suggestions.value = data.data || []
+      const payload = data.data || {}
+      suggestions.value = payload.data || []
+      totalSuggestions.value = payload.total || 0
     } else {
       ElMessage.error(data.error || '加载建议失败')
     }
   } catch (e: any) {
     console.error('[AiAdvice] fetchSuggestions error:', e)
     ElMessage.error('加载建议失败: ' + e.message)
+  } finally {
+    loading.value = false
   }
 }
 
@@ -105,11 +119,11 @@ function sleep(ms: number) {
 }
 
 async function pollAfterTrigger(maxAttempts = 20) {
-  const prevCount = suggestions.value.length
+  const prevCount = totalSuggestions.value
   for (let i = 0; i < maxAttempts; i++) {
     await sleep(5000)
     await fetchSuggestions()
-    if (suggestions.value.length > prevCount) {
+    if (totalSuggestions.value > prevCount) {
       ElMessage.success('分析完成，已更新结果')
       return
     }
@@ -117,14 +131,19 @@ async function pollAfterTrigger(maxAttempts = 20) {
   ElMessage.warning('分析仍在后台执行，请稍后刷新查看')
 }
 
-async function processSuggestion(id: number) {
+function changePage(page: number) {
+  currentPage.value = page
+  fetchSuggestions()
+}
+
+async function processSuggestion(id: number, status: string = 'processed') {
   processingIds.value.add(id)
   try {
     const token = localStorage.getItem('aios_token')
     const res = await fetch(`${API_BASE}/api/ai-advisor/process`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ suggestion_id: id })
+      body: JSON.stringify({ suggestion_id: id, status })
     })
     const data = await res.json()
     if (data?.ok) {
@@ -132,7 +151,7 @@ async function processSuggestion(id: number) {
     }
   } catch (e: any) {
     console.error('[AiAdvice] processSuggestion error:', e)
-    ElMessage.error('处理建议失败: ' + e.message)
+    ElMessage.error('操作失败: ' + e.message)
   }
   processingIds.value.delete(id)
 }
@@ -168,11 +187,12 @@ onMounted(() => {
     <div class="page-header">
       <h2 class="page-title">AI 建议</h2>
       <div class="header-actions">
-        <input type="date" class="date-picker" v-model="filterDate" @change="fetchSuggestions" />
+        <input type="date" class="date-picker" v-model="filterDate" @change="currentPage = 1; fetchSuggestions()" />
         <div class="status-tabs">
-          <button class="status-tab" :class="{ active: filterStatus === 'all' }" @click="filterStatus = 'all'; fetchSuggestions()">全部</button>
-          <button class="status-tab" :class="{ active: filterStatus === 'pending' }" @click="filterStatus = 'pending'; fetchSuggestions()">待处理</button>
-          <button class="status-tab" :class="{ active: filterStatus === 'processed' }" @click="filterStatus = 'processed'; fetchSuggestions()">已处理</button>
+          <button class="status-tab" :class="{ active: filterStatus === 'all' }" @click="filterStatus = 'all'; currentPage = 1; fetchSuggestions()">全部</button>
+          <button class="status-tab" :class="{ active: filterStatus === 'pending' }" @click="filterStatus = 'pending'; currentPage = 1; fetchSuggestions()">待处理</button>
+          <button class="status-tab" :class="{ active: filterStatus === 'processed' }" @click="filterStatus = 'processed'; currentPage = 1; fetchSuggestions()">已处理</button>
+          <button class="status-tab" :class="{ active: filterStatus === 'ignored' }" @click="filterStatus = 'ignored'; currentPage = 1; fetchSuggestions()">已忽略</button>
         </div>
         <button class="analyze-btn" :disabled="analyzing" @click="triggerAnalyze">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -213,14 +233,22 @@ onMounted(() => {
             </div>
             <div class="footer-right">
               <template v-if="item.status === 'pending'">
-                <button class="process-btn" :disabled="processingIds.has(item.id)" @click="processSuggestion(item.id)">{{ processingIds.has(item.id) ? '处理中...' : '标记已处理' }}</button>
+                <button class="process-btn" :disabled="processingIds.has(item.id)" @click="processSuggestion(item.id, 'processed')">{{ processingIds.has(item.id) ? '处理中...' : '标记已处理' }}</button>
+                <button class="ignore-btn" :disabled="processingIds.has(item.id)" @click="processSuggestion(item.id, 'ignored')">{{ processingIds.has(item.id) ? '处理中...' : '忽略' }}</button>
               </template>
               <template v-else>
-                <span class="processed-badge">已处理</span>
+                <span v-if="item.status === 'processed'" class="processed-badge">已处理</span>
+                <span v-else class="ignored-badge">{{ item.status === 'ignored' ? '已忽略' : item.status }}</span>
                 <span v-if="item.processed_at" class="processed-time">{{ formatTime(item.processed_at) }}</span>
               </template>
             </div>
           </div>
+        </div>
+
+        <div v-if="totalSuggestions > pageSize" class="pagination">
+          <button class="page-btn" :disabled="currentPage <= 1" @click="changePage(currentPage - 1)">上一页</button>
+          <span class="page-info">第 {{ currentPage }} 页 / 共 {{ totalPages }} 页（{{ totalSuggestions }} 条）</span>
+          <button class="page-btn" :disabled="currentPage >= totalPages" @click="changePage(currentPage + 1)">下一页</button>
         </div>
       </div>
     </template>
@@ -470,7 +498,36 @@ onMounted(() => {
   cursor: not-allowed;
 }
 
+.ignore-btn {
+  padding: 4px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #94a3b8;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.ignore-btn:hover {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+}
+.ignore-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .processed-badge {
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #94a3b8;
+  background: #f1f5f9;
+  border-radius: 4px;
+}
+
+.ignored-badge {
   padding: 2px 10px;
   font-size: 12px;
   font-weight: 500;
@@ -481,6 +538,32 @@ onMounted(() => {
 
 .processed-time {
   font-size: 12px;
+  color: #94a3b8;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px 0 4px;
+}
+
+.page-btn {
+  padding: 4px 14px;
+  font-size: 13px;
+  color: #475569;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.page-btn:hover:not(:disabled) { border-color: #6366f1; color: #6366f1; }
+.page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.page-info {
+  font-size: 13px;
   color: #94a3b8;
 }
 
