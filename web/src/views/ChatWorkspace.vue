@@ -479,6 +479,9 @@ async function sendMessage() {
         const trimmed = line.trim()
         if (!trimmed) continue
 
+        // 忽略 SSE 注释行（keepalive 心跳）
+        if (trimmed.startsWith(':')) continue
+
         // 解析 event 类型行
         if (trimmed.startsWith('event: ')) {
           currentEventType = trimmed.slice(7).trim()
@@ -564,10 +567,17 @@ async function sendMessage() {
     const msg = messages.value[aiIdx]
     if (e.name === 'AbortError') {
       msg.content += '\n\n[已中断]'
+      msg.done = true
     } else {
-      msg.content += `\n\n[错误] ${e.message || '连接失败'}`
+      // 网络断开时保留已收到的部分内容
+      const partialLen = msg.content.length
+      if (partialLen > 0) {
+        msg.content += '\n\n> ⚠️ 网络中断，以上为部分回答'
+      } else {
+        msg.content += `\n\n[错误] ${e.message || '连接失败'}`
+      }
+      msg.done = true
     }
-    msg.done = true
     saveToCache()
     saveMessage('assistant', msg.content)
   }

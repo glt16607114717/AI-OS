@@ -1,4 +1,4 @@
-package handler
+﻿package handler
 
 import (
 	"ai-os-server/circuit"
@@ -90,7 +90,7 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 			service.RecordStat(&service.LLMStatType{
 			UserID: userID, Username: username,
 			VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
-			SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
+			SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 			LatencyMs: latency, Success: false, Error: err.Error(),
 		})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 网络错误: %s", route.VendorName, err.Error()))
@@ -111,7 +111,7 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 		service.RecordStat(&service.LLMStatType{
 		UserID: userID, Username: username,
 		VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
-		SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
+		SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 		LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: errMsg,
 	})
 		convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
@@ -141,7 +141,7 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 			service.RecordStat(&service.LLMStatType{
 			UserID: userID, Username: username,
 			VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
-			SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
+			SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 			PromptTokens: promptTokens, CompletionTokens: completionTokens,
 			TotalTokens: totalTokens, LatencyMs: int(time.Since(startTime).Milliseconds()), Success: true,
 		})
@@ -155,7 +155,7 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 			service.RecordStat(&service.LLMStatType{
 			UserID: userID, Username: username,
 			VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
-			SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
+			SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 			PromptTokens: promptTokens, CompletionTokens: completionTokens,
 			TotalTokens: totalTokens, LatencyMs: int(time.Since(startTime).Milliseconds()), Success: true,
 		})

@@ -34,8 +34,6 @@ func SaveGodRules(w http.ResponseWriter, r *http.Request) {
 		Rules:              getStr(body, "rules"),
 		PromptOptimize:     getBool(body, "prompt_optimize"),
 		StripNoise:         getBool(body, "strip_noise"),
-		CompressFile:       getBool(body, "compress_file"),
-		SimplifyLang:       getBool(body, "simplify_lang"),
 		CompressToolResult: getBool(body, "compress_tool_result"),
 		CompressTools:      getBool(body, "compress_tools"),
 	}

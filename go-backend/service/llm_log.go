@@ -28,12 +28,12 @@ func RecordStat(stat *model.LLMStat) {
 		errMsg = errMsg[:512]
 	}
 	conn.Exec(`INSERT INTO sys_llm_stats (ts, user_id, username, vendor_id, key_id, model_id,
-		prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error, session_id, msg_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error, session_id, msg_id, chat_history_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		time.Now().Format("2006-01-02 15:04:05"),
 		stat.UserID, stat.Username, stat.VendorID, stat.KeyID, stat.ModelID,
 		stat.PromptTokens, stat.CompletionTokens, stat.TotalTokens,
-		stat.LatencyMs, success, errMsg, stat.SessionID, stat.MsgID)
+		stat.LatencyMs, success, errMsg, stat.SessionID, stat.MsgID, stat.ChatHistoryID)
 }
 
 func CleanupStats() int {
@@ -727,13 +727,14 @@ type ChatSessionRow struct {
 
 // RequestChainItem 请求链路中的单次请求
 type RequestChainItem struct {
-	Ts          string `json:"ts"`
-	ModelID     string `json:"model_id"`
-	KeyName     string `json:"key_name"`
-	Success     bool   `json:"success"`
-	Error       string `json:"error,omitempty"`
-	LatencyMs   int    `json:"latency_ms"`
-	TotalTokens int    `json:"total_tokens"`
+	Ts            string `json:"ts"`
+	ModelID       string `json:"model_id"`
+	KeyName       string `json:"key_name"`
+	Success       bool   `json:"success"`
+	Error         string `json:"error,omitempty"`
+	LatencyMs     int    `json:"latency_ms"`
+	TotalTokens   int    `json:"total_tokens"`
+	ChatHistoryID int64  `json:"chat_history_id"`
 }
 
 // GetChatSessions 按 msg_id 聚合查询对话记录
@@ -849,7 +850,7 @@ func batchGetRequestChains(conn *sql.DB, msgIDs []string) (map[string][]RequestC
 	for i, id := range msgIDs {
 		args[i] = id
 	}
-	query := `SELECT s.msg_id, s.ts, s.model_id, COALESCE(k.name, s.key_id), s.success, s.error, s.latency_ms, s.total_tokens
+	query := `SELECT s.msg_id, s.ts, s.model_id, COALESCE(k.name, s.key_id), s.success, s.error, s.latency_ms, s.total_tokens, COALESCE(s.chat_history_id, 0)
 		FROM sys_llm_stats s LEFT JOIN sys_api_key k ON s.key_id = k.id
 		WHERE s.msg_id IN (` + placeholders + `) ORDER BY s.msg_id, s.ts DESC`
 	rows, err := conn.Query(query, args...)
@@ -866,13 +867,15 @@ func batchGetRequestChains(conn *sql.DB, msgIDs []string) (map[string][]RequestC
 		var latencyMs, totalTokens int
 		var successInt int
 		var keyName string
-		if err := rows.Scan(&msgID, &ts, &modelID, &keyName, &successInt, &errMsg, &latencyMs, &totalTokens); err != nil {
+		var chatHistoryID sql.NullInt64
+		if err := rows.Scan(&msgID, &ts, &modelID, &keyName, &successInt, &errMsg, &latencyMs, &totalTokens, &chatHistoryID); err != nil {
 			continue
 		}
 		success = successInt == 1
 		item := RequestChainItem{
 			Ts: ts, ModelID: modelID, KeyName: keyName, Success: success,
 			Error: errMsg, LatencyMs: latencyMs, TotalTokens: totalTokens,
+			ChatHistoryID: chatHistoryID.Int64,
 		}
 		chainResult[msgID] = append(chainResult[msgID], item)
 

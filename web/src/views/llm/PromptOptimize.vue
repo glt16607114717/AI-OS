@@ -14,15 +14,11 @@ const fullConfig = ref({
   rules: '',
   prompt_optimize: true,
   strip_noise: true,
-  compress_file: true,
-  simplify_lang: true,
   compress_tool_result: true,
   compress_tools: true,
 })
 
 const stripNoise = ref(true)
-const compressFile = ref(true)
-const simplifyLang = ref(true)
 const compressToolResult = ref(true)
 const compressTools = ref(true)
 
@@ -41,14 +37,10 @@ async function loadConfig() {
         rules: d.rules ?? '',
         prompt_optimize: d.prompt_optimize ?? true,
         strip_noise: d.strip_noise ?? true,
-        compress_file: d.compress_file ?? true,
-        simplify_lang: d.simplify_lang ?? true,
         compress_tool_result: d.compress_tool_result ?? true,
         compress_tools: d.compress_tools ?? true,
       }
       stripNoise.value = fullConfig.value.strip_noise
-      compressFile.value = fullConfig.value.compress_file
-      simplifyLang.value = fullConfig.value.simplify_lang
       compressToolResult.value = fullConfig.value.compress_tool_result
       compressTools.value = fullConfig.value.compress_tools
     }
@@ -67,8 +59,6 @@ async function saveConfig() {
       body: JSON.stringify({
         ...fullConfig.value,
         strip_noise: stripNoise.value,
-        compress_file: compressFile.value,
-        simplify_lang: simplifyLang.value,
         compress_tool_result: compressToolResult.value,
         compress_tools: compressTools.value,
       }),
@@ -77,8 +67,6 @@ async function saveConfig() {
     if (result.ok) {
       ElMessage.success('保存成功')
       fullConfig.value.strip_noise = stripNoise.value
-      fullConfig.value.compress_file = compressFile.value
-      fullConfig.value.simplify_lang = simplifyLang.value
       fullConfig.value.compress_tool_result = compressToolResult.value
       fullConfig.value.compress_tools = compressTools.value
     } else {
@@ -111,7 +99,7 @@ onMounted(loadConfig)
           <div class="opt-icon">1</div>
           <div class="opt-info">
             <div class="opt-name">清理历史噪音</div>
-            <div class="opt-desc">删掉对话历史里每轮都重复出现的「终端状态」「语言设置」等无用信息，只保留你的真实提问</div>
+            <div class="opt-desc">删掉对话历史里每轮重复的「文件打开」「终端状态」「语言设置」三类信息，保留首轮规则/技能和你的真实提问</div>
           </div>
           <label class="toggle-label">
             <input type="checkbox" v-model="stripNoise" class="toggle-check" />
@@ -120,47 +108,7 @@ onMounted(loadConfig)
         </div>
         <div class="opt-effect">
           <span class="effect-tag" :class="stripNoise ? 'on' : 'off'">
-            {{ stripNoise ? '预计每轮省 ~600 字符' : '未启用' }}
-          </span>
-        </div>
-      </div>
-
-      <!-- 压缩文件信息 -->
-      <div class="opt-card" :class="{ off: !compressFile }">
-        <div class="opt-card-header">
-          <div class="opt-icon">2</div>
-          <div class="opt-info">
-            <div class="opt-name">压缩文件信息</div>
-            <div class="opt-desc">把「用户打开了 xxx 文件」这一大段 XML 标签，压缩成一行 [当前文件: xxx.go]，拼到你的提问后面</div>
-          </div>
-          <label class="toggle-label">
-            <input type="checkbox" v-model="compressFile" class="toggle-check" />
-            <span class="toggle-switch"></span>
-          </label>
-        </div>
-        <div class="opt-effect">
-          <span class="effect-tag" :class="compressFile ? 'on' : 'off'">
-            {{ compressFile ? '压缩率约 90%' : '未启用' }}
-          </span>
-        </div>
-      </div>
-
-      <!-- 语言要求精简 -->
-      <div class="opt-card" :class="{ off: !simplifyLang }">
-        <div class="opt-card-header">
-          <div class="opt-icon">3</div>
-          <div class="opt-info">
-            <div class="opt-name">语言要求精简</div>
-            <div class="opt-desc">删掉 IDE 自带的英文语言要求（跟上帝指令重复了），语言规则以你上帝指令里的为准</div>
-          </div>
-          <label class="toggle-label">
-            <input type="checkbox" v-model="simplifyLang" class="toggle-check" />
-            <span class="toggle-switch"></span>
-          </label>
-        </div>
-        <div class="opt-effect">
-          <span class="effect-tag" :class="simplifyLang ? 'on' : 'off'">
-            {{ simplifyLang ? '去重 system + user 语言块' : '未启用' }}
+            {{ stripNoise ? '每轮省 ~1000 字符' : '未启用' }}
           </span>
         </div>
       </div>
@@ -168,10 +116,10 @@ onMounted(loadConfig)
       <!-- 压缩历史工具结果 -->
       <div class="opt-card" :class="{ off: !compressToolResult }">
         <div class="opt-card-header">
-          <div class="opt-icon">4</div>
+          <div class="opt-icon">2</div>
           <div class="opt-info">
             <div class="opt-name">压缩历史工具结果</div>
-            <div class="opt-desc">5 轮之前的工具返回结果（如文件读取、搜索结果）超过 500 字符时截断，并提示 AI 可重新执行。最新 5 轮完全保留</div>
+            <div class="opt-desc">5 轮之前的工具返回结果（如文件读取、搜索结果）超过 200 字符时截断，并提示 AI 可重新执行。最新 5 轮完全保留</div>
           </div>
           <label class="toggle-label">
             <input type="checkbox" v-model="compressToolResult" class="toggle-check" />
@@ -188,7 +136,7 @@ onMounted(loadConfig)
       <!-- 精简工具定义 -->
       <div class="opt-card" :class="{ off: !compressTools }">
         <div class="opt-card-header">
-          <div class="opt-icon">5</div>
+          <div class="opt-icon">3</div>
           <div class="opt-info">
             <div class="opt-name">精简工具定义</div>
             <div class="opt-desc">删除 RunCommand 的 git 提交/推送教程和 Task 的示例代码块。安全红线（禁止 force push 等）完整保留</div>
@@ -216,8 +164,9 @@ onMounted(loadConfig)
       <div class="tips-card">
         <div class="tips-title">工作原理</div>
         <ul class="tips-list">
-          <li>三项优化均在<strong>发送给大模型之前</strong>执行，不改动原始对话记录</li>
-          <li>「清理历史噪音」只处理历史轮消息，<strong>最新一轮的终端状态会保留</strong>（大模型需要知道当前环境）</li>
+          <li>所有优化均在<strong>发送给大模型之前</strong>执行，不改动原始对话记录</li>
+          <li>「清理历史噪音」只处理历史轮消息，<strong>最新一轮完整保留</strong>（大模型需要当前文件、终端上下文）</li>
+          <li>首轮注入的<strong>工作区规则、技能、目录树</strong>完整保留，一个字都不删</li>
           <li>配置按用户隔离，每个用户独立设置自己的优化策略</li>
           <li>默认全部开启，无需手动配置即可生效</li>
         </ul>

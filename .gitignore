@@ -45,6 +45,8 @@ Desktop.ini
 .env
 *.log
 *.tmp
+go-backend/logs/
+.tmp_stats.json
 
 # === 已废弃的旧代码备份 ===
 _python_backup/

@@ -86,6 +86,9 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 转储原始请求（加工前），用于分析 Trae 注入的噪音
+	service.DumpRawRequest(req)
+
 	// 提取 trace 标记（本地 hook 注入的会话追踪信息，无标记时安全跳过）
 	sessionID, msgId := extractAndStripTrace(req)
 
@@ -97,6 +100,59 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// 注入上帝指令 + RAG
 	injectGodRulesAndRAG(req, userMsgRaw, userID, username)
+
+	// 提示词精简（仅代理路径：清理编辑器注入的 system-reminder、语言要求、冗长工具描述等噪音）
+	// 工作台场景没有这些编辑器噪音，不需要精简
+	// 每个开关独立判断，无总开关，与上帝指令(Enabled)完全无关
+	optimizeCfg := service.GetGodRules(userID)
+	if optimizeCfg != nil {
+		// 处理两种可能的类型：injectGodRulesAndRAG 后是 []map[string]interface{}
+		var msgMaps []map[string]interface{}
+		switch v := req["messages"].(type) {
+		case []map[string]interface{}:
+			msgMaps = v
+		case []interface{}:
+			msgMaps = make([]map[string]interface{}, len(v))
+			for i, m := range v {
+				msgMaps[i], _ = m.(map[string]interface{})
+			}
+		default:
+			log.Printf("[DEBUG:Optimize] messages type mismatch: %T", req["messages"])
+		}
+		if len(msgMaps) > 0 {
+			// DEBUG: dump 优化前的原始 messages（仅历史 user 消息，用于对比）
+			for i, m := range msgMaps {
+				if role, _ := m["role"].(string); role == "user" && i < len(msgMaps)-1 {
+					c := service.StringifyContent(m["content"])
+					if len(c) > 200 {
+						preview := c
+						if len(preview) > 1500 {
+							preview = preview[:1500]
+						}
+						log.Printf("[DEBUG:Optimize-BEFORE] msg[%d] user len=%d content=%q", i, len(c), preview)
+					}
+				}
+			}
+			before := len(msgMaps)
+			msgMaps = service.OptimizeMessages(msgMaps, optimizeCfg)
+			// DEBUG: dump 优化后
+			for i, m := range msgMaps {
+				if role, _ := m["role"].(string); role == "user" && i < len(msgMaps)-1 {
+					c := service.StringifyContent(m["content"])
+					preview := c
+					if len(preview) > 200 {
+						preview = preview[:200]
+					}
+					log.Printf("[DEBUG:Optimize-AFTER]  msg[%d] user len=%d preview=%q", i, len(c), preview)
+				}
+			}
+			log.Printf("[DEBUG:Optimize] messages %d -> %d, StripNoise=%v", before, len(msgMaps), optimizeCfg.StripNoise)
+			req["messages"] = msgMaps
+		}
+		if tools, ok := req["tools"].([]interface{}); ok && len(tools) > 0 {
+			req["tools"] = service.OptimizeTools(tools, optimizeCfg)
+		}
+	}
 
 	// 流式判断
 	isStream := false
@@ -233,6 +289,7 @@ func parseRequestBody(w http.ResponseWriter, r *http.Request) (map[string]interf
 // extractAndStripTrace 从最后一条 user 消息中提取 [TRACE:session=xxx][TRACE:msg=xxx] 标记，
 // 剥离后返回 sessionID/msgId，并将消息内容替换为干净版本。
 // 没有标记时安全跳过（其他用户无 hook 也能正常工作）。
+// 注意：如果 content 是数组（含 image_url），只在 text 项中剥离 trace，保留 image_url 项。
 func extractAndStripTrace(req map[string]interface{}) (sessionID, msgId string) {
 	messages, ok := req["messages"].([]interface{})
 	if !ok {
@@ -244,12 +301,42 @@ func extractAndStripTrace(req map[string]interface{}) (sessionID, msgId string) 
 			continue
 		}
 		if role, _ := msg["role"].(string); role == "user" {
-			content := stringifyContent(msg["content"])
-			sID, mID, cleaned := extractTraceMarkers(content)
-			if sID != "" {
-				msg["content"] = strings.TrimSpace(cleaned)
+			content := msg["content"]
+			switch v := content.(type) {
+			case string:
+				sID, mID, cleaned := extractTraceMarkers(v)
+				if sID != "" {
+					msg["content"] = strings.TrimSpace(cleaned)
+				}
+				return sID, mID
+			case []interface{}:
+				// 数组格式（含 image_url）：只在 text 项中剥离 trace，保留 image_url
+				var sID, mID string
+				var cleanedArr []interface{}
+				for _, item := range v {
+					m, ok := item.(map[string]interface{})
+					if !ok {
+						cleanedArr = append(cleanedArr, item)
+						continue
+					}
+					if t, _ := m["type"].(string); t == "text" {
+						if txt, ok := m["text"].(string); ok {
+							csID, cmID, cleaned := extractTraceMarkers(txt)
+							if csID != "" {
+								sID = csID
+								mID = cmID
+								m["text"] = strings.TrimSpace(cleaned)
+							}
+						}
+					}
+					cleanedArr = append(cleanedArr, item)
+				}
+				if sID != "" {
+					msg["content"] = cleanedArr
+				}
+				return sID, mID
 			}
-			return sID, mID
+			return "", ""
 		}
 	}
 	return "", ""

@@ -1,4 +1,4 @@
-package handler
+﻿package handler
 
 import (
 	"ai-os-server/circuit"
@@ -114,7 +114,7 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 			service.RecordStat(&service.LLMStatType{
 				UserID: userID, Username: username,
 				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
-				SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
+				SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 				LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: err.Error(),
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 网络错误: %s", route.VendorName, err.Error()))
@@ -132,7 +132,7 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 			service.RecordStat(&service.LLMStatType{
 				UserID: userID, Username: username,
 				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
-				SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
+				SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 				LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: errMsg,
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
@@ -153,10 +153,14 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 			}
 		}
 
-		// SSE 读取循环（带空闲超时）
+		// SSE 读取循环（带空闲超时 + keepalive 心跳）
 		reader := bufio.NewReaderSize(resp.Body, 64*1024)
 		done := false
 		streamFailed := false
+
+		// keepalive 心跳：每 15 秒发送 SSE 注释，防止 NAT/路由器/运营商超时断连
+		keepaliveTicker := time.NewTicker(15 * time.Second)
+		defer keepaliveTicker.Stop()
 
 		for !done && !streamFailed {
 			// 空闲超时：用 goroutine + channel 实现
@@ -174,13 +178,20 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 			select {
 			case rr = <-readCh:
 				// 正常收到数据
+			case <-keepaliveTicker.C:
+				// SSE keepalive 注释（客户端忽略，但保持 TCP 连接活跃）
+				fmt.Fprintf(w, ": keepalive\n\n")
+				if flusher != nil {
+					flusher.Flush()
+				}
+				continue
 			case <-time.After(sseIdleTimeout):
 				// 60 秒无输出 → 判定卡死
 				log.Printf("[proxy] stream %s user=%s SSE_IDLE_TIMEOUT: 60s 无输出，切换模型", route.ModelID, username)
 				service.RecordStat(&service.LLMStatType{
 					UserID: userID, Username: username,
 					VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
-					SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
+					SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 					LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false,
 					Error: fmt.Sprintf("SSE 流 60s 无输出，判定卡死"),
 				})
@@ -197,7 +208,7 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 					service.RecordStat(&service.LLMStatType{
 						UserID: userID, Username: username,
 						VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
-						SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
+						SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 						LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false,
 						Error: fmt.Sprintf("SSE 流异常中断: %s", rr.err.Error()),
 					})
@@ -207,7 +218,7 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 					service.RecordStat(&service.LLMStatType{
 						UserID: userID, Username: username,
 						VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
-						SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
+						SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 						LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false,
 						Error: "SSE 流未收到 [DONE] 即关闭",
 					})
@@ -316,20 +327,22 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 	}
 
 	latency := int(time.Since(startTime).Milliseconds())
-	service.RecordStat(&service.LLMStatType{
-		UserID: userID, Username: username,
-		VendorID: finalRoute.VendorID, KeyID: finalRoute.KeyID, ModelID: finalRoute.ModelID,
-		SessionID: convCtx.SessionID, MsgID: convCtx.MsgId,
-		PromptTokens: promptTokens, CompletionTokens: completionTokens,
-		TotalTokens: totalTokens, LatencyMs: latency, Success: true,
-	})
 
+	// 先保存 assistant 消息，获取 ChatHistoryID，再 RecordStat
 	if content != "" {
 		convCtx.AssistantContent = content
 		chatID := service.AddChatMessage(userID, "assistant", content, convCtx.SessionID, convCtx.MsgId)
 		convCtx.ChatHistoryID = chatID
 		go service.SaveConversationLogWithUser(chatID, userID, username, req, content, finalRoute.ModelID, finalRoute.VendorID, promptTokens, completionTokens, totalTokens, latency)
 	}
+
+	service.RecordStat(&service.LLMStatType{
+		UserID: userID, Username: username,
+		VendorID: finalRoute.VendorID, KeyID: finalRoute.KeyID, ModelID: finalRoute.ModelID,
+		SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
+		PromptTokens: promptTokens, CompletionTokens: completionTokens,
+		TotalTokens: totalTokens, LatencyMs: latency, Success: true,
+	})
 
 	log.Printf("[proxy] stream %s user=%s latency=%dms tokens=%d/%d failover=%d",
 		finalRoute.ModelID, username, latency, promptTokens, completionTokens, convCtx.FailoverCount)

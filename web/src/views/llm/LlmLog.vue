@@ -17,6 +17,7 @@ interface RequestChainItem {
   error?: string
   latency_ms: number
   total_tokens: number
+  chat_history_id: number
 }
 
 interface ChatSession {
@@ -131,6 +132,28 @@ function formatTokens(n: number) {
 
 function shortMsgId(id: string) {
   return id.length > 8 ? id.substring(0, 8) : id
+}
+
+function downloadLog(chatHistoryId: number) {
+  if (!chatHistoryId) {
+    ElMessage.warning('该请求没有关联的对话日志')
+    return
+  }
+  const token = localStorage.getItem('aios_token')
+  const url = `${API_BASE}/api/chat/download/${chatHistoryId}`
+  fetch(url, { headers: { 'Authorization': `Bearer ${token}` } })
+    .then(res => {
+      if (!res.ok) throw new Error('下载失败')
+      return res.blob()
+    })
+    .then(blob => {
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = `conversation_${chatHistoryId}.json`
+      a.click()
+      URL.revokeObjectURL(a.href)
+    })
+    .catch(() => ElMessage.error('日志文件不存在或已过期（保留7天）'))
 }
 
 // 筛选变化时重置页码
@@ -272,6 +295,9 @@ onUnmounted(() => {
                       <span v-else class="chain-status fail">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                       </span>
+                      <button v-if="req.chat_history_id" class="chain-download" @click.stop="downloadLog(req.chat_history_id)" title="下载请求体">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                      </button>
                     </div>
                     <div v-if="!req.success && req.error" class="chain-error-detail">{{ req.error }}</div>
                   </div>
@@ -570,6 +596,20 @@ onUnmounted(() => {
 .chain-ts { color: #94a3b8; font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; font-size: 11px; margin-left: auto; }
 .chain-status.ok { color: #22c55e; display: flex; align-items: center; }
 .chain-status.fail { color: #ef4444; display: flex; align-items: center; gap: 4px; }
+
+.chain-download {
+  margin-left: 4px;
+  padding: 2px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: #64748b;
+  display: flex;
+  align-items: center;
+  border-radius: 3px;
+  transition: all 0.15s;
+}
+.chain-download:hover { color: #3b82f6; background: #eff6ff; }
 
 /* Transition */
 .expand-enter-active { transition: all 0.2s ease-out; }

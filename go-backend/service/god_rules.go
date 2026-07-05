@@ -49,7 +49,7 @@ func loadGodRulesFromDB() {
 	if conn == nil {
 		return
 	}
-	rows, err := conn.Query("SELECT user_id, enabled, rules, prompt_optimize, strip_noise, compress_file, simplify_lang, compress_tool_result, compress_tools FROM sys_god_rules")
+	rows, err := conn.Query("SELECT user_id, enabled, rules, prompt_optimize, strip_noise, compress_tool_result, compress_tools FROM sys_god_rules")
 	if err != nil {
 		return
 	}
@@ -58,9 +58,9 @@ func loadGodRulesFromDB() {
 	godRulesLock.Lock()
 	defer godRulesLock.Unlock()
 	for rows.Next() {
-		var userID, enabled, promptOptimize, stripNoise, compressFile, simplifyLang, compressToolResult, compressTools int
+		var userID, enabled, promptOptimize, stripNoise, compressToolResult, compressTools int
 		var rules string
-		if err := rows.Scan(&userID, &enabled, &rules, &promptOptimize, &stripNoise, &compressFile, &simplifyLang, &compressToolResult, &compressTools); err != nil {
+		if err := rows.Scan(&userID, &enabled, &rules, &promptOptimize, &stripNoise, &compressToolResult, &compressTools); err != nil {
 			continue
 		}
 		godRulesCache[userID] = &model.GodRulesConfig{
@@ -69,8 +69,6 @@ func loadGodRulesFromDB() {
 			Rules:              rules,
 			PromptOptimize:     promptOptimize == 1,
 			StripNoise:         stripNoise == 1,
-			CompressFile:       compressFile == 1,
-			SimplifyLang:       simplifyLang == 1,
 			CompressToolResult: compressToolResult == 1,
 			CompressTools:      compressTools == 1,
 		}
@@ -89,10 +87,14 @@ func getGodRulesForUser(userID int) *model.GodRulesConfig {
 	if ok {
 		return cfg
 	}
-	// 用户未配置，返回默认（关闭状态）
+	// 用户未配置，返回默认值（精简开关默认开启，与建表 DDL DEFAULT 1 一致）
 	return &model.GodRulesConfig{
-		UserID:  userID,
-		Enabled: false,
+		UserID:             userID,
+		Enabled:            false,
+		PromptOptimize:     true,
+		StripNoise:         true,
+		CompressToolResult: true,
+		CompressTools:      true,
 	}
 }
 
@@ -119,13 +121,13 @@ func SaveGodRulesFull(cfg *model.GodRulesConfig) {
 		log.Printf("[god_rules] DB连接失败: %v", err)
 		return
 	}
-	e, po, sn, cf, sl, ctr, ct := boolToInt(cfg.Enabled), boolToInt(cfg.PromptOptimize), boolToInt(cfg.StripNoise), boolToInt(cfg.CompressFile), boolToInt(cfg.SimplifyLang), boolToInt(cfg.CompressToolResult), boolToInt(cfg.CompressTools)
-	sql := `INSERT INTO sys_god_rules (user_id, enabled, rules, prompt_optimize, strip_noise, compress_file, simplify_lang, compress_tool_result, compress_tools)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE enabled=?, rules=?, prompt_optimize=?, strip_noise=?, compress_file=?, simplify_lang=?, compress_tool_result=?, compress_tools=?`
+	e, po, sn, ctr, ct := boolToInt(cfg.Enabled), boolToInt(cfg.PromptOptimize), boolToInt(cfg.StripNoise), boolToInt(cfg.CompressToolResult), boolToInt(cfg.CompressTools)
+	sql := `INSERT INTO sys_god_rules (user_id, enabled, rules, prompt_optimize, strip_noise, compress_tool_result, compress_tools)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE enabled=?, rules=?, prompt_optimize=?, strip_noise=?, compress_tool_result=?, compress_tools=?`
 	if _, err := conn.Exec(sql,
-		cfg.UserID, e, cfg.Rules, po, sn, cf, sl, ctr, ct,
-		e, cfg.Rules, po, sn, cf, sl, ctr, ct,
+		cfg.UserID, e, cfg.Rules, po, sn, ctr, ct,
+		e, cfg.Rules, po, sn, ctr, ct,
 	); err != nil {
 		log.Printf("[god_rules] UPSERT 失败: %v", err)
 	}

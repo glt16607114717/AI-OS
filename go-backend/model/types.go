@@ -117,6 +117,7 @@ type LLMStat struct {
 	Error            string `json:"error,omitempty"`
 	SessionID        string `json:"session_id,omitempty"`
 	MsgID            string `json:"msg_id,omitempty"`
+	ChatHistoryID    int64  `json:"chat_history_id,omitempty"`
 }
 
 type RouteInfo struct {
@@ -180,8 +181,6 @@ type GodRulesConfig struct {
 	Rules              string `json:"rules"`
 	PromptOptimize     bool   `json:"prompt_optimize"`
 	StripNoise         bool   `json:"strip_noise"`
-	CompressFile       bool   `json:"compress_file"`
-	SimplifyLang       bool   `json:"simplify_lang"`
 	CompressToolResult bool   `json:"compress_tool_result"`
 	CompressTools      bool   `json:"compress_tools"`
 }
