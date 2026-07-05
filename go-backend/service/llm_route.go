@@ -484,6 +484,26 @@ func SetActiveStrategy(id string, userID int) bool {
 	return found
 }
 
+// getEnabledKeyIDs 查询所有 enabled=1 的 keyID 集合（一次查库，多次判断）
+func getEnabledKeyIDs() map[string]bool {
+	conn, err := GetDB()
+	if err != nil {
+		return nil
+	}
+	rows, err := conn.Query("SELECT id FROM sys_api_key WHERE enabled = 1")
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	m := map[string]bool{}
+	for rows.Next() {
+		var id int
+		rows.Scan(&id)
+		m[fmt.Sprintf("%d", id)] = true
+	}
+	return m
+}
+
 func GetRouteByStrategy(userID int) *model.RouteInfo {
 	strategies := loadStrategiesFromDB(userID, false)
 
@@ -498,6 +518,9 @@ func GetRouteByStrategy(userID int) *model.RouteInfo {
 		return nil
 	}
 
+	// 预查 enabled key 列表，禁用的 key 一开始就不参与轮询
+	enabledKeys := getEnabledKeyIDs()
+
 	var selected *model.StrategyOption
 	if active.Type == "round_robin" || active.Type == "system" {
 		total := len(active.Options)
@@ -506,14 +529,19 @@ func GetRouteByStrategy(userID int) *model.RouteInfo {
 			// 按用户独立计数，严格按定义顺序轮询 A→B→C→A→B→C
 			idx := int(atomic.AddInt64(userCounter, 1)-1) % total
 			opt := active.Options[idx]
-			if !IsKeyExhausted(opt.KeyID) {
+			// 跳过：额度耗尽 或 key 已禁用
+			if !IsKeyExhausted(opt.KeyID) && enabledKeys[opt.KeyID] {
 				s := opt
 				selected = &s
 				break
 			}
 		}
 	} else {
+		// fixed 策略：如果第一个 key 被禁用，直接返回 nil（交由故障转移处理）
 		selected = &active.Options[0]
+		if !enabledKeys[selected.KeyID] {
+			selected = nil
+		}
 	}
 	if selected == nil {
 		return nil
@@ -543,9 +571,10 @@ func GetAllRoutesForFailover(userID int) []model.RouteInfo {
 	}
 
 	// 收集所有可用模型
+	enabledKeys := getEnabledKeyIDs()
 	var available []model.StrategyOption
 	for _, opt := range active.Options {
-		if IsKeyExhausted(opt.KeyID) {
+		if IsKeyExhausted(opt.KeyID) || !enabledKeys[opt.KeyID] {
 			continue
 		}
 		available = append(available, opt)
