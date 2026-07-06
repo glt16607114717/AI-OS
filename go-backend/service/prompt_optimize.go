@@ -12,11 +12,12 @@ import (
 // 作用：在 injectGodRulesAndRAG 内、转发给大模型之前调用。
 // 只改发往 LLM 的 messages，不改原始留存（conversation_*.json 仍是完整 dump）。
 //
-// 三刀：
+// 四刀：
 //   1) stripNoise        - 历史轮 user 消息里删除 path/terminal/lang 三类 system-reminder，
 //                          保留 other 类（首轮 rules/LS/skill 等）和 user_input 真实内容
-//   2) compressToolResult - 5 轮之前的 tool 结果超 200 字符截断
-//   3) compressTools      - 精简 tools 数组中 RunCommand/Task 的冗长描述
+//   2) stripHooksContext  - 所有消息（含最新轮）删除 hooks_context 块（Trae IDE hook 事件壳子）
+//   3) compressToolResult - 5 轮之前的 tool 结果超 200 字符截断
+//   4) compressTools      - 精简 tools 数组中 RunCommand/Task 的冗长描述
 
 // 预编译正则
 var (
@@ -24,6 +25,8 @@ var (
 	reSysReminder = regexp.MustCompile(`(?s)\s*<system-reminder>.*?</system-reminder>\s*`)
 	// 孤立标签残片
 	reOrphanReminder = regexp.MustCompile(`</?system-reminder>`)
+	// hooks_context 块（Trae IDE hook 事件壳子，纯噪音，所有消息通用）
+	reHooksContext = regexp.MustCompile(`(?s)\s*<hooks_context[^>]*>.*?(?:</hooks_context>|</hooks)\s*`)
 )
 
 // OptimizeMessages 对发往 LLM 的 messages 做噪音清理（按用户配置，默认全开）
@@ -57,9 +60,9 @@ func OptimizeMessages(messages []map[string]interface{}, cfg *model.GodRulesConf
 			result[i] = msg
 
 		case "user":
-			// 最新轮 user 消息完全不动；历史轮清理三类噪音
 			if isLatestUser(messages, i) {
-				result[i] = msg
+				// 最新轮：只清 hooks_context，保留 system-reminder（文件/终端上下文有用）
+				result[i] = stripHooksFromUserMsg(msg)
 			} else {
 				if cfg.StripNoise {
 					result[i] = optimizeHistoryUserMsg(msg)
@@ -74,16 +77,18 @@ func OptimizeMessages(messages []map[string]interface{}, cfg *model.GodRulesConf
 			}
 
 		case "tool":
-			// 5 轮之前的 tool 结果，超 200 字符截断
+			// 先清 hooks_context，再按轮次截断（system-reminder/toolcall_status 等保留）
 			content := StringifyContent(msg["content"])
+			if cfg.StripNoise {
+				content = stripHooksContext(content)
+			}
 			if cfg.CompressToolResult && i < keepFromIdx && len(content) > 200 {
-				result[i] = map[string]interface{}{
-					"role":         "tool",
-					"content":      content[:200] + "\n[...结果已截断，如需完整内容请重新执行该工具]",
-					"tool_call_id": msg["tool_call_id"],
-				}
-			} else {
-				result[i] = msg
+				content = content[:200] + "\n[...结果已截断，如需完整内容请重新执行该工具]"
+			}
+			result[i] = map[string]interface{}{
+				"role":         "tool",
+				"content":      content,
+				"tool_call_id": msg["tool_call_id"],
 			}
 
 		default:
@@ -107,7 +112,7 @@ func isLatestUser(messages []map[string]interface{}, idx int) bool {
 }
 
 // optimizeHistoryUserMsg 清理历史轮 user 消息：
-// 删除 path/terminal/lang 三类 system-reminder，保留 other 类和 user_input
+// 删除 path/terminal/lang 三类 system-reminder + hooks_context，保留 other 类和 user_input
 func optimizeHistoryUserMsg(msg map[string]interface{}) map[string]interface{} {
 	origContent := msg["content"]
 
@@ -124,6 +129,7 @@ func optimizeHistoryUserMsg(msg map[string]interface{}) map[string]interface{} {
 			if t == "text" {
 				text, _ := m["text"].(string)
 				cleaned := stripNoiseReminders(text)
+				cleaned = stripHooksContext(cleaned)
 				if cleaned != "" {
 					newArr = append(newArr, map[string]interface{}{
 						"type": "text",
@@ -143,9 +149,11 @@ func optimizeHistoryUserMsg(msg map[string]interface{}) map[string]interface{} {
 
 	// string 格式：直接清理
 	if s, ok := origContent.(string); ok {
+		cleaned := stripNoiseReminders(s)
+		cleaned = stripHooksContext(cleaned)
 		return map[string]interface{}{
 			"role":    "user",
-			"content": stripNoiseReminders(s),
+			"content": cleaned,
 		}
 	}
 
@@ -173,6 +181,47 @@ func stripNoiseReminders(content string) string {
 	})
 	content = reOrphanReminder.ReplaceAllString(content, "")
 	return strings.TrimSpace(content)
+}
+
+// stripHooksFromUserMsg 清理 user 消息中的 hooks_context（最新轮用）
+func stripHooksFromUserMsg(msg map[string]interface{}) map[string]interface{} {
+	origContent := msg["content"]
+
+	if arr, ok := origContent.([]interface{}); ok {
+		newArr := make([]interface{}, 0, len(arr))
+		for _, item := range arr {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				newArr = append(newArr, item)
+				continue
+			}
+			t, _ := m["type"].(string)
+			if t == "text" {
+				text, _ := m["text"].(string)
+				cleaned := stripHooksContext(text)
+				if cleaned != "" {
+					newArr = append(newArr, map[string]interface{}{
+						"type": "text",
+						"text": cleaned,
+					})
+				}
+			} else {
+				newArr = append(newArr, item)
+			}
+		}
+		return map[string]interface{}{"role": "user", "content": newArr}
+	}
+
+	if s, ok := origContent.(string); ok {
+		return map[string]interface{}{"role": "user", "content": stripHooksContext(s)}
+	}
+
+	return msg
+}
+
+// stripHooksContext 删除 hooks_context 块（所有消息通用）
+func stripHooksContext(content string) string {
+	return strings.TrimSpace(reHooksContext.ReplaceAllString(content, ""))
 }
 
 // ── 第3刀：精简工具定义 ──
