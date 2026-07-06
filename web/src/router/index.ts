@@ -50,11 +50,6 @@ const router = createRouter({
           component: () => import('../views/llm/GodRules.vue'),
         },
         {
-          path: 'llm/prompt-optimize',
-          name: 'LlmPromptOptimize',
-          component: () => import('../views/llm/PromptOptimize.vue'),
-        },
-        {
           path: 'llm/log',
           name: 'LlmLog',
           component: () => import('../views/llm/LlmLog.vue'),

@@ -101,57 +101,58 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 注入上帝指令 + RAG
 	injectGodRulesAndRAG(req, userMsgRaw, userID, username)
 
-	// 提示词精简（仅代理路径：清理编辑器注入的 system-reminder、语言要求、冗长工具描述等噪音）
-	// 工作台场景没有这些编辑器噪音，不需要精简
-	// 每个开关独立判断，无总开关，与上帝指令(Enabled)完全无关
-	optimizeCfg := service.GetGodRules(userID)
-	if optimizeCfg != nil {
-		// 处理两种可能的类型：injectGodRulesAndRAG 后是 []map[string]interface{}
-		var msgMaps []map[string]interface{}
-		switch v := req["messages"].(type) {
-		case []map[string]interface{}:
-			msgMaps = v
-		case []interface{}:
-			msgMaps = make([]map[string]interface{}, len(v))
-			for i, m := range v {
-				msgMaps[i], _ = m.(map[string]interface{})
-			}
-		default:
-			log.Printf("[DEBUG:Optimize] messages type mismatch: %T", req["messages"])
+	// 提示词精简（强制开启，不需要用户配置）
+	// 工作台场景没有编辑器噪音，不需要精简
+	optimizeCfg := &model.GodRulesConfig{
+		StripNoise:         true,
+		CompressToolResult: true,
+		CompressTools:      true,
+	}
+	// 处理两种可能的类型：injectGodRulesAndRAG 后是 []map[string]interface{}
+	var msgMaps []map[string]interface{}
+	switch v := req["messages"].(type) {
+	case []map[string]interface{}:
+		msgMaps = v
+	case []interface{}:
+		msgMaps = make([]map[string]interface{}, len(v))
+		for i, m := range v {
+			msgMaps[i], _ = m.(map[string]interface{})
 		}
-		if len(msgMaps) > 0 {
-			// DEBUG: dump 优化前的原始 messages（仅历史 user 消息，用于对比）
-			for i, m := range msgMaps {
-				if role, _ := m["role"].(string); role == "user" && i < len(msgMaps)-1 {
-					c := service.StringifyContent(m["content"])
-					if len(c) > 200 {
-						preview := c
-						if len(preview) > 1500 {
-							preview = preview[:1500]
-						}
-						log.Printf("[DEBUG:Optimize-BEFORE] msg[%d] user len=%d content=%q", i, len(c), preview)
-					}
-				}
-			}
-			before := len(msgMaps)
-			msgMaps = service.OptimizeMessages(msgMaps, optimizeCfg)
-			// DEBUG: dump 优化后
-			for i, m := range msgMaps {
-				if role, _ := m["role"].(string); role == "user" && i < len(msgMaps)-1 {
-					c := service.StringifyContent(m["content"])
+	default:
+		log.Printf("[DEBUG:Optimize] messages type mismatch: %T", req["messages"])
+	}
+	if len(msgMaps) > 0 {
+		// DEBUG: dump 优化前的原始 messages（仅历史 user 消息，用于对比）
+		for i, m := range msgMaps {
+			if role, _ := m["role"].(string); role == "user" && i < len(msgMaps)-1 {
+				c := service.StringifyContent(m["content"])
+				if len(c) > 200 {
 					preview := c
-					if len(preview) > 200 {
-						preview = preview[:200]
+					if len(preview) > 1500 {
+						preview = preview[:1500]
 					}
-					log.Printf("[DEBUG:Optimize-AFTER]  msg[%d] user len=%d preview=%q", i, len(c), preview)
+					log.Printf("[DEBUG:Optimize-BEFORE] msg[%d] user len=%d content=%q", i, len(c), preview)
 				}
 			}
-			log.Printf("[DEBUG:Optimize] messages %d -> %d, StripNoise=%v", before, len(msgMaps), optimizeCfg.StripNoise)
-			req["messages"] = msgMaps
 		}
-		if tools, ok := req["tools"].([]interface{}); ok && len(tools) > 0 {
-			req["tools"] = service.OptimizeTools(tools, optimizeCfg)
+		before := len(msgMaps)
+		msgMaps = service.OptimizeMessages(msgMaps, optimizeCfg)
+		// DEBUG: dump 优化后
+		for i, m := range msgMaps {
+			if role, _ := m["role"].(string); role == "user" && i < len(msgMaps)-1 {
+				c := service.StringifyContent(m["content"])
+				preview := c
+				if len(preview) > 200 {
+					preview = preview[:200]
+				}
+				log.Printf("[DEBUG:Optimize-AFTER]  msg[%d] user len=%d preview=%q", i, len(c), preview)
+			}
 		}
+		log.Printf("[DEBUG:Optimize] messages %d -> %d, StripNoise=%v", before, len(msgMaps), optimizeCfg.StripNoise)
+		req["messages"] = msgMaps
+	}
+	if tools, ok := req["tools"].([]interface{}); ok && len(tools) > 0 {
+		req["tools"] = service.OptimizeTools(tools, optimizeCfg)
 	}
 
 	// 流式判断
