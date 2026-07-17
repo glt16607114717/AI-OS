@@ -34,8 +34,8 @@ func DumpRequest(body map[string]interface{}) {
 	// 写入文件
 	os.WriteFile(filepath, data, 0644)
 
-	// 清理旧文件（只保留最近20个）
-	cleanupDumpFilesIn(DUMP_DIR, 20)
+	// 清理旧文件（只保留最近200个，避免活跃对话期间小请求 dump 被挤掉）
+	cleanupDumpFilesIn(DUMP_DIR, 200)
 }
 
 // DumpRawRequest 将原始请求体（加工前）转储到文件系统，用于分析 Trae 注入的噪音
@@ -50,7 +50,7 @@ func DumpRawRequest(body map[string]interface{}) {
 		return
 	}
 	os.WriteFile(filepath, data, 0644)
-	cleanupDumpFilesIn(RAW_DUMP_DIR, 20)
+	cleanupDumpFilesIn(RAW_DUMP_DIR, 200)
 }
 
 // cleanupDumpFilesIn 清理指定目录的旧转储文件，只保留最近的 N 个

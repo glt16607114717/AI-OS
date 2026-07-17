@@ -64,10 +64,12 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 		convCtx.Models = appendUnique(convCtx.Models, route.ModelID)
 		convCtx.KeyNames = appendUnique(convCtx.KeyNames, route.KeyName)
 
-		// 构造请求（始终非流式）
+		// 构造请求（始终非流式）：显式 stream=false，避免依赖上游默认值
+		// （某些 OpenAI 兼容上游默认走流式，会返回 data:{...} 导致客户端 JSON 解析失败）
 		llmReq := map[string]interface{}{
 			"model":    route.ModelID,
 			"messages": messages,
+			"stream":   false,
 		}
 		if len(tools) > 0 {
 			llmReq["tools"] = tools

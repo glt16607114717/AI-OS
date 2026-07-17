@@ -44,6 +44,7 @@ func main() {
 	service.EnsureSuggestionTable()
 	service.EnsureDistillTable()
 	service.EnsureChatTable()
+	handler.EnsurePrankTable()
 
 	// 启动额度监控
 	service.StartQuotaMonitor()
@@ -160,6 +161,9 @@ func main() {
 
 		// 退出
 		r.Post("/api/logout", handler.Logout)
+
+		// 需求管理（普通用户查看自己的需求）
+		r.Get("/api/requirements/my", handler.GetMyRequirements)
 	})
 
 	// ── 需要管理员 ──
@@ -185,6 +189,18 @@ func main() {
 		r.Delete("/api/skills/{code}/connection/{id}", handler.DeleteSkillConnection)
 		r.Get("/api/skills/{code}/permissions", handler.GetSkillPermissions)
 		r.Post("/api/skills/{code}/permission", handler.SetSkillPermission)
+
+		// 逗你玩（管理员恶搞）
+		r.Get("/api/prank/list", handler.GetPrankList)
+		r.Post("/api/prank/save", handler.SavePrank)
+		r.Delete("/api/prank/delete", handler.DeletePrank)
+
+		// 需求管理（管理员）
+		r.Get("/api/requirements/all", handler.GetAllRequirementsAdmin)
+		r.Post("/api/requirements/update-status", handler.UpdateRequirementStatus)
+
+		// 用户类型切换（管理员）
+		r.Post("/api/users/toggle-user-type", handler.ToggleUserType)
 	})
 
 	// 启动

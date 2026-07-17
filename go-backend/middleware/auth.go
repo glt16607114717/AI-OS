@@ -100,7 +100,7 @@ func CheckPassword(password, hash string) bool {
 }
 
 // CreateSession 创建会话，单点互踢，持久化到 Redis
-func CreateSession(userID int, username string, isAdmin bool) string {
+func CreateSession(userID int, username string, isAdmin bool, userType string) string {
 	token := generateToken()
 	now := time.Now()
 	expire := now.Add(30 * 24 * time.Hour)
@@ -109,6 +109,7 @@ func CreateSession(userID int, username string, isAdmin bool) string {
 		UserID:   userID,
 		Username: username,
 		IsAdmin:  isAdmin,
+		UserType: userType,
 		Expire:   expire,
 	}
 

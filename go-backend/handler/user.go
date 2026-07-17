@@ -68,11 +68,12 @@ func CreateUser(w http.ResponseWriter, r *http.Request) {
 	username, _ := body["username"].(string)
 	password, _ := body["password"].(string)
 	isAdmin, _ := body["is_admin"].(bool)
+	userType, _ := body["user_type"].(string)
 	if username == "" || password == "" {
 		errResponse(w, "用户名和密码不能为空", 400)
 		return
 	}
-	result, err := service.CreateUser(username, password, isAdmin)
+	result, err := service.CreateUser(username, password, isAdmin, userType)
 	if err != nil {
 		errResponse(w, err.Error(), 400)
 		return
@@ -139,4 +140,20 @@ func DeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	okResponse(w, "用户已删除")
+}
+
+func ToggleUserType(w http.ResponseWriter, r *http.Request) {
+	var body map[string]interface{}
+	json.NewDecoder(r.Body).Decode(&body)
+	id := intFloat(body["id"])
+	userType, _ := body["user_type"].(string)
+	if userType != "developer" && userType != "business" {
+		errResponse(w, "user_type 参数无效（developer/business）", 400)
+		return
+	}
+	if err := service.ToggleUserType(id, userType); err != nil {
+		errResponse(w, err.Error(), 500)
+		return
+	}
+	okResponse(w, "用户类型已更新")
 }

@@ -91,6 +91,7 @@ type User struct {
 	Password  string `json:"-"`
 	Status    int    `json:"status"`
 	IsAdmin   bool   `json:"is_admin"`
+	UserType  string `json:"user_type"` // developer（走代理链路）/ business（只走工作台）
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
 }
@@ -99,6 +100,7 @@ type Session struct {
 	UserID   int       `json:"user_id"`
 	Username string    `json:"username"`
 	IsAdmin  bool      `json:"is_admin"`
+	UserType string    `json:"user_type"`
 	Expire   time.Time `json:"expire"`
 }
 

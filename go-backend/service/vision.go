@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -173,10 +174,20 @@ func ProcessImages(messages []map[string]interface{}, userID int, username strin
 			continue
 		}
 
-		// 处理这条消息中的 image_url
+		// 处理这条消息中的 image_url（并发识别）
 		var descriptions []string
 		imageCount := 0
 		newContent := make([]interface{}, 0, len(content))
+
+		// 第一遍：扫描所有 image_url，检查缓存，收集需要调 API 的
+		type imgTask struct {
+			url      string
+			idx      int // 在描述列表中的序号
+			cached   string
+			needCall bool
+		}
+		var tasks []imgTask
+		descSlots := []string{} // 预分配描述槽位
 
 		for _, item := range content {
 			m, ok := item.(map[string]interface{})
@@ -196,49 +207,30 @@ func ProcessImages(messages []map[string]interface{}, userID int, username strin
 					continue
 				}
 
-				// 检查缓存：同一张图片只识别一次
+				idx := len(descSlots)
+				descSlots = append(descSlots, "") // 预占位
+
+				// 检查请求内缓存
 				if cachedDesc, exists := urlCache[url]; exists {
 					imageCount++
-					if cachedDesc != "" {
-						descriptions = append(descriptions, fmt.Sprintf("[图片 %d 内容：%s]", totalImages+imageCount, cachedDesc))
-					} else {
-						descriptions = append(descriptions, fmt.Sprintf("[图片 %d：识别失败]", totalImages+imageCount))
-					}
-					continue // 不保留 image_url 项
+					task := imgTask{url: url, idx: idx, cached: cachedDesc, needCall: false}
+					tasks = append(tasks, task)
+					continue
 				}
 
-				// 查 Redis 全局缓存（24 小时内同一张图不重复识别）
+				// 检查 Redis 全局缓存
 				redisKey := imageCacheKey(url)
 				if cachedDesc, found := getCachedImage(redisKey); found {
 					urlCache[url] = cachedDesc
 					imageCount++
-					if cachedDesc != "" {
-						descriptions = append(descriptions, fmt.Sprintf("[图片 %d 内容：%s]", totalImages+imageCount, cachedDesc))
-					} else {
-						descriptions = append(descriptions, fmt.Sprintf("[图片 %d：识别失败]", totalImages+imageCount))
-					}
-					continue // 不保留 image_url 项，不记录日志（避免重复）
+					tasks = append(tasks, imgTask{url: url, idx: idx, cached: cachedDesc, needCall: false})
+					continue
 				}
 
-				urlCache[url] = "" // 标记已处理（即使失败也不重试）
-				desc, err := RecognizeImage(userID, username, url, "")
-				imageSize := len(url)
-				if err != nil {
-					LogVisionRecognize(userID, username, url, imageSize, "", "", visionModelID, false, err.Error())
-					imageCount++
-					descriptions = append(descriptions, fmt.Sprintf("[图片 %d：识别失败]", totalImages+imageCount))
-				} else if desc != "" {
-					urlCache[url] = desc
-					setCachedImage(redisKey, desc) // 写入 Redis 缓存
-					LogVisionRecognize(userID, username, url, imageSize, "", desc, visionModelID, true, "")
-					imageCount++
-					descriptions = append(descriptions, fmt.Sprintf("[图片 %d 内容：%s]", totalImages+imageCount, desc))
-				} else {
-					LogVisionRecognize(userID, username, url, imageSize, "", "", visionModelID, false, "返回空结果")
-					imageCount++
-					descriptions = append(descriptions, fmt.Sprintf("[图片 %d：识别失败]", totalImages+imageCount))
-				}
-				continue // 不保留 image_url 项
+				urlCache[url] = "" // 标记已处理
+				imageCount++
+				tasks = append(tasks, imgTask{url: url, idx: idx, needCall: true})
+				continue
 			}
 
 			newContent = append(newContent, item)
@@ -247,6 +239,43 @@ func ProcessImages(messages []map[string]interface{}, userID int, username strin
 		if imageCount == 0 {
 			continue
 		}
+
+		// 第二遍：并发调用 API 识别需要识别的图片
+		var wg sync.WaitGroup
+		for i := range tasks {
+			if !tasks[i].needCall {
+				continue
+			}
+			wg.Add(1)
+			go func(task *imgTask) {
+				defer wg.Done()
+				desc, err := RecognizeImage(userID, username, task.url, "")
+				imageSize := len(task.url)
+				if err != nil {
+					LogVisionRecognize(userID, username, task.url, imageSize, "", "", visionModelID, false, err.Error())
+					task.cached = ""
+				} else if desc != "" {
+					task.cached = desc
+					setCachedImage(imageCacheKey(task.url), desc)
+					LogVisionRecognize(userID, username, task.url, imageSize, "", desc, visionModelID, true, "")
+				} else {
+					LogVisionRecognize(userID, username, task.url, imageSize, "", "", visionModelID, false, "返回空结果")
+					task.cached = ""
+				}
+			}(&tasks[i])
+		}
+		wg.Wait()
+
+		// 第三遍：按顺序填充描述
+		for _, task := range tasks {
+			globalIdx := totalImages + task.idx + 1
+			if task.cached != "" {
+				descSlots[task.idx] = fmt.Sprintf("[图片 %d 内容：%s]", globalIdx, task.cached)
+			} else {
+				descSlots[task.idx] = fmt.Sprintf("[图片 %d：识别失败]", globalIdx)
+			}
+		}
+		descriptions = descSlots
 
 		// 把图片描述追加到这条 user message
 		appendText := "\n\n[系统已通过视觉模型识别了以下图片内容，这就是你看到的图片，请基于此内容回答，不要说自己无法查看图片：]\n" + strings.Join(descriptions, "\n")

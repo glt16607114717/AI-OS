@@ -90,9 +90,24 @@ const router = createRouter({
           component: () => import('../views/system/AccountSettings.vue'),
         },
         {
+          path: 'system/prank',
+          name: 'Prank',
+          component: () => import('../views/llm/Prank.vue'),
+        },
+        {
           path: 'skills/mysql_query',
           name: 'MySQLQuerySettings',
           component: () => import('../views/skills/MySQLQuerySettings.vue'),
+        },
+        {
+          path: 'requirements/my',
+          name: 'MyRequirements',
+          component: () => import('../views/requirements/MyRequirements.vue'),
+        },
+        {
+          path: 'requirements/inbox',
+          name: 'RequirementInbox',
+          component: () => import('../views/requirements/RequirementInbox.vue'),
         },
       ],
     },
@@ -109,11 +124,15 @@ router.beforeEach(async (to) => {
           headers: { Authorization: `Bearer ${token}` },
         })
         const data = await res.json()
+        if (data.ok && data.data) {
+          localStorage.setItem('aios_user_type', data.data.user_type || '')
+        }
         if (data.ok) {
           return '/workspace'
         } else {
           console.warn('[Router] Token 验证失败:', data.error)
           localStorage.removeItem('aios_token')
+          localStorage.removeItem('aios_user_type')
         }
       } catch (e: any) {
         console.error('[Router] Token 验证异常:', e)
@@ -136,11 +155,24 @@ router.beforeEach(async (to) => {
     if (!data.ok) {
       console.warn('[Router] Token 已失效，跳转到登录页:', data.error)
       localStorage.removeItem('aios_token')
+      localStorage.removeItem('aios_user_type')
       return '/login'
+    }
+    if (data.data) {
+      localStorage.setItem('aios_user_type', data.data.user_type || '')
     }
   } catch (e: any) {
     console.error('[Router] 验证 token 时发生错误:', e)
     return '/login'
+  }
+
+  // business 用户只能访问工作台和我的需求
+  const userType = localStorage.getItem('aios_user_type')
+  if (userType === 'business') {
+    const allowedPaths = ['/workspace', '/requirements/my', '/login']
+    if (!allowedPaths.some(p => to.path.startsWith(p))) {
+      return '/workspace'
+    }
   }
 
   return true

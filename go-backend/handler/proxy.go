@@ -15,14 +15,14 @@ import (
 
 // sseIdleTimeout SSE 流中两个 chunk 之间的最大空闲时间
 // 超过此时间无新 chunk 输出，视为上游卡死，切换到下一个模型
-const sseIdleTimeout = 60 * time.Second
+const sseIdleTimeout = 40 * time.Second
 
 // ── 代理通道：纯透传（无工具时走这里，真流式零延迟）──
 
 // proxyForward 纯透明代理
 // 流式：SSE 逐行 pipe，带 60s 空闲超时 + 自动故障转移
 // 非流式：JSON 透传
-func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []*service.RouteInfoType, convCtx *ConversationContext) {
+func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interface{}, attempts []*service.RouteInfoType, convCtx *ConversationContext) {
 	userID := convCtx.UserID
 	username := convCtx.Username
 	startTime := convCtx.StartTime
@@ -49,13 +49,9 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 			go service.SaveConversationLogWithUser(chatID, userID, username, req, content, route.ModelID, route.VendorID,
 				convCtx.TotalPrompt, convCtx.TotalCompletion, 0, latency)
 		}
-		for k, v := range result.Header {
-			if k != "Content-Length" {
-				for _, vv := range v {
-					w.Header().Add(k, vv)
-				}
-			}
-		}
+		// 非流式响应：主动声明 application/json，不再裸透传上游 Header
+		// （避免上游可能的 text/event-stream 污染客户端解析）
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(result.StatusCode)
 		w.Write(result.Body)
 		log.Printf("[proxy] normal %s user=%s latency=%dms",
@@ -74,10 +70,6 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 	failedKeys := make(map[string]bool)
 	var finalRoute *service.RouteInfoType
 	switched := false // 是否发生过模型切换
-
-	// keepalive 心跳：每 15 秒发送空 SSE 事件，防止 NAT/路由器/运营商超时断连
-	keepaliveTicker := time.NewTicker(15 * time.Second)
-	defer keepaliveTicker.Stop()
 
 	for idx, route := range attempts {
 		if failedKeys[route.KeyID] {
@@ -157,49 +149,44 @@ func proxyForward(w http.ResponseWriter, req map[string]interface{}, attempts []
 			}
 		}
 
-		// SSE 读取循环（带空闲超时 + keepalive 心跳）
+		// SSE 读取循环（带空闲超时）
 		reader := bufio.NewReaderSize(resp.Body, 64*1024)
 		done := false
 		streamFailed := false
-		// hasContent removed: use totalContent.Len() instead
-		hasToolCalls := false    // 模型是否请求了工具调用
-		reasoningChars := 0     // reasoning_content 总字符数（调试用）
-		chunkCount := 0         // SSE chunk 计数（调试用）
+		hasToolCalls := false
+		reasoningChars := 0
+		chunkCount := 0
+
+		type readResult struct {
+			line []byte
+			err  error
+		}
+		lineCh := make(chan readResult, 1)
+		go func() {
+			defer close(lineCh)
+			for {
+				line, err := reader.ReadBytes('\n')
+				lineCh <- readResult{line, err}
+				if err != nil {
+					return
+				}
+			}
+		}()
 
 		for !done && !streamFailed {
-			// 空闲超时：用 goroutine + channel 实现
-			type readResult struct {
-				line []byte
-				err  error
-			}
-			readCh := make(chan readResult, 1)
-			go func() {
-				line, err := reader.ReadBytes('\n')
-				readCh <- readResult{line, err}
-			}()
-
 			var rr readResult
 			select {
-			case rr = <-readCh:
-				// 正常收到数据
-			case <-keepaliveTicker.C:
-				// 空心跳包，保持 TCP 连接活跃
-				fmt.Fprintf(w, "data: {}\n\n")
-				if flusher != nil {
-					flusher.Flush()
-				}
-				continue
+			case rr = <-lineCh:
 			case <-time.After(sseIdleTimeout):
-				// 60 秒无输出 → 判定卡死
-				log.Printf("[proxy] stream %s user=%s SSE_IDLE_TIMEOUT: 60s 无输出，切换模型", route.ModelID, username)
+				log.Printf("[proxy] stream %s user=%s SSE_IDLE_TIMEOUT: %v 无输出，切换模型", route.ModelID, username, sseIdleTimeout)
 				service.RecordStat(&service.LLMStatType{
 					UserID: userID, Username: username,
 					VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 					SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 					LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false,
-					Error: fmt.Sprintf("SSE 流 60s 无输出，判定卡死"),
+					Error: fmt.Sprintf("SSE 流 %v 无输出，判定卡死", sseIdleTimeout),
 				})
-				convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s SSE 流 60s 无输出，判定卡死", route.VendorName))
+				convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s SSE 流 %v 无输出，判定卡死", route.VendorName, sseIdleTimeout))
 				failedKeys[route.KeyID] = true
 				switched = true
 				streamFailed = true

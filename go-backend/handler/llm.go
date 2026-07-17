@@ -80,6 +80,19 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 	userID, username := sessionUser(session)
 	isAdmin := session != nil && session.IsAdmin
 
+	// 业务用户不允许走代理链路（仅限工作台）
+	if session != nil && session.UserType == "business" {
+		errResponse(w, "业务用户无权使用代理通道", 403)
+		return
+	}
+
+	// 逗你玩拦截：检查该用户是否被配置了恶搞
+	if prankText, prankActive := CheckPrankActive(userID); prankActive {
+		log.Printf("[prank] 用户 %s(%d) 命中逗你玩，开始 SSE 模拟", username, userID)
+		HandlePrankSSE(w, r, prankText)
+		return
+	}
+
 	// 解析请求
 	req, ok := parseRequestBody(w, r)
 	if !ok {
@@ -97,6 +110,9 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if cleanedMsg := extractUserQuery(userMsgRaw); cleanedMsg != "" {
 		service.AddChatMessage(userID, "user", cleanedMsg, sessionID, msgId)
 	}
+
+	// 注入角色定位（工作台专属，在上帝指令和 RAG 之前）
+	injectWorkspaceRole(req, session)
 
 	// 注入上帝指令 + RAG
 	injectGodRulesAndRAG(req, userMsgRaw, userID, username)
@@ -189,7 +205,7 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 	attempts := buildFailoverAttempts(route, userID)
 
 	log.Printf("[proxy] user=%s stream=%v model=%s", username, isStream, req["model"])
-	proxyForward(w, req, attempts, convCtx)
+	proxyForward(w, r, req, attempts, convCtx)
 }
 
 // WorkspaceChat 工作台聊天入口
@@ -199,6 +215,13 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 	session := middleware.GetSessionFromCtx(r)
 	userID, username := sessionUser(session)
 	isAdmin := session != nil && session.IsAdmin
+
+	// 逗你玩拦截：检查该用户是否被配置了恶搞
+	if prankText, prankActive := CheckPrankActive(userID); prankActive {
+		log.Printf("[prank] 用户 %s(%d) 命中逗你玩，开始 SSE 模拟", username, userID)
+		HandlePrankSSE(w, r, prankText)
+		return
+	}
 
 	// 解析请求
 	req, ok := parseRequestBody(w, r)
@@ -262,7 +285,7 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 		agentLoop(w, req, attempts, convCtx)
 	} else {
 		log.Printf("[workspace] user=%s no_tools model=%s → proxy", username, req["model"])
-		proxyForward(w, req, attempts, convCtx)
+		proxyForward(w, r, req, attempts, convCtx)
 	}
 }
 
@@ -286,11 +309,16 @@ func parseRequestBody(w http.ResponseWriter, r *http.Request) (map[string]interf
 	return req, true
 }
 
-// extractLastUserMessage 提取最后一条 user 消息的原始内容和摘要
-// extractAndStripTrace 从最后一条 user 消息中提取 [TRACE:session=xxx][TRACE:msg=xxx] 标记，
+// extractAndStripTrace 从 messages 数组中提取 [TRACE:session=xxx][TRACE:msg=xxx] 标记，
 // 剥离后返回 sessionID/msgId，并将消息内容替换为干净版本。
 // 没有标记时安全跳过（其他用户无 hook 也能正常工作）。
-// 注意：如果 content 是数组（含 image_url），只在 text 项中剥离 trace，保留 image_url 项。
+//
+// 兼容两种客户端注入方式：
+//   - Trae：trace 直接追加在最后一条 role=user 消息的 content 末尾（纯文本）
+//   - ZCode：trace 包裹在 <hooks_context><additional_context> XML 标签中，注入到 role=tool 消息里
+//
+// 因此从后往前遍历所有消息（不限 role），找到第一个含 trace 的消息即返回。
+// 数组格式（含 image_url）时检查所有 text 字段，不限 type。
 func extractAndStripTrace(req map[string]interface{}) (sessionID, msgId string) {
 	messages, ok := req["messages"].([]interface{})
 	if !ok {
@@ -301,43 +329,38 @@ func extractAndStripTrace(req map[string]interface{}) (sessionID, msgId string) 
 		if !ok {
 			continue
 		}
-		if role, _ := msg["role"].(string); role == "user" {
-			content := msg["content"]
-			switch v := content.(type) {
-			case string:
-				sID, mID, cleaned := extractTraceMarkers(v)
-				if sID != "" {
-					msg["content"] = strings.TrimSpace(cleaned)
-				}
-				return sID, mID
-			case []interface{}:
-				// 数组格式（含 image_url）：只在 text 项中剥离 trace，保留 image_url
-				var sID, mID string
-				var cleanedArr []interface{}
-				for _, item := range v {
-					m, ok := item.(map[string]interface{})
-					if !ok {
-						cleanedArr = append(cleanedArr, item)
-						continue
-					}
-					if t, _ := m["type"].(string); t == "text" {
-						if txt, ok := m["text"].(string); ok {
-							csID, cmID, cleaned := extractTraceMarkers(txt)
-							if csID != "" {
-								sID = csID
-								mID = cmID
-								m["text"] = strings.TrimSpace(cleaned)
-							}
-						}
-					}
-					cleanedArr = append(cleanedArr, item)
-				}
-				if sID != "" {
-					msg["content"] = cleanedArr
-				}
+		content := msg["content"]
+		switch v := content.(type) {
+		case string:
+			sID, mID, cleaned := extractTraceMarkers(v)
+			if sID != "" {
+				msg["content"] = strings.TrimSpace(cleaned)
 				return sID, mID
 			}
-			return "", ""
+		case []interface{}:
+			// 数组格式（含 image_url）：在 text 项中查找并剥离 trace
+			var sID, mID string
+			var cleanedArr []interface{}
+			for _, item := range v {
+				m, ok := item.(map[string]interface{})
+				if !ok {
+					cleanedArr = append(cleanedArr, item)
+					continue
+				}
+				if txt, ok := m["text"].(string); ok {
+					csID, cmID, cleaned := extractTraceMarkers(txt)
+					if csID != "" {
+						sID = csID
+						mID = cmID
+						m["text"] = strings.TrimSpace(cleaned)
+					}
+				}
+				cleanedArr = append(cleanedArr, item)
+			}
+			if sID != "" {
+				msg["content"] = cleanedArr
+				return sID, mID
+			}
 		}
 	}
 	return "", ""
@@ -402,6 +425,46 @@ func extractLastUserMessage(req map[string]interface{}) (string, string) {
 		summary = summary[:200]
 	}
 	return userMsgRaw, summary
+}
+
+// injectWorkspaceRole 在 messages 最前方注入工作台角色定位 system prompt
+// 类似 IDE 拼接提示词的方式，告诉大模型当前的角色定位和服务边界
+func injectWorkspaceRole(req map[string]interface{}, session *model.Session) {
+	messages, ok := req["messages"].([]interface{})
+	if !ok || len(messages) == 0 {
+		return
+	}
+
+	// 角色定位 prompt
+	rolePrompt := `你是 RMP 系统的智能助手，服务于公司内部业务人员。
+
+【你的核心职责】
+1. 业务知识问答：基于知识库中的操作手册，帮助用户理解系统功能、解决操作问题。
+2. 需求收集：当用户表达了改进期望或新功能想法时，通过自然对话了解需求背景，然后调用 submit_requirement 技能提交。
+
+【需求收集原则】
+- 你要面对的是不懂技术的业务人员，和他们聊业务场景，不要聊技术细节。
+- 你可以问：在什么情况下需要？现在怎么做的？多久做一次？涉及多少数据量？
+- 你不要问：用什么格式？接口怎么设计？表结构是什么？要不要权限控制？
+- 这些技术细节是产品经理的工作，不需要业务人员来回答。
+- 当用户说清楚「想要什么 + 什么场景 + 现在的痛点」，就可以提交了。模糊也没关系。
+
+【语言风格】
+- 用通俗的中文交流，避免技术术语。
+- 回答简洁，不要长篇大论。`
+
+	// 管理员/developer 用户追加技术能力说明
+	if session != nil && session.UserType != "business" {
+		rolePrompt += "\n\n【补充能力】\n当前用户是开发者，你可以使用 MySQL 查询等工具协助分析技术问题。"
+	}
+
+	// 构造 system 消息，插入到 messages 最前方
+	roleMsg := map[string]interface{}{
+		"role":    "system",
+		"content": rolePrompt,
+	}
+
+	req["messages"] = append([]interface{}{roleMsg}, messages...)
 }
 
 // injectGodRulesAndRAG 注入上帝指令和 RAG 知识库上下文

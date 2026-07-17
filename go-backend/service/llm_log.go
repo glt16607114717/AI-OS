@@ -382,6 +382,16 @@ func AddChatMessage(userID int, role, content, sessionID, msgID string) int64 {
 	if err != nil {
 		return 0
 	}
+	// 同一个 msg_id 的 user 消息只写一条：一次用户输入会触发多次 LLM 请求（工具调用），
+	// 每次请求都会从 messages 数组提取到同一条 user 消息，不去重会重复落库几十条。
+	// msg_id 由 hook 生成并保证每次用户输入唯一，所以按 msg_id 去重是安全的。
+	if role == "user" && msgID != "" {
+		var existing int64
+		conn.QueryRow("SELECT COUNT(*) FROM sys_chat_history WHERE msg_id = ? AND role = 'user'", msgID).Scan(&existing)
+		if existing > 0 {
+			return 0
+		}
+	}
 	res, err := conn.Exec("INSERT INTO sys_chat_history (user_id, role, content, session_id, msg_id) VALUES (?, ?, ?, ?, ?)", userID, role, content, sessionID, msgID)
 	if err != nil {
 		return 0

@@ -26,7 +26,7 @@ var (
 	// 孤立标签残片
 	reOrphanReminder = regexp.MustCompile(`</?system-reminder>`)
 	// hooks_context 块（Trae IDE hook 事件壳子，纯噪音，所有消息通用）
-	reHooksContext = regexp.MustCompile(`(?s)\s*<hooks_context[^>]*>.*?(?:</hooks_context>|</hooks)\s*`)
+	reHooksContext = regexp.MustCompile("(?s)\x3chooks_context\x3e.*?\x3c/hooks_context\x3e")
 )
 
 // OptimizeMessages 对发往 LLM 的 messages 做噪音清理（按用户配置，默认全开）
@@ -56,8 +56,12 @@ func OptimizeMessages(messages []map[string]interface{}, cfg *model.GodRulesConf
 
 		switch role {
 		case "system":
-			// system 消息不动（语言要求保留、上帝指令/RAG 注入内容保留）
-			result[i] = msg
+			// system 消息保留语言要求/上帝指令/RAG，但清除 hooks_context 噪音（Trae IDE hook 事件壳子）
+			content := StringifyContent(msg["content"])
+			result[i] = map[string]interface{}{
+				"role":    "system",
+				"content": stripHooksContext(content),
+			}
 
 		case "user":
 			if isLatestUser(messages, i) {
@@ -221,7 +225,12 @@ func stripHooksFromUserMsg(msg map[string]interface{}) map[string]interface{} {
 
 // stripHooksContext 删除 hooks_context 块（所有消息通用）
 func stripHooksContext(content string) string {
-	return strings.TrimSpace(reHooksContext.ReplaceAllString(content, ""))
+	before := len(content)
+	result := strings.TrimSpace(reHooksContext.ReplaceAllString(content, ""))
+	if before != len(result) {
+		log.Printf("[DEBUG:stripHooksContext] %d -> %d (stripped %d)", before, len(result), before-len(result))
+	}
+	return result
 }
 
 // ── 第3刀：精简工具定义 ──

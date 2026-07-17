@@ -134,6 +134,22 @@ function shortMsgId(id: string) {
   return id.length > 8 ? id.substring(0, 8) : id
 }
 
+function copyMsgId(id: string) {
+  const ta = document.createElement('textarea')
+  ta.value = id
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand('copy')
+    ElMessage.success('消息ID已复制')
+  } catch {
+    ElMessage.error('复制失败')
+  }
+  document.body.removeChild(ta)
+}
+
 function downloadLog(chatHistoryId: number) {
   if (!chatHistoryId) {
     ElMessage.warning('该请求没有关联的对话日志')
@@ -243,7 +259,7 @@ onUnmounted(() => {
                 <polyline points="20 6 9 17 4 12"/>
               </svg>
             </span>
-            <span class="msg-id-tag" :title="s.msg_id">{{ shortMsgId(s.msg_id) }}</span>
+            <span class="msg-id-tag" :title="s.msg_id" @click.stop="copyMsgId(s.msg_id)">{{ s.msg_id }}</span>
             <span class="meta-info">
               <span class="meta-item">输入 {{ formatTokens(s.total_prompt) }}</span>
               <span class="meta-sep">/</span>
@@ -482,6 +498,12 @@ onUnmounted(() => {
   padding: 1px 6px;
   border-radius: 3px;
   flex-shrink: 0;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.msg-id-tag:hover {
+  color: #2563eb;
+  background: #dbeafe;
 }
 
 .model-list {

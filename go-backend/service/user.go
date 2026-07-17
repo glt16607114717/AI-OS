@@ -64,9 +64,9 @@ func LoginUser(username, password string) (map[string]interface{}, error) {
 		return nil, err
 	}
 	var id, status, isAdmin int
-	var uname, hashedPassword, apiKey string
-	err = conn.QueryRow("SELECT id, username, password, status, is_admin, api_key FROM sys_user WHERE username = ?",
-		username).Scan(&id, &uname, &hashedPassword, &status, &isAdmin, &apiKey)
+	var uname, hashedPassword, apiKey, userType string
+	err = conn.QueryRow("SELECT id, username, password, status, is_admin, api_key, user_type FROM sys_user WHERE username = ?",
+		username).Scan(&id, &uname, &hashedPassword, &status, &isAdmin, &apiKey, &userType)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("用户名或密码错误")
 	}
@@ -80,11 +80,12 @@ func LoginUser(username, password string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("账号已停用")
 	}
 
-	token := middleware.CreateSession(id, uname, isAdmin == 1)
+	token := middleware.CreateSession(id, uname, isAdmin == 1, userType)
 	expire := time.Now().Add(30 * 24 * time.Hour).Format("2006-01-02 15:04:05")
 
 	return map[string]interface{}{
 		"user_id": id, "username": uname, "is_admin": isAdmin == 1,
+		"user_type": userType,
 		"token": token, "expire": expire, "api_key": apiKey,
 	}, nil
 }
@@ -94,7 +95,7 @@ func ListUsers() ([]map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := conn.Query("SELECT id, username, status, is_admin, api_key, created_at, updated_at FROM sys_user ORDER BY id")
+	rows, err := conn.Query("SELECT id, username, status, is_admin, api_key, user_type, created_at, updated_at FROM sys_user ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
@@ -103,13 +104,14 @@ func ListUsers() ([]map[string]interface{}, error) {
 	var result []map[string]interface{}
 	for rows.Next() {
 		var id, status, isAdmin int
-		var username, apiKey, createdAt, updatedAt string
-		if err := rows.Scan(&id, &username, &status, &isAdmin, &apiKey, &createdAt, &updatedAt); err != nil {
+		var username, apiKey, userType, createdAt, updatedAt string
+		if err := rows.Scan(&id, &username, &status, &isAdmin, &apiKey, &userType, &createdAt, &updatedAt); err != nil {
 			continue
 		}
 		result = append(result, map[string]interface{}{
 			"id": id, "username": username, "status": status,
 			"is_admin": isAdmin == 1, "api_key": apiKey,
+			"user_type": userType,
 			"created_at": createdAt, "updated_at": updatedAt,
 		})
 	}
@@ -123,20 +125,21 @@ func GetUserByID(userID int) (map[string]interface{}, error) {
 		return nil, err
 	}
 	var id, status, isAdmin int
-	var username, apiKey, createdAt, updatedAt string
-	err = conn.QueryRow("SELECT id, username, status, is_admin, api_key, created_at, updated_at FROM sys_user WHERE id = ?", userID).
-		Scan(&id, &username, &status, &isAdmin, &apiKey, &createdAt, &updatedAt)
+	var username, apiKey, userType, createdAt, updatedAt string
+	err = conn.QueryRow("SELECT id, username, status, is_admin, api_key, user_type, created_at, updated_at FROM sys_user WHERE id = ?", userID).
+		Scan(&id, &username, &status, &isAdmin, &apiKey, &userType, &createdAt, &updatedAt)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
 		"id": id, "username": username, "status": status,
 		"is_admin": isAdmin == 1, "api_key": apiKey,
+		"user_type": userType,
 		"created_at": createdAt, "updated_at": updatedAt,
 	}, nil
 }
 
-func CreateUser(username, password string, isAdmin bool) (map[string]interface{}, error) {
+func CreateUser(username, password string, isAdmin bool, userType string) (map[string]interface{}, error) {
 	conn, err := GetDB()
 	if err != nil {
 		return nil, err
@@ -147,7 +150,10 @@ func CreateUser(username, password string, isAdmin bool) (map[string]interface{}
 	if isAdmin {
 		ia = 1
 	}
-	res, err := conn.Exec("INSERT INTO sys_user (username, password, api_key, is_admin) VALUES (?, ?, ?, ?)", username, hashed, apiKey, ia)
+	if userType == "" {
+		userType = "developer"
+	}
+	res, err := conn.Exec("INSERT INTO sys_user (username, password, api_key, is_admin, user_type) VALUES (?, ?, ?, ?, ?)", username, hashed, apiKey, ia, userType)
 	if err != nil {
 		if strings.Contains(err.Error(), "Duplicate") {
 			return nil, fmt.Errorf("用户名已存在")
@@ -155,7 +161,7 @@ func CreateUser(username, password string, isAdmin bool) (map[string]interface{}
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	return map[string]interface{}{"id": id, "username": username, "is_admin": isAdmin, "api_key": apiKey}, nil
+	return map[string]interface{}{"id": id, "username": username, "is_admin": isAdmin, "user_type": userType, "api_key": apiKey}, nil
 }
 
 // GetUserByAPIKey 根据 API Key 查询用户
@@ -229,5 +235,15 @@ func DeleteUser(userID int) error {
 		return err
 	}
 	_, err = conn.Exec("DELETE FROM sys_user WHERE id = ?", userID)
+	return err
+}
+
+// ToggleUserType 切换用户类型
+func ToggleUserType(userID int, userType string) error {
+	conn, err := GetDB()
+	if err != nil {
+		return err
+	}
+	_, err = conn.Exec("UPDATE sys_user SET user_type = ? WHERE id = ?", userType, userID)
 	return err
 }

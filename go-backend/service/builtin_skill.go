@@ -159,6 +159,11 @@ func GetBuiltinSkillByCode(code string) (*BuiltinSkill, error) {
 
 // ── AI 工具注入 ──
 
+// universalSkills 不需要连接和权限的通用技能（所有用户可用）
+var universalSkills = map[string]bool{
+	"submit_requirement": true,
+}
+
 // GetBuiltinSkillToolDefinitions 根据用户权限构造 tools 注入给 AI
 func GetBuiltinSkillToolDefinitions(userID int, isAdmin bool) ([]map[string]interface{}, error) {
 	skills, err := GetBuiltinSkills()
@@ -168,11 +173,14 @@ func GetBuiltinSkillToolDefinitions(userID int, isAdmin bool) ([]map[string]inte
 
 	var tools []map[string]interface{}
 	for _, s := range skills {
-		// 权限过滤：非管理员需要检查是否有权限
-		if !isAdmin {
-			hasPerm, err := checkUserSkillPermission(userID, s.ID)
-			if err != nil || !hasPerm {
-				continue
+		// 通用技能跳过权限检查
+		if !universalSkills[s.Code] {
+			// 权限过滤：非管理员需要检查是否有权限
+			if !isAdmin {
+				hasPerm, err := checkUserSkillPermission(userID, s.ID)
+				if err != nil || !hasPerm {
+					continue
+				}
 			}
 		}
 
@@ -513,6 +521,8 @@ func ExecuteBuiltinSkill(code string, userID int, isAdmin bool, args map[string]
 	switch skill.Code {
 	case "mysql_query":
 		return executeMySQLQuery(skill, userID, isAdmin, args)
+	case "submit_requirement":
+		return ExecuteSubmitRequirement(userID, args)
 	default:
 		return nil, fmt.Errorf("未实现的技能: %s", code)
 	}
