@@ -16,7 +16,7 @@ import (
 //   1) stripNoise        - 历史轮 user 消息里删除 path/terminal/lang 三类 system-reminder，
 //                          保留 other 类（首轮 rules/LS/skill 等）和 user_input 真实内容
 //   2) stripHooksContext  - 所有消息（含最新轮）删除 hooks_context 块（Trae IDE hook 事件壳子）
-//   3) compressToolResult - 5 轮之前的 tool 结果超 200 字符截断
+//   3) compressToolResult - 10 轮之前的 tool 结果超 200 字符截断
 //   4) compressTools      - 精简 tools 数组中 RunCommand/Task 的冗长描述
 
 // 预编译正则
@@ -30,19 +30,61 @@ var (
 )
 
 // OptimizeMessages 对发往 LLM 的 messages 做噪音清理（按用户配置，默认全开）
+// 分流入口：根据客户端类型走不同的优化逻辑
+//   - ZCode 客户端 → optimizeZCodeMessages（删历史思维链 + tool 结果截断）
+//   - 其他（Trae）→ optimizeTraeMessages（system-reminder/hooks_context 清理）
 // 入参 messages 已经过 InjectGodRules 处理（已注入上帝指令），此处只做减法/压缩。
 func OptimizeMessages(messages []map[string]interface{}, cfg *model.GodRulesConfig) []map[string]interface{} {
 	if cfg == nil {
 		return messages
 	}
 
-	// 找第 5 条 user 消息的索引（保护边界：此索引及之后的 tool 结果不截断）
+	// 客户端识别：ZCode 客户端硬编码注入 "You are ZCode" 作为 system 消息（Trae 无此特征）
+	if isZCodeClient(messages) {
+		optimized, stripped := optimizeZCodeMessages(messages, cfg)
+		log.Printf("[OptimizeMessages] client=zcode, messages=%d->%d, stripped_reasoning=%d",
+			len(messages), len(optimized), stripped)
+		return optimized
+	}
+
+	optimized := optimizeTraeMessages(messages, cfg)
+	log.Printf("[OptimizeMessages] client=trae, messages=%d->%d", len(messages), len(optimized))
+	return optimized
+}
+
+// isZCodeClient 通过 system 消息特征识别 ZCode 客户端
+// ZCode 客户端硬编码注入 "You are ZCode, an interactive coding agent" 作为 system 消息
+func isZCodeClient(messages []map[string]interface{}) bool {
+	for _, msg := range messages {
+		if role, _ := msg["role"].(string); role == "system" {
+			if strings.Contains(StringifyContent(msg["content"]), "You are ZCode") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// optimizeTraeMessages Trae 客户端的 messages 噪音清理（原 OptimizeMessages 逻辑）
+// 四刀：stripNoise + stripHooksContext + compressToolResult(10轮) + compressTools
+func optimizeTraeMessages(messages []map[string]interface{}, cfg *model.GodRulesConfig) []map[string]interface{} {
+	if cfg == nil {
+		return messages
+	}
+
+	// ── 20 轮截断（Trae 编辑器无限累加的防护）──
+	// 与 ZCode 链路共用同一阈值和逻辑
+	// 阈值依据：20 轮之前的对话与当前任务几乎无关，重要节点应通过 task log 记录而非依赖上下文
+	messages = truncateByRounds(messages, 20, "optimizeTrae")
+
+	// 找第 10 条 user 消息的索引（保护边界：此索引及之后的 tool 结果不截断）
+	// 5 轮太激进，放宽到 10 轮，保留更多历史上下文
 	keepFromIdx := 0
 	userCount := 0
 	for i := len(messages) - 1; i >= 0; i-- {
 		if role, _ := messages[i]["role"].(string); role == "user" {
 			userCount++
-			if userCount == 5 {
+			if userCount == 10 {
 				keepFromIdx = i
 				break
 			}
@@ -102,6 +144,47 @@ func OptimizeMessages(messages []map[string]interface{}, cfg *model.GodRulesConf
 	if stripCount > 0 {
 		log.Printf("[OptimizeMessages] stripped %d/%d history user messages", stripCount, len(messages))
 	}
+	return result
+}
+
+// truncateByRounds 按 user 消息轮次截断历史（公共函数，Trae 和 ZCode 共用）
+// 保留所有 system 消息 + 最近 maxRounds 条 user 消息及其后续所有消息
+// 在 user 消息边界截断，避免 tool_calls 配对断裂
+func truncateByRounds(messages []map[string]interface{}, maxRounds int, tag string) []map[string]interface{} {
+	// 从后往前数 user 消息，找到第 maxRounds 条 user 的位置
+	keepFrom := len(messages) // 默认保留全部（不超过阈值时不截断）
+	uc := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		if role, _ := messages[i]["role"].(string); role == "user" {
+			uc++
+			if uc == maxRounds {
+				keepFrom = i
+				break
+			}
+		}
+	}
+
+	// 不超过阈值，不截断
+	if keepFrom >= len(messages) {
+		return messages
+	}
+
+	// 分离 system 消息和保留区消息
+	systemMsgs := []map[string]interface{}{}
+	recentMsgs := []map[string]interface{}{}
+	for i, msg := range messages {
+		role, _ := msg["role"].(string)
+		if role == "system" {
+			// system 消息始终保留（上帝指令/角色定位/RAG 上下文不能丢）
+			systemMsgs = append(systemMsgs, msg)
+		} else if i >= keepFrom {
+			recentMsgs = append(recentMsgs, msg)
+		}
+	}
+
+	result := append(systemMsgs, recentMsgs...)
+	log.Printf("[%s] %d轮截断: %d -> %d 条消息 (丢弃 %d 条更早历史)",
+		tag, maxRounds, len(messages), len(result), len(messages)-len(result))
 	return result
 }
 
@@ -240,11 +323,46 @@ func stripHooksContext(content string) string {
 // - Task：删除 example 块（AI 看说明就懂，不需要弱智示例）
 // 安全红线（Git Safety Protocol 核心）完整保留。
 
-// OptimizeTools 精简 tools 数组中的工具描述
+// OptimizeTools 精简 tools 数组中的工具描述（分流入口）
+//   - ZCode 客户端 → optimizeZCodeTools（精简 EnterPlanMode/ExitPlanMode/Agent/AskUserQuestion）
+//   - 其他（Trae）→ optimizeTraeTools（精简 RunCommand/Task）
 func OptimizeTools(tools []interface{}, cfg *model.GodRulesConfig) []interface{} {
-	if !cfg.CompressTools {
+	if cfg == nil || !cfg.CompressTools {
 		return tools
 	}
+
+	// 客户端识别需要从 messages 判断，这里只有 tools，无法直接判断
+	// 通过工具特征判断：ZCode 工具集含 EnterPlanMode/Bash/Edit，Trae 工具集含 RunCommand/Task
+	if isZCodeToolset(tools) {
+		return optimizeZCodeTools(tools, cfg)
+	}
+	return optimizeTraeTools(tools, cfg)
+}
+
+// isZCodeToolset 通过工具集特征判断是否为 ZCode 客户端
+// ZCode 工具集含 EnterPlanMode/ExitPlanMode/Bash/Edit，Trae 含 RunCommand/Task
+func isZCodeToolset(tools []interface{}) bool {
+	zcodeMarkers := map[string]bool{
+		"EnterPlanMode": true, "ExitPlanMode": true, "AskUserQuestion": true, "SendMessage": true,
+	}
+	for _, raw := range tools {
+		t, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		fn, ok := t["function"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if name, _ := fn["name"].(string); zcodeMarkers[name] {
+			return true
+		}
+	}
+	return false
+}
+
+// optimizeTraeTools Trae 客户端的工具精简（原 OptimizeTools 逻辑）
+func optimizeTraeTools(tools []interface{}, cfg *model.GodRulesConfig) []interface{} {
 	result := make([]interface{}, len(tools))
 	for i, raw := range tools {
 		t, ok := raw.(map[string]interface{})

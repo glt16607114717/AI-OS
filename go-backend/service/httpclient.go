@@ -21,7 +21,9 @@ var SharedHTTPClient = &http.Client{
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   20,
 		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second, // 首字节超时：60秒
+		ResponseHeaderTimeout: 30 * time.Second, // 首字节超时：30秒没首字节=模型卡死，触发故障转移
+		// 数据依据：实测 95% 请求在 30s 内返回首字节，30s 后基本无恢复可能
+		// 之前配的 60s 过长，会浪费 30s 在死等已卡死的模型上
 		ExpectContinueTimeout: 1 * time.Second,
 		ForceAttemptHTTP2:     true,
 	},
