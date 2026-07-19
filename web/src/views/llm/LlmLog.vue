@@ -24,6 +24,7 @@ interface ChatSession {
   msg_id: string
   session_id: string
   username: string
+  source: string
   first_ts: string
   total_prompt: number
   total_completion: number
@@ -44,6 +45,7 @@ const expandedMsgIds = ref<Set<string>>(new Set())
 // 筛选
 const filterUser = ref('')
 const filterDateRange = ref<[string, string] | null>(null)
+const filterSource = ref('')  // '' = 全部, 'workspace' = 工作台, 'proxy' = 代理
 
 // 用户选项（从已加载数据提取）
 const userOptions = computed(() => {
@@ -88,6 +90,7 @@ async function fetchSessions() {
   if (paused.value) return
   try {
     const params = new URLSearchParams({ limit: '200' })
+    if (filterSource.value) params.set('source', filterSource.value)
     const response = await fetch(`${API_BASE}/api/chat/sessions?${params}`, { headers: authHeaders() })
     const result = await response.json()
     if (result?.ok) {
@@ -173,7 +176,7 @@ function downloadLog(chatHistoryId: number) {
 }
 
 // 筛选变化时重置页码
-watch([filterUser, filterDateRange], () => { currentPage.value = 1 })
+watch([filterUser, filterDateRange, filterSource], () => { currentPage.value = 1 })
 
 function updateDateRange(idx: number, val: string) {
   const cur = filterDateRange.value || ['', '']
@@ -190,6 +193,7 @@ function updateDateRange(idx: number, val: string) {
 function clearFilters() {
   filterUser.value = ''
   filterDateRange.value = null
+  filterSource.value = ''
 }
 
 onMounted(() => {
@@ -211,9 +215,14 @@ onUnmounted(() => {
           <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
         </svg>
         <span>对话记录</span>
-        <span class="log-count">{{ filterUser || (filterDateRange && filterDateRange[0]) ? `${filteredSessions.length}/${sessions.length} 条` : `${sessions.length} 条` }}</span>
+        <span class="log-count">{{ filterUser || filterSource || (filterDateRange && filterDateRange[0]) ? `${filteredSessions.length}/${sessions.length} 条` : `${sessions.length} 条` }}</span>
       </div>
       <div class="log-actions">
+        <select v-model="filterSource" class="filter-select" title="按来源筛选">
+          <option value="">全部来源</option>
+          <option value="workspace">工作台</option>
+          <option value="proxy">代理</option>
+        </select>
         <select v-model="filterUser" class="filter-select" title="按用户筛选">
           <option value="">全部用户</option>
           <option v-for="u in userOptions" :key="u" :value="u">{{ u }}</option>
@@ -222,7 +231,7 @@ onUnmounted(() => {
           <input type="date" :value="filterDateRange?.[0] || ''" @input="updateDateRange(0, ($event.target as HTMLInputElement).value)" class="filter-date" title="开始日期">
           <span class="date-sep">~</span>
           <input type="date" :value="filterDateRange?.[1] || ''" @input="updateDateRange(1, ($event.target as HTMLInputElement).value)" class="filter-date" title="结束日期">
-          <button v-if="filterUser || (filterDateRange && (filterDateRange[0] || filterDateRange[1]))" class="filter-clear" @click="clearFilters" title="清除筛选">
+          <button v-if="filterUser || filterSource || (filterDateRange && (filterDateRange[0] || filterDateRange[1]))" class="filter-clear" @click="clearFilters" title="清除筛选">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>
@@ -251,6 +260,7 @@ onUnmounted(() => {
           <div class="log-row" @click="toggleDetail(s.msg_id)">
             <span class="log-time">{{ formatTime(s.first_ts) }}</span>
             <span class="user-badge">{{ s.username || '未知' }}</span>
+            <span class="source-badge" :class="s.source">{{ s.source === 'workspace' ? '工作台' : '代理' }}</span>
             <span class="status-icon" :class="s.error_count > 0 ? 'fail' : 'success'">
               <svg v-if="s.error_count > 0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                 <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
@@ -480,6 +490,23 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.source-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.source-badge.workspace {
+  color: #3b82f6;
+  background: #eff6ff;
+}
+.source-badge.proxy {
+  color: #64748b;
+  background: #f1f5f9;
 }
 
 .status-icon {

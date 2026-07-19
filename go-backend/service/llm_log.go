@@ -27,11 +27,15 @@ func RecordStat(stat *model.LLMStat) {
 	if len(errMsg) > 512 {
 		errMsg = errMsg[:512]
 	}
-	conn.Exec(`INSERT INTO sys_llm_stats (ts, user_id, username, vendor_id, key_id, model_id,
+	source := stat.Source
+	if source == "" {
+		source = "proxy"
+	}
+	conn.Exec(`INSERT INTO sys_llm_stats (ts, user_id, username, source, vendor_id, key_id, model_id,
 		prompt_tokens, completion_tokens, total_tokens, latency_ms, success, error, session_id, msg_id, chat_history_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		time.Now().Format("2006-01-02 15:04:05"),
-		stat.UserID, stat.Username, stat.VendorID, stat.KeyID, stat.ModelID,
+		stat.UserID, stat.Username, source, stat.VendorID, stat.KeyID, stat.ModelID,
 		stat.PromptTokens, stat.CompletionTokens, stat.TotalTokens,
 		stat.LatencyMs, success, errMsg, stat.SessionID, stat.MsgID, stat.ChatHistoryID)
 }
@@ -720,10 +724,11 @@ func GetErrorStats(days int) (map[string]interface{}, error) {
 
 // ChatSessionRow 一条 msg_id 聚合后的对话记录
 type ChatSessionRow struct {
-	MsgID            string            `json:"msg_id"`
-	SessionID        string            `json:"session_id"`
-	Username         string            `json:"username"`
-	FirstTs          string            `json:"first_ts"`
+	MsgID            string             `json:"msg_id"`
+	SessionID        string             `json:"session_id"`
+	Username         string             `json:"username"`
+	Source           string             `json:"source"`
+	FirstTs          string             `json:"first_ts"`
 	TotalPrompt      int               `json:"total_prompt"`
 	TotalCompletion  int               `json:"total_completion"`
 	TotalTokens      int               `json:"total_tokens"`
@@ -748,7 +753,8 @@ type RequestChainItem struct {
 }
 
 // GetChatSessions 按 msg_id 聚合查询对话记录
-func GetChatSessions(limit int, userID int, isAdmin bool) ([]ChatSessionRow, error) {
+// source 为空查全部，"workspace"/"proxy" 过滤来源
+func GetChatSessions(limit int, userID int, isAdmin bool, source string) ([]ChatSessionRow, error) {
 	conn, err := GetDB()
 	if err != nil {
 		return nil, err
@@ -761,8 +767,12 @@ func GetChatSessions(limit int, userID int, isAdmin bool) ([]ChatSessionRow, err
 		baseWhere += " AND user_id = ?"
 		args = append(args, userID)
 	}
+	if source != "" {
+		baseWhere += " AND source = ?"
+		args = append(args, source)
+	}
 
-	aggSQL := `SELECT msg_id, MIN(session_id), MIN(username), MAX(ts),
+	aggSQL := `SELECT msg_id, MIN(session_id), MIN(username), MIN(source), MAX(ts),
 		SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens),
 		COUNT(*), SUM(CASE WHEN success=0 THEN 1 ELSE 0 END),
 		TIMESTAMPDIFF(SECOND, MIN(ts), MAX(ts))
@@ -781,7 +791,7 @@ func GetChatSessions(limit int, userID int, isAdmin bool) ([]ChatSessionRow, err
 		var s ChatSessionRow
 		var errCount int
 		var latencySec sql.NullInt64
-		if err := rows.Scan(&s.MsgID, &s.SessionID, &s.Username, &s.FirstTs,
+		if err := rows.Scan(&s.MsgID, &s.SessionID, &s.Username, &s.Source, &s.FirstTs,
 			&s.TotalPrompt, &s.TotalCompletion, &s.TotalTokens,
 			&s.RequestCount, &errCount, &latencySec); err != nil {
 			continue

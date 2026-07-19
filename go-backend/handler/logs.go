@@ -47,6 +47,7 @@ func GetChatSessions(w http.ResponseWriter, r *http.Request) {
 	if limit == 0 {
 		limit = 100
 	}
+	source := r.URL.Query().Get("source")
 
 	session := middleware.GetSessionFromCtx(r)
 	userID := 0
@@ -56,7 +57,7 @@ func GetChatSessions(w http.ResponseWriter, r *http.Request) {
 		isAdmin = session.IsAdmin
 	}
 
-	sessions, err := service.GetChatSessions(limit, userID, isAdmin)
+	sessions, err := service.GetChatSessions(limit, userID, isAdmin, source)
 	if err != nil {
 		errResponse(w, err.Error(), 500)
 		return

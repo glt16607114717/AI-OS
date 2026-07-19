@@ -95,7 +95,7 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 		if err != nil {
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-			UserID: userID, Username: username,
+			UserID: userID, Username: username, Source: convCtx.Source,
 			VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 			SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 			LatencyMs: latency, Success: false, Error: err.Error(),
@@ -116,7 +116,7 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 			errMsg = errMsg[:500]
 		}
 		service.RecordStat(&service.LLMStatType{
-		UserID: userID, Username: username,
+		UserID: userID, Username: username, Source: convCtx.Source,
 		VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 		SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 		LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: errMsg,
@@ -146,7 +146,7 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 				totalTokens = promptTokens + completionTokens
 			}
 			service.RecordStat(&service.LLMStatType{
-			UserID: userID, Username: username,
+			UserID: userID, Username: username, Source: convCtx.Source,
 			VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 			SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 			PromptTokens: promptTokens, CompletionTokens: completionTokens,
@@ -160,7 +160,7 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 			completionTokens := estimateCompletionTokens(extractContentFromLLM(respData))
 			totalTokens := promptTokens + completionTokens
 			service.RecordStat(&service.LLMStatType{
-			UserID: userID, Username: username,
+			UserID: userID, Username: username, Source: convCtx.Source,
 			VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 			SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 			PromptTokens: promptTokens, CompletionTokens: completionTokens,
@@ -250,7 +250,7 @@ func callLLMStreamWithFailover(w http.ResponseWriter, messages []interface{}, to
 			// 首字节前失败：静默切换（还没向前端推过任何内容）
 			latency := int(time.Since(startTime).Milliseconds())
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
+				UserID: userID, Username: username, Source: convCtx.Source,
 				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 				LatencyMs: latency, Success: false, Error: err.Error(),
@@ -270,7 +270,7 @@ func callLLMStreamWithFailover(w http.ResponseWriter, messages []interface{}, to
 				errMsg = errMsg[:500]
 			}
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
+				UserID: userID, Username: username, Source: convCtx.Source,
 				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 				LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: errMsg,
@@ -299,7 +299,7 @@ func callLLMStreamWithFailover(w http.ResponseWriter, messages []interface{}, to
 		if streamFailed {
 			// 首字节后失败：记录 + 标记切换 + 继续尝试下一个 key
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
+				UserID: userID, Username: username, Source: convCtx.Source,
 				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 				LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false,
@@ -318,7 +318,7 @@ func callLLMStreamWithFailover(w http.ResponseWriter, messages []interface{}, to
 		completionTokens := estimateCompletionTokens(totalContent.String())
 		totalTokens := promptTokens + completionTokens
 		service.RecordStat(&service.LLMStatType{
-			UserID: userID, Username: username,
+			UserID: userID, Username: username, Source: convCtx.Source,
 			VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 			SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 			PromptTokens: promptTokens, CompletionTokens: completionTokens,

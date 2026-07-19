@@ -108,6 +108,7 @@ type LLMStat struct {
 	Ts               string `json:"ts"`
 	UserID           int    `json:"user_id"`
 	Username         string `json:"username"`
+	Source           string `json:"source"` // proxy / workspace
 	VendorID         int    `json:"vendor_id"`
 	KeyID            string `json:"key_id"`
 	ModelID          string `json:"model_id"`

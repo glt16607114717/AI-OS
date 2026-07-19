@@ -83,7 +83,28 @@ const pendingImages = ref<string[]>([]) // 待发送的图片（base64）
 const chatContainer = ref<HTMLDivElement | null>(null)
 const currentModel = ref('')
 const CACHE_KEY = 'ai-os-chat-messages'
+const SESSION_ID_KEY = 'ai-os-chat-session-id'
 let abortController: AbortController | null = null
+
+// 工作台会话 ID（localStorage 持久化，清空对话时重置）
+// 用于后端对话记录按会话聚合，等同于 ZCode/Trae 的 session_id
+function getSessionId(): string {
+  let sid = localStorage.getItem(SESSION_ID_KEY)
+  if (!sid) {
+    sid = 'ws_' + (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2))
+    localStorage.setItem(SESSION_ID_KEY, sid)
+  }
+  return sid
+}
+
+function resetSessionId() {
+  localStorage.removeItem(SESSION_ID_KEY)
+}
+
+// 每次发消息生成唯一 msg_id（后端按 msg_id 聚合同一轮对话的所有请求）
+function genMsgId(): string {
+  return 'ws_' + (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2))
+}
 
 
 // 缓存管理：localStorage 最多存 50 条消息，超过的丢弃更早的（避免容量溢出）
@@ -450,6 +471,26 @@ async function sendMessage() {
     return { role: m.role, content: m.content }
   })
 
+  // 注入 trace 标记到最后一条 user 消息（供后端对话记录聚合）
+  // 后端 extractAndStripTrace 会解析并剥离这些标记，写入 sys_llm_stats
+  const sessionId = getSessionId()
+  const msgId = genMsgId()
+  const traceMarker = `\n[TRACE:session=${sessionId}][TRACE:msg=${msgId}]`
+  if (reqMessages.length > 0) {
+    const lastMsg = reqMessages[reqMessages.length - 1]
+    if (typeof lastMsg.content === 'string') {
+      lastMsg.content = lastMsg.content + traceMarker
+    } else if (Array.isArray(lastMsg.content)) {
+      // 多模态格式：追加到第一个 text 项，或新增 text 项
+      const textItem = lastMsg.content.find((c: any) => c.type === 'text')
+      if (textItem) {
+        textItem.text = textItem.text + traceMarker
+      } else {
+        lastMsg.content.push({ type: 'text', text: traceMarker })
+      }
+    }
+  }
+
   try {
     // 使用独立的工作台接口（不走代理）
     const response = await fetch(`${API_BASE}/api/workspace/chat`, {
@@ -684,6 +725,7 @@ async function clearChat() {
     disposeCharts()
     messages.value = []
     clearCache()
+    resetSessionId() // 清空对话时重置会话 ID，后续消息归到新会话
     try {
       const res = await fetch(`${API_BASE}/api/chat/clear`, {
         method: 'POST',

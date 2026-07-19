@@ -113,7 +113,7 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 		resp, err := service.SharedHTTPClient.Do(httpReq)
 		if err != nil {
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
+				UserID: userID, Username: username, Source: convCtx.Source,
 				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 				LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: err.Error(),
@@ -131,7 +131,7 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 				errMsg = errMsg[:500]
 			}
 			service.RecordStat(&service.LLMStatType{
-				UserID: userID, Username: username,
+				UserID: userID, Username: username, Source: convCtx.Source,
 				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 				SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 				LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: errMsg,
@@ -185,7 +185,7 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 			case <-time.After(sseIdleTimeout):
 				log.Printf("[proxy] stream %s user=%s SSE_IDLE_TIMEOUT: %v 无输出，切换模型", route.ModelID, username, sseIdleTimeout)
 				service.RecordStat(&service.LLMStatType{
-					UserID: userID, Username: username,
+					UserID: userID, Username: username, Source: convCtx.Source,
 					VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 					SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 					LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false,
@@ -256,7 +256,7 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 					log.Printf("[proxy] stream %s user=%s SSE_EOF_WITHOUT_DONE (已有 %d 字符内容，切换模型重试)",
 						route.ModelID, username, totalContent.Len())
 					service.RecordStat(&service.LLMStatType{
-						UserID: userID, Username: username,
+						UserID: userID, Username: username, Source: convCtx.Source,
 						VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 						SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 						LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false,
@@ -271,7 +271,7 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 
 				// 非 EOF 的网络异常中断：切换模型重试
 				service.RecordStat(&service.LLMStatType{
-					UserID: userID, Username: username,
+					UserID: userID, Username: username, Source: convCtx.Source,
 					VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 					SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 					LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false,
@@ -298,7 +298,7 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 					// 0 内容输出 → 当失败，切换模型
 					log.Printf("[proxy] stream %s user=%s ZERO_CONTENT_DONE: 收到[DONE]但无内容，切换模型", route.ModelID, username)
 					service.RecordStat(&service.LLMStatType{
-						UserID: userID, Username: username,
+						UserID: userID, Username: username, Source: convCtx.Source,
 						VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
 						SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 						LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false,
@@ -431,7 +431,7 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 	}
 
 	service.RecordStat(&service.LLMStatType{
-		UserID: userID, Username: username,
+		UserID: userID, Username: username, Source: convCtx.Source,
 		VendorID: finalRoute.VendorID, KeyID: finalRoute.KeyID, ModelID: finalRoute.ModelID,
 		SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
 		PromptTokens: promptTokens, CompletionTokens: completionTokens,
