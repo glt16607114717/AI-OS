@@ -3,6 +3,7 @@
 import (
 	"ai-os-server/circuit"
 	"ai-os-server/service"
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -70,6 +71,10 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 			"model":    route.ModelID,
 			"messages": messages,
 			"stream":   false,
+		}
+		// 注入 max_tokens（按厂商+模型精确配置）
+		if route.MaxTokens > 0 {
+			llmReq["max_tokens"] = route.MaxTokens
 		}
 		if len(tools) > 0 {
 			llmReq["tools"] = tools
@@ -178,6 +183,318 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 	return nil, fmt.Errorf("%s", lastError)
 }
 
+// StreamResult 流式调用的结果（callLLMStreamWithFailover 返回）
+type StreamResult struct {
+	Content   string                  // 累积的完整文本内容（已实时推给前端）
+	ToolCalls []interface{}           // 累积的完整 tool_calls（按 index 组装）
+	Route     *service.RouteInfoType  // 实际使用的路由
+}
+
+// callLLMStreamWithFailover 流式版 callLLMWithFailover
+// 模仿 proxy.go 的全链路流式透传 + 故障转移通知体验：
+//   - 对上游 stream=true，逐 chunk 透传给前端（真流式，非逐字假流式）
+//   - 首字节前失败（连接/超时）：静默切换下一个 key
+//   - 首字节后失败（SSE 中断/空闲超时）：推 event:progress 切换提示，标记 switched，切下一个 key
+//   - 累积 content 和 tool_calls（按 index 累积分块 tool_calls）
+//
+// 用于 agentLoop，替代原来的非流式 callLLMWithFailover
+func callLLMStreamWithFailover(w http.ResponseWriter, messages []interface{}, tools []interface{}, attempts []*service.RouteInfoType, convCtx *ConversationContext) (*StreamResult, error) {
+	userID := convCtx.UserID
+	username := convCtx.Username
+	startTime := convCtx.StartTime
+	failedKeys := make(map[string]bool)
+	switched := false // 是否发生过模型切换（用于决定是否推切换提示）
+
+	var totalContent strings.Builder
+	var lastError string
+
+	for idx, route := range attempts {
+		if failedKeys[route.KeyID] {
+			continue
+		}
+		if circuit.GetBreaker().IsOpen(route.ModelID, route.KeyID) {
+			log.Printf("[llm-stream] circuit breaker open for %s/%s, skip", route.ModelID, route.KeyID)
+			continue
+		}
+
+		source := "策略路由"
+		if idx > 0 || switched {
+			source = "故障转移"
+			convCtx.FailoverCount++
+		}
+		convCtx.Models = appendUnique(convCtx.Models, route.ModelID)
+		convCtx.KeyNames = appendUnique(convCtx.KeyNames, route.KeyName)
+
+		// 构造流式请求
+		llmReq := map[string]interface{}{
+			"model":    route.ModelID,
+			"messages": messages,
+			"stream":   true,
+		}
+		if route.MaxTokens > 0 {
+			llmReq["max_tokens"] = route.MaxTokens
+		}
+		if len(tools) > 0 {
+			llmReq["tools"] = tools
+		}
+
+		bodyJSON, _ := json.Marshal(llmReq)
+		baseURL := strings.TrimRight(route.BaseURL, "/")
+		httpReq, _ := http.NewRequest("POST", baseURL+"/chat/completions", strings.NewReader(string(bodyJSON)))
+		httpReq.Header.Set("Authorization", "Bearer "+route.APIKey)
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Accept", "text/event-stream")
+
+		resp, err := service.SharedHTTPClient.Do(httpReq)
+		if err != nil {
+			// 首字节前失败：静默切换（还没向前端推过任何内容）
+			latency := int(time.Since(startTime).Milliseconds())
+			service.RecordStat(&service.LLMStatType{
+				UserID: userID, Username: username,
+				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+				SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
+				LatencyMs: latency, Success: false, Error: err.Error(),
+			})
+			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 网络错误: %s", route.VendorName, err.Error()))
+			failedKeys[route.KeyID] = true
+			lastError = err.Error()
+			log.Printf("[llm-stream] %s/%s 首字节前失败(静默切换): %s", route.VendorName, route.ModelID, err.Error())
+			continue
+		}
+
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			errMsg := string(body)
+			if len(errMsg) > 500 {
+				errMsg = errMsg[:500]
+			}
+			service.RecordStat(&service.LLMStatType{
+				UserID: userID, Username: username,
+				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+				SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
+				LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: errMsg,
+			})
+			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
+			failedKeys[route.KeyID] = true
+			lastError = errMsg
+			log.Printf("[llm-stream] %s/%s 首字节前 HTTP %d(静默切换)", route.VendorName, route.ModelID, resp.StatusCode)
+			continue
+		}
+
+		// 连接成功，首字节即将到达
+		log.Printf("[llm-stream] vendor=%s model=%s source=%s 开始流式读取", route.VendorName, route.ModelID, source)
+
+		// 切换提示（发生过切换时，在本次流开始前推送通知，不污染 content）
+		if switched {
+			transitionMsg := fmt.Sprintf("⚡ 上游模型响应中断，已自动切换至 %s / %s 继续回答", route.VendorName, route.ModelID)
+			streamProgressAsSSE(w, transitionMsg)
+		}
+
+		// 流式读取 + tool_calls 累积
+		result, streamFailed := readAndForwardStream(w, resp.Body, route, convCtx, startTime, &totalContent)
+
+		resp.Body.Close()
+
+		if streamFailed {
+			// 首字节后失败：记录 + 标记切换 + 继续尝试下一个 key
+			service.RecordStat(&service.LLMStatType{
+				UserID: userID, Username: username,
+				VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+				SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
+				LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false,
+				Error: result.StreamError,
+			})
+			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 流中断: %s", route.VendorName, result.StreamError))
+			failedKeys[route.KeyID] = true
+			switched = true
+			lastError = result.StreamError
+			log.Printf("[llm-stream] %s/%s 流中断(切换): %s", route.VendorName, route.ModelID, result.StreamError)
+			continue
+		}
+
+		// 流成功结束：统计 + 返回
+		promptTokens := estimatePromptTokensV2FromMessages(messages)
+		completionTokens := estimateCompletionTokens(totalContent.String())
+		totalTokens := promptTokens + completionTokens
+		service.RecordStat(&service.LLMStatType{
+			UserID: userID, Username: username,
+			VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+			SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
+			PromptTokens: promptTokens, CompletionTokens: completionTokens,
+			TotalTokens: totalTokens, LatencyMs: int(time.Since(startTime).Milliseconds()), Success: true,
+		})
+		convCtx.TotalPrompt += promptTokens
+		convCtx.TotalCompletion += completionTokens
+
+		log.Printf("[llm-stream] done vendor=%s model=%s content_len=%d tool_calls=%d",
+			route.VendorName, route.ModelID, totalContent.Len(), len(result.ToolCalls))
+
+		return &StreamResult{
+			Content:   totalContent.String(),
+			ToolCalls: result.ToolCalls,
+			Route:     route,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("所有厂商均失败: %s", lastError)
+}
+
+// streamReadResult readAndForwardStream 的返回值
+type streamReadResult struct {
+	ToolCalls   []interface{} // 累积组装的完整 tool_calls
+	StreamError string        // 非 空 时表示流读取失败（触发故障转移）
+}
+
+// readAndForwardStream 读取上游 SSE 流，逐 chunk 透传给前端，同时累积 content 和 tool_calls
+// 模仿 proxy.go 的 SSE 读取逻辑（带空闲超时），但增加 tool_calls 分块累积
+func readAndForwardStream(w http.ResponseWriter, body io.ReadCloser, route *service.RouteInfoType, convCtx *ConversationContext, startTime time.Time, totalContent *strings.Builder) (streamReadResult, bool) {
+	flusher, _ := w.(http.Flusher)
+	reader := bufio.NewReaderSize(body, 64*1024)
+
+	// tool_calls 累积器：按 index 分组
+	type toolCallAccum struct {
+		ID           string
+		FunctionName string
+		Arguments    strings.Builder
+	}
+	toolCallMap := make(map[int]*toolCallAccum)
+	var orderedIndexes []int
+
+	result := streamReadResult{}
+	streamFailed := false
+
+	for !streamFailed {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			if err == io.EOF {
+				// 正常结束
+				break
+			}
+			// 网络异常中断（非 EOF）
+			result.StreamError = fmt.Sprintf("流读取异常: %v", err)
+			streamFailed = true
+			break
+		}
+
+		lineStr := strings.TrimSpace(string(line))
+		if lineStr == "" || strings.HasPrefix(lineStr, ":") {
+			continue
+		}
+		if !strings.HasPrefix(lineStr, "data: ") {
+			continue
+		}
+		data := lineStr[6:]
+		if data == "[DONE]" {
+			break
+		}
+
+		// 解析 chunk
+		var chunk map[string]interface{}
+		if e := json.Unmarshal([]byte(data), &chunk); e != nil {
+			continue
+		}
+
+		choices, ok := chunk["choices"].([]interface{})
+		if !ok || len(choices) == 0 {
+			// 可能是 usage 帧，跳过
+			continue
+		}
+		choice, ok := choices[0].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		delta, _ := choice["delta"].(map[string]interface{})
+		if delta == nil {
+			delta = map[string]interface{}{}
+		}
+
+		// 透传 content chunk 给前端（真流式）
+		if content, ok := delta["content"].(string); ok && content != "" {
+			// 调试：记录前 3 个 chunk 的内容（排查回车来源）
+			if totalContent.Len() == 0 {
+				log.Printf("[llm-stream] FIRST CHUNK %q (len=%d)", content, len(content))
+			}
+			totalContent.WriteString(content)
+			// 透传给前端
+			chunkOut := map[string]interface{}{
+				"choices": []interface{}{map[string]interface{}{
+					"delta": map[string]interface{}{"content": content},
+					"index": 0,
+				}},
+			}
+			chunkJSON, _ := json.Marshal(chunkOut)
+			fmt.Fprintf(w, "data: %s\n\n", string(chunkJSON))
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+
+		// 累积 tool_calls（按 index 分组）
+		if tc, ok := delta["tool_calls"].([]interface{}); ok && len(tc) > 0 {
+			for _, raw := range tc {
+				tcItem, ok := raw.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				idx := 0
+				if idxFloat, ok := tcItem["index"].(float64); ok {
+					idx = int(idxFloat)
+				}
+				accum, exists := toolCallMap[idx]
+				if !exists {
+					accum = &toolCallAccum{}
+					toolCallMap[idx] = accum
+					orderedIndexes = append(orderedIndexes, idx)
+				}
+				if id, ok := tcItem["id"].(string); ok && id != "" {
+					accum.ID = id
+				}
+				if fn, ok := tcItem["function"].(map[string]interface{}); ok {
+					if name, ok := fn["name"].(string); ok && name != "" {
+						accum.FunctionName = name
+					}
+					if args, ok := fn["arguments"].(string); ok {
+						accum.Arguments.WriteString(args)
+					}
+				}
+			}
+		}
+
+		// 检查 finish_reason
+		if fr, ok := choice["finish_reason"].(string); ok && fr != "" {
+			// 流结束（stop 或 tool_calls）
+			break
+		}
+	}
+
+	// 组装 tool_calls（按 index 顺序）
+	if len(orderedIndexes) > 0 {
+		var toolCalls []interface{}
+		for _, idx := range orderedIndexes {
+			accum := toolCallMap[idx]
+			// arguments 必须是 JSON 字符串格式（OpenAI 兼容格式要求）
+			// 不能解析成对象，否则下一轮发给上游时会报错：
+			// "expected a string, but got {...} instead"
+			argsStr := accum.Arguments.String()
+			if argsStr == "" {
+				argsStr = "{}"
+			}
+			toolCalls = append(toolCalls, map[string]interface{}{
+				"id": accum.ID,
+				"type": "function",
+				"function": map[string]interface{}{
+					"name":      accum.FunctionName,
+					"arguments": argsStr, // 保持字符串格式
+				},
+			})
+		}
+		result.ToolCalls = toolCalls
+	}
+
+	return result, streamFailed
+}
+
 // toInterfaceSlice 将 []interface{} 或 []map[string]interface{} 统一转为 []interface{}
 // 解决 req["messages"] 经 injectRAGContext 后类型变为 []map[string]interface{} 的断言问题
 func toInterfaceSlice(v interface{}) []interface{} {
@@ -228,21 +545,18 @@ func streamContentAsSSE(w http.ResponseWriter, content string) {
 	}
 }
 
-// streamProgressAsSSE 把中间进度信息（如 SQL trace、工具调用提示）作为 SSE 帧推送
-// 用于 agent 多轮工具调用时实时向客户端展示执行过程
+// streamProgressAsSSE 把中间进度信息（如 SQL trace、工具调用提示）作为独立 SSE 事件推送
+// 用 event:progress 标记，与 data: 帧区分，前端单独处理不写入正文 content
+// 避免进度信息的换行符污染最终回答（之前用 delta.content 推送导致每条消息前后多回车）
 // SSE 头必须先由调用方 writeSSEHeaders 写入
 func streamProgressAsSSE(w http.ResponseWriter, content string) {
+	// 进度信息用 event:progress 帧推送，前端识别后单独展示，不混入 msg.content
 	chunk := map[string]interface{}{
-		"object": "chat.completion.chunk",
-		"choices": []interface{}{map[string]interface{}{
-			"index": 0,
-			"delta": map[string]interface{}{
-				"content": content,
-			},
-		}},
+		"type":    "progress",
+		"content": content,
 	}
 	chunkJSON, _ := json.Marshal(chunk)
-	fmt.Fprintf(w, "data: %s\n\n", string(chunkJSON))
+	fmt.Fprintf(w, "event: progress\ndata: %s\n\n", string(chunkJSON))
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}

@@ -42,30 +42,30 @@ func agentLoop(w http.ResponseWriter, req map[string]interface{}, attempts []*se
 	log.Printf("[agent] start user=%s tools=%d", username, len(tools))
 
 	for round := 0; ; round++ {
-		// 1. 请求 LLM（非流式，带故障转移）
-		result, err := callLLMWithFailover(messages, tools, attempts, convCtx)
+		// 1. 请求 LLM（真流式，带故障转移）-- content 实时推给前端
+		result, err := callLLMStreamWithFailover(w, messages, tools, attempts, convCtx)
 		if err != nil {
 			convCtx.SummarizeAndLog()
 			errResponse(w, fmt.Sprintf("所有厂商均失败: %s", err.Error()), 502)
 			return
 		}
 
-		// 2. 检查 tool_calls
-		toolCalls := extractToolCalls(result.Data)
+		// 2. 检查 tool_calls（流式累积后已是完整的）
+		toolCalls := result.ToolCalls
 
 		if len(toolCalls) == 0 {
-			// 3a. 最终答案
-			content := extractContentFromLLM(result.Data)
+			// 3a. 最终答案 -- content 已在流式调用中实时推完，这里只做收尾
+			content := result.Content
 			if content == "" {
 				content = "（模型未返回内容）"
 			}
 			log.Printf("[agent] done user=%s rounds=%d latency=%dms content_len=%d",
 				username, round+1, time.Since(startTime).Milliseconds(), len(content))
-			finishAgent(w, req, content, result.Route, convCtx, sqlTrace)
+			finishAgentStream(w, req, content, result.Route, convCtx, sqlTrace)
 			return
 		}
 
-		// 3b. 有 tool_calls
+		// 3b. 有 tool_calls（content 为空，tool_calls 和 content 互斥）
 		convCtx.ToolCallCount++
 
 		// 死循环检测：计算本轮 tool_calls 签名（函数名+参数 JSON）
@@ -81,18 +81,18 @@ func agentLoop(w http.ResponseWriter, req map[string]interface{}, attempts []*se
 			stuckCount++
 			if stuckCount >= stuckRoundsLimit {
 				log.Printf("[agent] stuck loop detected user=%s round=%d (same tool_calls %d times)", username, round+1, stuckCount)
-				// 强制总结（不带 tools）
-				forceResult, forceErr := callLLMWithFailover(messages, nil, attempts, convCtx)
+				// 强制总结（不带 tools，流式）
+				forceResult, forceErr := callLLMStreamWithFailover(w, messages, nil, attempts, convCtx)
 				if forceErr != nil {
-					finishAgent(w, req, "检测到查询陷入循环，且总结失败。请尝试换一种问法。", nil, convCtx, sqlTrace)
+					finishAgentStream(w, req, "检测到查询陷入循环，且总结失败。请尝试换一种问法。", nil, convCtx, sqlTrace)
 					return
 				}
-				content := extractContentFromLLM(forceResult.Data)
+				content := forceResult.Content
 				if content == "" {
 					content = "（模型未返回内容）"
 				}
 				log.Printf("[agent] stuck summary done user=%s content_len=%d", username, len(content))
-				finishAgent(w, req, content, forceResult.Route, convCtx, sqlTrace)
+				finishAgentStream(w, req, content, forceResult.Route, convCtx, sqlTrace)
 				return
 			}
 		} else {
@@ -134,7 +134,7 @@ func agentLoop(w http.ResponseWriter, req map[string]interface{}, attempts []*se
 
 			// 流式请求时，先把"即将调用什么技能"告知客户端
 			if convCtx.SSEHeaderWritten {
-				streamProgressAsSSE(w, fmt.Sprintf("\n[调用技能 %s...]\n", skillCode))
+				streamProgressAsSSE(w, fmt.Sprintf("[调用技能 %s...]", skillCode))
 			}
 
 			result, execErr := service.ExecuteBuiltinSkill(skillCode, userID, isAdmin, args)
@@ -145,7 +145,7 @@ func agentLoop(w http.ResponseWriter, req map[string]interface{}, attempts []*se
 					sqlTrace = append(sqlTrace, trace)
 					// 流式请求时立即推送 trace，让用户实时看到执行过程
 					if convCtx.SSEHeaderWritten {
-						streamProgressAsSSE(w, trace+"\n")
+						streamProgressAsSSE(w, trace)
 					}
 				}
 			}
@@ -199,6 +199,35 @@ func finishAgent(w http.ResponseWriter, req map[string]interface{}, content stri
 
 	// 输出
 	outputContent(w, content, modelID, convCtx)
+	convCtx.SummarizeAndLog()
+}
+
+// finishAgentStream 流式版收尾：content 已在 callLLMStreamWithFailover 中实时推完
+// 这里只做：保存消息 + 保存日志 + 推 [DONE] + 统计
+// 不再调 outputContent/streamContentAsSSE（避免重复推送）
+func finishAgentStream(w http.ResponseWriter, req map[string]interface{}, content string, route *service.RouteInfoType, convCtx *ConversationContext, sqlTrace []string) {
+	modelID := ""
+	vendorID := 0
+	if route != nil {
+		modelID = route.ModelID
+		vendorID = route.VendorID
+	}
+
+	// 保存
+	convCtx.AssistantContent = content
+	chatID := service.AddChatMessage(convCtx.UserID, "assistant", content, convCtx.SessionID, convCtx.MsgId)
+	convCtx.ChatHistoryID = chatID
+	latency := int(time.Since(convCtx.StartTime).Milliseconds())
+	go service.SaveConversationLogWithUser(chatID, convCtx.UserID, convCtx.Username, req, content, modelID, vendorID,
+		convCtx.TotalPrompt, convCtx.TotalCompletion, 0, latency)
+
+	// 推 [DONE] 结束流（content 已实时推完，这里只结束 SSE）
+	if convCtx.IsStream {
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
 	convCtx.SummarizeAndLog()
 }
 

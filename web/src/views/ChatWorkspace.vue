@@ -5,6 +5,9 @@ import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
 import { API_BASE } from '../api'
 
+// 声明组件名供 keep-alive include 匹配（工作台需要保活：切走时 SSE 流不中断）
+defineOptions({ name: 'ChatWorkspace' })
+
 // 统一获取鉴权请求头（Token 从 localStorage 读取）
 function authHeaders(json = false): Record<string, string> {
   const headers: Record<string, string> = {}
@@ -83,10 +86,15 @@ const CACHE_KEY = 'ai-os-chat-messages'
 let abortController: AbortController | null = null
 
 
-// 缓存管理
+// 缓存管理：localStorage 最多存 50 条消息，超过的丢弃更早的（避免容量溢出）
+// 注意：前端 messages.value 仍保留完整历史（供显示），这里只是限制持久化数量
+const CACHE_MAX_MESSAGES = 50
 function saveToCache() {
   try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify(messages.value))
+    const toSave = messages.value.length > CACHE_MAX_MESSAGES
+      ? messages.value.slice(messages.value.length - CACHE_MAX_MESSAGES)
+      : messages.value
+    localStorage.setItem(CACHE_KEY, JSON.stringify(toSave))
   } catch (e) {
     console.error('[ChatWorkspace] saveToCache error:', e)
   }
@@ -160,6 +168,12 @@ function scrollToBottom() {
     if (chatContainer.value) {
       chatContainer.value.scrollTop = chatContainer.value.scrollHeight
     }
+    // 延迟二次滚动：markdown 渲染可能导致 DOM 高度变化，确保滚到底
+    setTimeout(() => {
+      if (chatContainer.value) {
+        chatContainer.value.scrollTop = chatContainer.value.scrollHeight
+      }
+    }, 100)
   })
 }
 
@@ -398,7 +412,7 @@ async function sendMessage() {
   console.log('[Chat] Sending message:', text, `images: ${imgs.length}`)
 
   // 保存用户消息（带图片）
-  messages.value.push({ role: 'user', content: text, images: imgs.length > 0 ? imgs : undefined })
+  messages.value.push({ role: 'user', content: text, done: true, images: imgs.length > 0 ? imgs : undefined })
   input.value = ''
   pendingImages.value = [] // 清空待发送图片
   loading.value = true
@@ -412,21 +426,31 @@ async function sendMessage() {
 
   abortController = new AbortController()
 
-  try {
-    // 构建消息列表：有图片的 user 消息用多模态 content 数组格式
-    const reqMessages = messages.value.slice(0, aiIdx).map(m => {
-      if (m.role === 'user' && m.images && m.images.length > 0) {
-        // 多模态格式：text + image_url 数组
-        const content: any[] = []
-        if (m.content) content.push({ type: 'text', text: m.content })
-        for (const img of m.images) {
-          content.push({ type: 'image_url', image_url: { url: img } })
-        }
-        return { role: m.role, content }
-      }
-      return { role: m.role, content: m.content }
-    })
+  // 历史压缩策略（三段式）：
+  //   第 1~10 轮（最新）：原样保留，不做任何改动
+  //   第 11~20 轮：tool 结果由后端 OptimizeMessages 截断（已有逻辑，阈值 10 轮）
+  //   第 20 轮之前：直接丢弃，不发给后端（前端仍显示完整历史）
+  // 一轮 = 1 个 user + 1 个 assistant = 2 条消息，20 轮 = 40 条
+  const MAX_ROUNDS = 20
+  const MAX_MESSAGES = MAX_ROUNDS * 2
+  const allMessages = messages.value.slice(0, aiIdx)
+  const recentMessages = allMessages.length > MAX_MESSAGES
+    ? allMessages.slice(allMessages.length - MAX_MESSAGES)
+    : allMessages
 
+  const reqMessages = recentMessages.map(m => {
+    if (m.role === 'user' && m.images && m.images.length > 0) {
+      const content: any[] = []
+      if (m.content) content.push({ type: 'text', text: m.content })
+      for (const img of m.images) {
+        content.push({ type: 'image_url', image_url: { url: img } })
+      }
+      return { role: m.role, content }
+    }
+    return { role: m.role, content: m.content }
+  })
+
+  try {
     // 使用独立的工作台接口（不走代理）
     const response = await fetch(`${API_BASE}/api/workspace/chat`, {
       method: 'POST',
@@ -450,141 +474,201 @@ async function sendMessage() {
       return
     }
 
-    const reader = response.body!.getReader()
-    const decoder = new TextDecoder()
-    let sseBuffer = ''
-
-    // 渲染节流：用 requestAnimationFrame 合并同一帧内的多次内容更新
-    let renderScheduled = false
-    function scheduleScroll() {
-      if (renderScheduled) return
-      renderScheduled = true
-      requestAnimationFrame(() => {
-        renderScheduled = false
-        scrollToBottom()
-      })
-    }
-
-    let currentEventType = 'message' // 跟踪 SSE event 类型
-
-    while (true) {
-      const { done: streamDone, value } = await reader.read()
-      if (streamDone) break
-
-      sseBuffer += decoder.decode(value, { stream: true })
-      const lines = sseBuffer.split('\n')
-      sseBuffer = lines.pop() || ''
-
-      for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed) continue
-
-        // 忽略 SSE 注释行（keepalive 心跳）
-        if (trimmed.startsWith(':')) continue
-
-        // 解析 event 类型行
-        if (trimmed.startsWith('event: ')) {
-          currentEventType = trimmed.slice(7).trim()
-          continue
-        }
-
-        if (!trimmed.startsWith('data: ')) continue
-        const data = trimmed.slice(6)
-        if (data === '[DONE]') continue
-
-        // RAG 引用事件
-        if (currentEventType === 'references') {
-          try {
-            const refs = JSON.parse(data)
-            if (Array.isArray(refs) && refs.length > 0) {
-              messages.value[aiIdx].references = refs
-            }
-          } catch (e) {
-            console.error('[Chat] References parse error:', e)
-          }
-          currentEventType = 'message' // 重置
-          continue
-        }
-        currentEventType = 'message' // 重置
-
-        try {
-          const json = JSON.parse(data)
-          const msg = messages.value[aiIdx] // 通过响应式 Proxy 访问
-
-          // 错误
-          if (json.error) {
-            console.error('[Chat] Server error:', json.error)
-            msg.content += `\n\n[错误] ${json.error}`
-            scheduleScroll()
-            continue
-          }
-
-          // 工具调用开始（隐藏底层工具名，只计数）
-          if (json.tool_call) {
-            console.log('[Chat] Tool call:', json.tool_call.name)
-            msg.toolCalls!.push({
-              name: json.tool_call.name,
-              arguments: json.tool_call.arguments,
-            })
-            scheduleScroll()
-            continue
-          }
-
-          // 工具调用完成
-          if (json.tool_result) {
-            const lastTool = msg.toolCalls![msg.toolCalls!.length - 1]
-            if (lastTool && lastTool.name === json.tool_result.name) {
-              lastTool.result = json.tool_result.result_preview
-            }
-            scheduleScroll()
-            continue
-          }
-
-          // 正常内容 — 直接写入响应式对象，触发 Vue 重渲染
-          const content = json.choices?.[0]?.delta?.content
-          if (content) {
-            msg.content += content
-            scheduleScroll()
-          }
-        } catch (e) {
-          console.error('[Chat] Parse error:', e, 'data:', data)
-        }
-      }
-    }
-
-    // 流结束
-    const finalMsg = messages.value[aiIdx]
-    finalMsg.done = true
-    if (finalMsg.toolCalls?.length === 0) {
-      delete finalMsg.toolCalls
-    }
-    console.log('[Chat] AI response done, length:', finalMsg.content.length)
-    saveToCache()
-    saveMessage('assistant', finalMsg.content)
-    scrollToBottom()
-    onMessageDone()
+    await consumeSSE(response, aiIdx)
   } catch (e: any) {
     const msg = messages.value[aiIdx]
     if (e.name === 'AbortError') {
       msg.content += '\n\n[已中断]'
       msg.done = true
+      saveToCache()
+      saveMessage('assistant', msg.content)
     } else {
-      // 网络断开时保留已收到的部分内容
-      const partialLen = msg.content.length
-      if (partialLen > 0) {
-        msg.content += '\n\n> ⚠️ 网络中断，以上为部分回答'
-      } else {
-        msg.content += `\n\n[错误] ${e.message || '连接失败'}`
+      // 网络中断：自动重连一次
+      console.log('[Chat] 网络中断，1.5 秒后自动重连...', e.message)
+      // 标记重连状态（前端展示）
+      msg.content = '> 🔄 网络中断，正在重连...'
+      msg.done = false
+      scheduleScrollGlobal()
+      // 延迟重连，避免立刻重试又失败
+      await new Promise(r => setTimeout(r, 1500))
+      try {
+        // 重新发起请求（复用同样的 reqMessages 和 aiIdx）
+        abortController = new AbortController()
+        const retryResp = await fetch(`${API_BASE}/api/workspace/chat`, {
+          method: 'POST',
+          headers: authHeaders(true),
+          signal: abortController.signal,
+          body: JSON.stringify({ messages: reqMessages, stream: true })
+        })
+        // 清空"正在重连"提示，准备接收新内容
+        msg.content = ''
+        msg.toolCalls = []
+        await consumeSSE(retryResp, aiIdx)
+      } catch (e2: any) {
+        // 重连也失败
+        const partialLen = msg.content.length
+        if (partialLen > 0) {
+          msg.content += '\n\n> ⚠️ 网络中断，以上为部分回答'
+        } else {
+          msg.content = `\n\n[错误] 重连失败：${e2.message || '连接失败'}`
+        }
+        msg.done = true
+        saveToCache()
+        saveMessage('assistant', msg.content)
       }
-      msg.done = true
     }
-    saveToCache()
-    saveMessage('assistant', msg.content)
   }
 
   abortController = null
   loading.value = false
   scrollToBottom()
+}
+
+// consumeSSE 消费 SSE 流，解析内容/工具调用/进度，写入 messages.value[aiIdx]
+// 抽成独立函数，主请求和网络中断重连都复用
+async function consumeSSE(response: Response, aiIdx: number) {
+  const reader = response.body!.getReader()
+  const decoder = new TextDecoder()
+  let sseBuffer = ''
+
+  // 渲染节流：用 requestAnimationFrame 合并同一帧内的多次内容更新
+  let renderScheduled = false
+  function scheduleScroll() {
+    if (renderScheduled) return
+    renderScheduled = true
+    requestAnimationFrame(() => {
+      renderScheduled = false
+      scrollToBottom()
+    })
+  }
+
+  let currentEventType = 'message' // 跟踪 SSE event 类型
+
+  while (true) {
+    const { done: streamDone, value } = await reader.read()
+    if (streamDone) break
+
+    sseBuffer += decoder.decode(value, { stream: true })
+    const lines = sseBuffer.split('\n')
+    sseBuffer = lines.pop() || ''
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+
+      // 忽略 SSE 注释行（keepalive 心跳）
+      if (trimmed.startsWith(':')) continue
+
+      // 解析 event 类型行
+      if (trimmed.startsWith('event: ')) {
+        currentEventType = trimmed.slice(7).trim()
+        continue
+      }
+
+      if (!trimmed.startsWith('data: ')) continue
+      const data = trimmed.slice(6)
+      if (data === '[DONE]') continue
+
+      // RAG 引用事件
+      if (currentEventType === 'references') {
+        try {
+          const refs = JSON.parse(data)
+          if (Array.isArray(refs) && refs.length > 0) {
+            messages.value[aiIdx].references = refs
+          }
+        } catch (e) {
+          console.error('[Chat] References parse error:', e)
+        }
+        currentEventType = 'message' // 重置
+        continue
+      }
+
+      // 进度事件（工具调用过程提示）-- 不写入 content，单独展示
+      // 避免进度信息的换行符污染最终回答
+      if (currentEventType === 'progress') {
+        try {
+          const json = JSON.parse(data)
+          if (json.content) {
+            const msg = messages.value[aiIdx]
+            if (!msg.progress) msg.progress = []
+            msg.progress.push(json.content)
+            scheduleScroll()
+          }
+        } catch (e) {
+          console.error('[Chat] Progress parse error:', e)
+        }
+        currentEventType = 'message' // 重置
+        continue
+      }
+      currentEventType = 'message' // 重置
+
+      try {
+        const json = JSON.parse(data)
+        const msg = messages.value[aiIdx] // 通过响应式 Proxy 访问
+
+        // 错误
+        if (json.error) {
+          console.error('[Chat] Server error:', json.error)
+          msg.content += `\n\n[错误] ${json.error}`
+          scheduleScroll()
+          continue
+        }
+
+        // 工具调用开始（隐藏底层工具名，只计数）
+        if (json.tool_call) {
+          console.log('[Chat] Tool call:', json.tool_call.name)
+          msg.toolCalls!.push({
+            name: json.tool_call.name,
+            arguments: json.tool_call.arguments,
+          })
+          scheduleScroll()
+          continue
+        }
+
+        // 工具调用完成
+        if (json.tool_result) {
+          const lastTool = msg.toolCalls![msg.toolCalls!.length - 1]
+          if (lastTool && lastTool.name === json.tool_result.name) {
+            lastTool.result = json.tool_result.result_preview
+          }
+          scheduleScroll()
+          continue
+        }
+
+        // 正常内容 — 直接写入响应式对象，触发 Vue 重渲染
+        const content = json.choices?.[0]?.delta?.content
+        if (content) {
+          msg.content += content
+          scheduleScroll()
+        }
+      } catch (e) {
+        console.error('[Chat] Parse error:', e, 'data:', data)
+      }
+    }
+  }
+
+  // 流结束
+  const finalMsg = messages.value[aiIdx]
+  finalMsg.done = true
+  if (finalMsg.toolCalls?.length === 0) {
+    delete finalMsg.toolCalls
+  }
+  console.log('[Chat] AI response done, length:', finalMsg.content.length)
+  saveToCache()
+  saveMessage('assistant', finalMsg.content)
+  scrollToBottom()
+  onMessageDone()
+}
+
+// scheduleScrollGlobal 全局滚动节流（catch 块里重连时用）
+let _renderScheduled = false
+function scheduleScrollGlobal() {
+  if (_renderScheduled) return
+  _renderScheduled = true
+  requestAnimationFrame(() => {
+    _renderScheduled = false
+    scrollToBottom()
+  })
 }
 
 function stopChat() {

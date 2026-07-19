@@ -95,6 +95,11 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 			"messages": messages,
 			"stream":   true,
 		}
+		// 注入 max_tokens（按厂商+模型精确配置，实测上限值）
+		// 不透传客户端的 max_tokens：客户端值未必贴合模型上限，且不同模型上限差异大
+		if route.MaxTokens > 0 {
+			llmReq["max_tokens"] = route.MaxTokens
+		}
 		if len(clientTools) > 0 {
 			llmReq["tools"] = clientTools
 		}
