@@ -45,6 +45,9 @@ interface ModelGroup {
 }
 
 const availableOptions = ref<Option[]>([])
+// 全部选项（含已禁用 key），专门用于策略名称翻译
+// 历史策略可能引用 enabled=0 的 key，翻译时必须能查到真实名称
+const allOptions = ref<Option[]>([])
 const strategies = ref<Strategy[]>([])
 const loading = ref(false)
 
@@ -63,10 +66,141 @@ const cascadeModel = ref('')
 
 const selectedStrategy = () => strategies.value.find(s => s.id === selectedId.value)
 
+// ── 全局系统策略（管理员维护）──
+const isAdmin = ref(false)
+const showSystemDialog = ref(false)
+const systemStrategyLoading = ref(false)
+// 全局系统策略编辑表单（只支持轮询模式）
+const systemForm = ref<{ options: string[] }>({ options: [] })
+// 系统策略弹窗内的级联选择状态（独立于用户策略的级联，避免互相干扰）
+const sysCascadeVendor = ref('')
+const sysCascadeKey = ref('')
+const sysCascadeModel = ref('')
+const sysShowAddOption = ref(false)
+
+// 检查当前用户是否为管理员（通过 API 查询，与 Home.vue 一致）
+async function checkAdmin() {
+  try {
+    const token = localStorage.getItem('aios_token') || ''
+    if (!token) return
+    const res = await fetch(`${API_BASE}/api/system/me`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+    const data = await res.json()
+    if (data?.ok && data?.data) {
+      isAdmin.value = !!data.data.is_admin
+    }
+  } catch (e: any) {
+    console.error('[StrategyEditor] checkAdmin error:', e)
+    isAdmin.value = false
+  }
+}
+
+// 系统策略弹窗：级联变化时重置下级
+function onSysVendorChange() {
+  sysCascadeKey.value = ''
+  sysCascadeModel.value = ''
+}
+function onSysKeyChange() {
+  sysCascadeModel.value = ''
+}
+function onSysModelChange(modelId: string) {
+  if (!modelId || !sysCascadeVendor.value || !sysCascadeKey.value) return
+  const val = optionValue(sysCascadeVendor.value, sysCascadeKey.value, modelId)
+  if (!systemForm.value.options.includes(val)) {
+    systemForm.value.options.push(val)
+  }
+  sysShowAddOption.value = false
+  sysCascadeVendor.value = ''
+  sysCascadeKey.value = ''
+  sysCascadeModel.value = ''
+}
+function removeSysOption(idx: number) {
+  systemForm.value.options.splice(idx, 1)
+}
+
+// 加载全局系统策略
+async function fetchSystemStrategy() {
+  systemStrategyLoading.value = true
+  try {
+    const response = await fetch(`${API_BASE}/api/llm/global-system-strategy`, { headers: authHeaders() })
+    const result = await response.json()
+    if (result.ok && result.data && result.data.length > 0) {
+      systemForm.value.options = (result.data[0].options || []).map((o: any) =>
+        typeof o === 'string' ? o : `${o.vendor_id}|${o.key_id || ''}|${o.model_id}`
+      )
+    }
+  } catch (e: any) {
+    console.error('[StrategyEditor] fetchSystemStrategy error:', e)
+    ElMessage.error('加载系统策略失败: ' + e.message)
+  }
+  systemStrategyLoading.value = false
+}
+
+// 打开系统策略弹窗
+async function openSystemDialog() {
+  showSystemDialog.value = true
+  await fetchSystemStrategy()
+}
+
+// 保存全局系统策略
+async function saveSystemStrategy() {
+  if (systemForm.value.options.length === 0) {
+    ElMessage.warning('系统策略至少需要选择一个选项')
+    return
+  }
+  try {
+    const response = await fetch(`${API_BASE}/api/llm/global-system-strategy`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({
+        strategy: {
+          options: systemForm.value.options.map(parseOptionValue),
+        },
+      }),
+    })
+    const result = await response.json()
+    if (result.ok) {
+      ElMessage.success('系统策略已保存')
+      showSystemDialog.value = false
+    } else {
+      ElMessage.error(result.error || '保存失败')
+    }
+  } catch (e: any) {
+    console.error('[StrategyEditor] saveSystemStrategy error:', e)
+    ElMessage.error('保存失败: ' + e.message)
+  }
+}
+
 // 按厂商→密钥→模型三级分组
 const groupedOptions = computed<VendorGroup[]>(() => {
   const vendorMap = new Map<string, VendorGroup>()
   for (const opt of availableOptions.value) {
+    if (!vendorMap.has(opt.vendor_id)) {
+      vendorMap.set(opt.vendor_id, {
+        vendor_id: opt.vendor_id,
+        vendor_name: opt.vendor_name,
+        keys: [],
+      })
+    }
+    const vendor = vendorMap.get(opt.vendor_id)!
+    let keyGroup = vendor.keys.find(k => k.key_id === opt.key_id)
+    if (!keyGroup) {
+      keyGroup = { key_id: opt.key_id, key_name: opt.key_name, models: [] }
+      vendor.keys.push(keyGroup)
+    }
+    if (!keyGroup.models.find(m => m.model_id === opt.model_id)) {
+      keyGroup.models.push({ model_id: opt.model_id, display_name: opt.display_name })
+    }
+  }
+  return Array.from(vendorMap.values())
+})
+
+// 全部选项的三级分组（含已禁用 key），专供 resolveOptionLabel 翻译用
+// 与 groupedOptions 区分：groupedOptions 仅含启用项（级联选择用），allOptionsGrouped 含全部（翻译用）
+const allOptionsGrouped = computed<VendorGroup[]>(() => {
+  const vendorMap = new Map<string, VendorGroup>()
+  for (const opt of allOptions.value) {
     if (!vendorMap.has(opt.vendor_id)) {
       vendorMap.set(opt.vendor_id, {
         vendor_id: opt.vendor_id,
@@ -99,6 +233,16 @@ const cascadeModels = computed<ModelGroup[]>(() => {
   return keyGroup ? keyGroup.models : []
 })
 
+// 系统策略弹窗的级联列表（独立状态，避免与用户策略编辑互相干扰）
+const sysCascadeKeys = computed<KeyGroup[]>(() => {
+  const vendor = groupedOptions.value.find(v => v.vendor_id === sysCascadeVendor.value)
+  return vendor ? vendor.keys : []
+})
+const sysCascadeModels = computed<ModelGroup[]>(() => {
+  const keyGroup = sysCascadeKeys.value.find(k => k.key_id === sysCascadeKey.value)
+  return keyGroup ? keyGroup.models : []
+})
+
 function optionValue(vendorId: string, keyId: string, modelId: string) {
   return `${vendorId}|${keyId}|${modelId}`
 }
@@ -108,7 +252,8 @@ function resolveOptionLabel(val: string) {
   const vendorId = parts[0]
   const keyId = parts[1]
   const modelId = parts[2]
-  const vendor = groupedOptions.value.find(v => String(v.vendor_id) === vendorId)
+  // 用 allOptionsGrouped（含禁用 key）做翻译，保证历史策略引用的 enabled=0 的 key 也能显示真实名称
+  const vendor = allOptionsGrouped.value.find(v => String(v.vendor_id) === vendorId)
   const keyGroup = vendor?.keys.find(k => String(k.key_id) === keyId)
   const model = keyGroup?.models.find(m => m.model_id === modelId)
   if (vendor && keyGroup && model) {
@@ -159,13 +304,27 @@ async function fetchOptions() {
   }
 }
 
+// 加载全部选项（含已禁用 key），供 resolveOptionLabel 翻译用
+async function fetchAllOptions() {
+  try {
+    const response = await fetch(`${API_BASE}/api/llm/all-options`, { headers: authHeaders() })
+    const result = await response.json()
+    if (result.ok) {
+      allOptions.value = result.data || []
+    }
+  } catch (e: any) {
+    console.error('[StrategyEditor] fetchAllOptions error:', e)
+  }
+}
+
 async function fetchStrategies() {
   loading.value = true
   try {
     const response = await fetch(`${API_BASE}/api/llm/strategies`, { headers: authHeaders() })
     const result = await response.json()
     if (result.ok) {
-      strategies.value = (result.data || []).map((s: any) => ({
+      // 全局系统策略改造后，用户策略列表只展示 fixed/round_robin，system 不再属于用户
+      strategies.value = (result.data || []).filter((s: any) => s.type !== 'system').map((s: any) => ({
         id: s.id,
         name: s.name,
         type: s.type,
@@ -327,7 +486,8 @@ function onTypeChange() {
 }
 
 onMounted(async () => {
-  await Promise.all([fetchOptions(), fetchStrategies()])
+  checkAdmin()
+  await Promise.all([fetchOptions(), fetchAllOptions(), fetchStrategies()])
 })
 </script>
 
@@ -336,7 +496,107 @@ onMounted(async () => {
     <!-- Header -->
     <div class="page-header">
       <h2 class="page-title">策略编辑</h2>
+      <el-button v-if="isAdmin" type="warning" @click="openSystemDialog">
+        系统策略编辑
+      </el-button>
     </div>
+
+    <!-- 全局系统策略弹窗（仅管理员可见） -->
+    <el-dialog v-model="showSystemDialog" title="系统策略编辑" width="640px">
+      <el-alert
+        type="warning"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 16px;"
+      >
+        <template #title>全局生效</template>
+        当用户没有激活任何自定义策略时，将统一走此系统策略（轮询模式）。
+      </el-alert>
+
+      <div class="detail-section">
+        <label class="field-label">轮询选项列表</label>
+        <div class="option-tags">
+          <el-tag
+            v-for="(opt, idx) in systemForm.options"
+            :key="idx"
+            closable
+            size="large"
+            @close="removeSysOption(idx)"
+          >
+            {{ resolveOptionLabel(opt) }}
+          </el-tag>
+
+          <el-popover :visible="sysShowAddOption" placement="bottom" :width="480" trigger="click">
+            <template #reference>
+              <el-button size="small" @click="sysShowAddOption = true">+ 添加选项</el-button>
+            </template>
+            <div class="cascade-selects">
+              <div class="cascade-row">
+                <span class="cascade-label">厂商</span>
+                <el-select
+                  v-model="sysCascadeVendor"
+                  placeholder="选择厂商"
+                  filterable
+                  style="width: 100%;"
+                  @change="onSysVendorChange"
+                >
+                  <el-option
+                    v-for="v in groupedOptions"
+                    :key="v.vendor_id"
+                    :label="v.vendor_name"
+                    :value="v.vendor_id"
+                  />
+                </el-select>
+              </div>
+              <div class="cascade-row">
+                <span class="cascade-label">密钥</span>
+                <el-select
+                  v-model="sysCascadeKey"
+                  placeholder="选择密钥"
+                  filterable
+                  style="width: 100%;"
+                  :disabled="!sysCascadeVendor"
+                  @change="onSysKeyChange"
+                >
+                  <el-option
+                    v-for="k in sysCascadeKeys"
+                    :key="k.key_id"
+                    :label="k.key_name"
+                    :value="k.key_id"
+                  />
+                </el-select>
+              </div>
+              <div class="cascade-row">
+                <span class="cascade-label">模型</span>
+                <el-select
+                  v-model="sysCascadeModel"
+                  placeholder="选择模型"
+                  filterable
+                  style="width: 100%;"
+                  :disabled="!sysCascadeKey"
+                  @change="onSysModelChange"
+                >
+                  <el-option
+                    v-for="m in sysCascadeModels"
+                    :key="m.model_id"
+                    :label="m.display_name"
+                    :value="m.model_id"
+                    :disabled="systemForm.options.includes(optionValue(sysCascadeVendor, sysCascadeKey, m.model_id))"
+                  />
+                </el-select>
+              </div>
+            </div>
+          </el-popover>
+        </div>
+      </div>
+
+      <template #footer>
+        <el-button @click="showSystemDialog = false">取消</el-button>
+        <el-button type="primary" :loading="systemStrategyLoading" @click="saveSystemStrategy">
+          保存
+        </el-button>
+      </template>
+    </el-dialog>
 
     <div class="editor-layout">
       <!-- Left: Strategy List -->
@@ -377,41 +637,7 @@ onMounted(async () => {
         </div>
 
         <template v-else>
-          <!-- 系统接管：只读展示 -->
-          <template v-if="editForm.type === 'system'">
-            <div class="detail-section">
-              <label class="field-label">策略名称</label>
-              <el-input v-model="editForm.name" disabled />
-            </div>
-            <div class="detail-section">
-              <label class="field-label">策略类型</label>
-              <el-tag type="warning" effect="plain">系统接管（由系统统一管理，不可修改）</el-tag>
-            </div>
-            <div class="detail-section">
-              <label class="field-label">预置选项（只读）</label>
-              <div class="option-tags">
-                <el-tag
-                  v-for="(opt, idx) in editForm.options"
-                  :key="idx"
-                  size="large"
-                  type="info"
-                >
-                  {{ resolveOptionLabel(opt) }}
-                </el-tag>
-              </div>
-              <div class="system-hint">
-                <el-alert type="info" :closable="false" show-icon>
-                  系统接管策略由系统统一配置，轮询使用以下 6 个 API：智谱 GLM-5.2 × 2、DeepSeek Chat × 1、火山方舟（Ark Code / GLM-5.2 / DeepSeek-V4-Pro）× 3。配合熔断机制自动跳过故障模型。
-                </el-alert>
-              </div>
-            </div>
-            <div class="detail-actions">
-              <el-button type="primary" @click="setActive">激活此策略</el-button>
-            </div>
-          </template>
-
-          <!-- 普通策略：可编辑 -->
-          <template v-else>
+          <!-- 普通策略：可编辑（fixed / round_robin） -->
           <div class="detail-section">
             <label class="field-label">策略名称</label>
             <el-input v-model="editForm.name" placeholder="请输入策略名称" />
@@ -512,7 +738,6 @@ onMounted(async () => {
             <el-button @click="saveStrategy">保存</el-button>
             <el-button type="danger" @click="deleteStrategy">删除策略</el-button>
           </div>
-          </template>
         </template>
       </div>
     </div>

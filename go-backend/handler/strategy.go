@@ -67,6 +67,61 @@ func SetActiveStrategy(w http.ResponseWriter, r *http.Request) {
 	okResponse(w, map[string]interface{}{"found": found})
 }
 
+// ── 全局系统策略（管理员维护，user_id=0，全局生效）──
+
+// GetGlobalSystemStrategy 查询全局系统策略（仅管理员）
+func GetGlobalSystemStrategy(w http.ResponseWriter, r *http.Request) {
+	session := middleware.GetSessionFromCtx(r)
+	if session == nil {
+		errResponse(w, "未登录", http.StatusUnauthorized)
+		return
+	}
+	if !session.IsAdmin {
+		errResponse(w, "仅管理员可查看全局系统策略", http.StatusForbidden)
+		return
+	}
+	strategies := service.GetGlobalSystemStrategy()
+	okResponse(w, strategies)
+}
+
+// SaveGlobalSystemStrategy 保存全局系统策略（仅管理员）
+// 请求体：{"strategy": {...}}（单条策略对象）
+func SaveGlobalSystemStrategy(w http.ResponseWriter, r *http.Request) {
+	session := middleware.GetSessionFromCtx(r)
+	if session == nil {
+		errResponse(w, "未登录", http.StatusUnauthorized)
+		return
+	}
+	if !session.IsAdmin {
+		errResponse(w, "仅管理员可编辑全局系统策略", http.StatusForbidden)
+		return
+	}
+	var body map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		errResponse(w, "请求体解析失败", 400)
+		return
+	}
+	// 兼容两种入参格式：{strategy:{...}} 或直接 {...}
+	var strategyMap map[string]interface{}
+	if s, ok := body["strategy"].(map[string]interface{}); ok {
+		strategyMap = s
+	} else {
+		strategyMap = body
+	}
+	strategy := ParseStrategy(strategyMap)
+	// 强制保证全局系统策略的字段约束
+	strategy.ID = "global_system"
+	strategy.Name = "系统接管"
+	strategy.Type = "system"
+	strategy.Active = true
+	if len(strategy.Options) == 0 {
+		errResponse(w, "系统策略至少需要 1 个选项", 400)
+		return
+	}
+	service.SaveGlobalSystemStrategy([]service.StrategyType{strategy})
+	okResponse(w, strategy)
+}
+
 // ParseStrategy 从 map 解析策略
 func ParseStrategy(s map[string]interface{}) service.StrategyType {
 	id, _ := s["id"].(string)

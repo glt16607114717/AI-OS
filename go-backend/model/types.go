@@ -130,6 +130,7 @@ type RouteInfo struct {
 	KeyID        string `json:"key_id"`
 	KeyName      string `json:"key_name,omitempty"`
 	ModelID      string `json:"model_id"`
+	MaxTokens    int    `json:"max_tokens,omitempty"`     // 单次输出上限（来自 sys_model，注入到 llmReq）
 	QuotaExhausted bool  `json:"_quota_exhausted,omitempty"`
 }
 

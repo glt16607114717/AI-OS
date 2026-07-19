@@ -2,7 +2,9 @@ package service
 
 import (
 	"ai-os-server/config"
+	"ai-os-server/middleware"
 	"ai-os-server/model"
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
@@ -11,6 +13,7 @@ import (
 	"math/big"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -162,10 +165,11 @@ func SaveVendorKeys(vendorID int, keys []map[string]interface{}) error {
 		incomingNames[name] = true
 	}
 
-	// 删除不在传入列表中的 key
+	// 软删除不在传入列表中的 key（改 enabled=0，保留记录供历史策略翻译名称）
+	// 注意：不能物理删除，否则策略 JSON 里引用的 key_id 会查不到名称，前端只能显示 ID
 	for name, id := range existingMap {
 		if !incomingNames[name] {
-			if _, err := tx.Exec("DELETE FROM sys_api_key WHERE id = ?", id); err != nil {
+			if _, err := tx.Exec("UPDATE sys_api_key SET enabled = 0 WHERE id = ?", id); err != nil {
 				return err
 			}
 		}
@@ -220,20 +224,38 @@ func ToggleVendor(vendorID int, enabled bool) (bool, error) {
 // ── 可用选项 ──
 
 func GetAvailableOptions() ([]map[string]interface{}, error) {
+	return getOptions(false)
+}
+
+// GetAllOptionsIncludeDisabled 返回全部选项（含已禁用的 key），供策略名称翻译使用
+// 历史策略可能引用 enabled=0 的 key，翻译时需要查到真实名称，否则前端只能显示 ID
+func GetAllOptionsIncludeDisabled() ([]map[string]interface{}, error) {
+	return getOptions(true)
+}
+
+// getOptions 查询厂商/密钥/模型选项
+//   - includeDisabled=false：只返回 enabled=1 的 key（策略编辑页级联选择用，避免选到禁用项）
+//   - includeDisabled=true：返回全部 key（策略名称翻译用，保证 resolveOptionLabel 能解析）
+func getOptions(includeDisabled bool) ([]map[string]interface{}, error) {
 	conn, err := GetDB()
 	if err != nil {
 		return nil, err
 	}
-	rows, err := conn.Query(`
+	query := `
 		SELECT v.id as vendor_id, v.name as vendor_name, v.base_url,
-		       k.id as key_id, k.name as key_name, k.api_key,
+		       k.id as key_id, k.name as key_name, k.api_key, k.enabled,
 		       m.model_id, m.name as display_name
 		FROM sys_vendor v
-		JOIN sys_api_key k ON k.vendor_id = v.id AND k.enabled = 1
+		JOIN sys_api_key k ON k.vendor_id = v.id
 		JOIN sys_model m ON m.vendor_id = v.id
 		WHERE v.enabled = 1 AND k.api_key != ''
-		ORDER BY v.id, m.id
-	`)
+	`
+	if !includeDisabled {
+		query += " AND k.enabled = 1"
+	}
+	query += " ORDER BY v.id, m.id"
+
+	rows, err := conn.Query(query)
 	if err != nil {
 		return nil, err
 	}
@@ -241,17 +263,16 @@ func GetAvailableOptions() ([]map[string]interface{}, error) {
 
 	var result []map[string]interface{}
 	for rows.Next() {
-		var vendorID int
+		var vendorID, keyID, keyEnabled int
 		var vendorName, baseURL string
-		var keyID int
 		var keyName, apiKey, modelID, displayName string
-		if err := rows.Scan(&vendorID, &vendorName, &baseURL, &keyID, &keyName, &apiKey, &modelID, &displayName); err != nil {
+		if err := rows.Scan(&vendorID, &vendorName, &baseURL, &keyID, &keyName, &apiKey, &keyEnabled, &modelID, &displayName); err != nil {
 			log.Printf("[options] scan 失败: %v", err)
 			continue
 		}
 		result = append(result, map[string]interface{}{
 			"vendor_id": vendorID, "vendor_name": vendorName, "base_url": baseURL,
-			"key_id": keyID, "key_name": keyName, "api_key": apiKey,
+			"key_id": keyID, "key_name": keyName, "api_key": apiKey, "key_enabled": keyEnabled,
 			"model_id": modelID, "display_name": displayName,
 		})
 	}
@@ -287,6 +308,72 @@ func randIntn(n int) int {
 	return int(bigN.Int64())
 }
 
+// ── 策略 Redis 缓存层（cache-aside 模式）──
+//
+// 策略数据超高频查询且相对固定，走 Redis 缓存：
+//   - 读：先查 Redis，miss 查 MySQL 并回写（TTL 30 天兜底，防永久脏数据）
+//   - 写：DB 更新成功后 DEL 对应 key（不回写，下次读自动重建）
+//
+// key 规范：
+//   - 用户策略：strategy:user:{userID}
+//   - 全局系统策略：strategy:global
+//
+// 一致性保障：
+//   - 所有写操作（save/saveGlobal/setActive/delete）都在 DB 成功后 DEL key
+//   - Redis 不可用时降级直查 DB（GetRedis() 返回 nil 时跳过缓存）
+const (
+	strategyCacheTTL = 30 * 24 * time.Hour // 30 天兜底 TTL
+)
+
+func strategyCacheKey(userID int) string  { return fmt.Sprintf("strategy:user:%d", userID) }
+const strategyGlobalCacheKey = "strategy:global"
+
+// strategyCacheGet 读缓存，miss 返回 nil
+// 注意：返回的切片是反序列化副本，调用方可安全修改
+func strategyCacheGet(ctx context.Context, key string) []model.Strategy {
+	rdb := middleware.GetRedis()
+	if rdb == nil {
+		return nil // Redis 不可用，降级直查 DB
+	}
+	data, err := rdb.Get(ctx, key).Result()
+	if err != nil {
+		return nil // cache miss 或 Redis 异常，统一走 DB
+	}
+	var strategies []model.Strategy
+	if err := json.Unmarshal([]byte(data), &strategies); err != nil {
+		log.Printf("[strategyCache] 反序列化失败 key=%s: %v", key, err)
+		return nil
+	}
+	return strategies
+}
+
+// strategyCacheSet 回写缓存（读 DB 后调用）
+func strategyCacheSet(ctx context.Context, key string, strategies []model.Strategy) {
+	rdb := middleware.GetRedis()
+	if rdb == nil {
+		return
+	}
+	data, err := json.Marshal(strategies)
+	if err != nil {
+		log.Printf("[strategyCache] 序列化失败 key=%s: %v", key, err)
+		return
+	}
+	if err := rdb.Set(ctx, key, data, strategyCacheTTL).Err(); err != nil {
+		log.Printf("[strategyCache] 回写失败 key=%s: %v", key, err)
+	}
+}
+
+// strategyCacheDel 删缓存（DB 写操作成功后调用）
+func strategyCacheDel(ctx context.Context, key string) {
+	rdb := middleware.GetRedis()
+	if rdb == nil {
+		return
+	}
+	if err := rdb.Del(ctx, key).Err(); err != nil {
+		log.Printf("[strategyCache] 删除失败 key=%s: %v", key, err)
+	}
+}
+
 func EnsureStrategyTable() {
 	conn, _ := GetDB()
 	if conn == nil {
@@ -298,6 +385,36 @@ func EnsureStrategyTable() {
 		data JSON NOT NULL,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
+
+	// 确保全局系统策略行存在（user_id=0）
+	// 无激活策略的所有用户都走这条策略，缺失会导致请求失败
+	ensureGlobalSystemStrategy()
+}
+
+// ensureGlobalSystemStrategy 启动时确保 user_id=0 的全局系统策略行存在
+// 若不存在，用 SystemStrategyOptions 初始化；若已存在则不覆盖（管理员可能已修改）
+func ensureGlobalSystemStrategy() {
+	conn, _ := GetDB()
+	if conn == nil {
+		return
+	}
+	var id int
+	err := conn.QueryRow("SELECT id FROM sys_strategy WHERE user_id = 0").Scan(&id)
+	if err == sql.ErrNoRows {
+		// 不存在，用默认系统策略初始化
+		defaultStrategy := []model.Strategy{{
+			ID:      "global_system",
+			Name:    "系统接管",
+			Type:    "system",
+			Active:  true,
+			Options: SystemStrategyOptions(),
+		}}
+		data := toJSON(defaultStrategy)
+		conn.Exec("INSERT INTO sys_strategy (user_id, data) VALUES (0, ?)", data)
+		log.Println("[strategy] 全局系统策略初始化完成（user_id=0）")
+	} else if err != nil {
+		log.Printf("[strategy] 检查全局系统策略失败: %v", err)
+	}
 }
 
 // SystemStrategyOptions 系统接管预置的6个API配置
@@ -313,32 +430,113 @@ func SystemStrategyOptions() []model.StrategyOption {
 	}
 }
 
+// ── 全局系统策略（user_id=0，管理员维护，全局生效）──
+//
+// 生效逻辑：
+//   - 用户有激活策略（fixed/round_robin）→ 走自己的策略
+//   - 用户无激活策略 → 走全局系统策略（不再 fallback GetDefaultRoute）
+//
+// 缓存：走 strategy:global key，cache-aside 模式
+
+// loadGlobalSystemStrategy 从 DB 加载全局系统策略（带 Redis 缓存）
+// 返回 *Strategy（单条），若不存在返回 nil
+func loadGlobalSystemStrategy() *model.Strategy {
+	ctx := context.Background()
+	cacheKey := strategyGlobalCacheKey
+
+	// cache-aside 读：先查 Redis
+	if cached := strategyCacheGet(ctx, cacheKey); cached != nil && len(cached) > 0 {
+		s := cached[0]
+		return &s
+	}
+
+	// cache miss：查 DB
+	conn, _ := GetDB()
+	if conn == nil {
+		return nil
+	}
+	var data string
+	err := conn.QueryRow("SELECT data FROM sys_strategy WHERE user_id = 0").Scan(&data)
+	if err != nil {
+		log.Printf("[strategy] 加载全局系统策略失败: %v", err)
+		return nil
+	}
+	var strategies []model.Strategy
+	if err := json.Unmarshal([]byte(data), &strategies); err != nil {
+		log.Printf("[strategy] 全局系统策略 JSON 解析失败: %v", err)
+		return nil
+	}
+	if len(strategies) == 0 {
+		return nil
+	}
+
+	// 回写缓存
+	strategyCacheSet(ctx, cacheKey, strategies)
+	s := strategies[0]
+	return &s
+}
+
+// SaveGlobalSystemStrategy 管理员保存全局系统策略（user_id=0）
+// strategies 应为单条系统策略（type=system）
+func SaveGlobalSystemStrategy(strategies []model.Strategy) {
+	conn, _ := GetDB()
+	if conn == nil {
+		return
+	}
+	data := toJSON(strategies)
+	// upsert：先删后插，保持 user_id=0 唯一
+	conn.Exec("DELETE FROM sys_strategy WHERE user_id = 0")
+	conn.Exec("INSERT INTO sys_strategy (user_id, data) VALUES (0, ?)", data)
+	// cache-aside 写：DB 成功后删缓存
+	strategyCacheDel(context.Background(), strategyGlobalCacheKey)
+	log.Printf("[strategy] 全局系统策略已保存，options=%d", len(strategies[0].Options))
+}
+
+// GetGlobalSystemStrategy 对外暴露的查询接口（handler 调用）
+// 返回切片形式（与前端策略列表数据结构一致）
+func GetGlobalSystemStrategy() []model.Strategy {
+	s := loadGlobalSystemStrategy()
+	if s == nil {
+		// 兜底：DB 无记录时返回 SystemStrategyOptions 默认值（只读）
+		return []model.Strategy{{
+			ID:      "global_system",
+			Name:    "系统接管",
+			Type:    "system",
+			Active:  true,
+			Options: SystemStrategyOptions(),
+		}}
+	}
+	return []model.Strategy{*s}
+}
+
 // CreateSystemStrategy 为用户创建并激活系统接管策略
+// [已废弃] 全局系统策略改造后，用户不再持有 system 策略，无激活策略时自动走全局系统策略
+// 保留函数签名仅为向后兼容，实际为空操作
 func CreateSystemStrategy(userID int) {
-	strategies := loadStrategiesFromDB(userID, false)
-	// 已有 system 策略就不重复创建
-	for _, s := range strategies {
-		if s.Type == "system" {
-			s.Active = true
-			saveStrategiesToDB(strategies, userID)
-			return
-		}
-	}
-	// 创建系统接管策略，同时取消其他策略的 active
-	for i := range strategies {
-		strategies[i].Active = false
-	}
-	strategies = append(strategies, model.Strategy{
-		ID:      randomID(12),
-		Name:    "系统接管",
-		Type:    "system",
-		Active:  true,
-		Options: SystemStrategyOptions(),
-	})
-	saveStrategiesToDB(strategies, userID)
+	// no-op：全局系统策略由管理员在 user_id=0 行维护，用户无需创建
 }
 
 func loadStrategiesFromDB(userID int, isAdmin bool) []model.Strategy {
+	// admin 查询所有策略不走缓存（数据量大且需要跨用户聚合）
+	if !isAdmin {
+		// cache-aside 读：先查 Redis
+		ctx := context.Background()
+		cacheKey := strategyCacheKey(userID)
+		if cached := strategyCacheGet(ctx, cacheKey); cached != nil {
+			return cached
+		}
+		// cache miss：查 DB 并回写
+		dbResult := loadStrategiesFromDBDirect(userID, false)
+		if dbResult != nil {
+			strategyCacheSet(ctx, cacheKey, dbResult)
+		}
+		return dbResult
+	}
+	return loadStrategiesFromDBDirect(userID, true)
+}
+
+// loadStrategiesFromDBDirect 直查 MySQL（不走缓存）
+func loadStrategiesFromDBDirect(userID int, isAdmin bool) []model.Strategy {
 	conn, err := GetDB()
 	if err != nil {
 		log.Printf("[strategy] DB连接失败: %v", err)
@@ -418,6 +616,8 @@ func saveStrategiesToDB(strategies []model.Strategy, userID int) {
 	// 先删除该用户的策略，再插入
 	conn.Exec("DELETE FROM sys_strategy WHERE user_id = ?", userID)
 	conn.Exec("INSERT INTO sys_strategy (user_id, data) VALUES (?, ?)", userID, data)
+	// cache-aside 写：DB 成功后删缓存，下次读自动重建
+	strategyCacheDel(context.Background(), strategyCacheKey(userID))
 }
 
 func GetStrategies(userID int, isAdmin bool) []model.Strategy {
@@ -425,9 +625,10 @@ func GetStrategies(userID int, isAdmin bool) []model.Strategy {
 }
 
 func SaveStrategy(s model.Strategy, userID int) {
-	// system 策略的 options 始终由系统控制
+	// 全局系统策略改造后，用户策略只允许 fixed/round_robin
+	// system 类型由管理员通过 SaveGlobalSystemStrategy 维护，普通保存强制改为 round_robin
 	if s.Type == "system" {
-		s.Options = SystemStrategyOptions()
+		s.Type = "round_robin"
 	}
 	strategies := loadStrategiesFromDB(userID, false)
 
@@ -459,9 +660,6 @@ func DeleteStrategy(id string, userID int) {
 	strategies := loadStrategiesFromDB(userID, false)
 	var filtered []model.Strategy
 	for _, s := range strategies {
-		if s.ID == id && s.Type == "system" {
-			return // 系统接管策略不允许删除
-		}
 		if s.ID != id {
 			filtered = append(filtered, s)
 		}
@@ -514,8 +712,12 @@ func GetRouteByStrategy(userID int) *model.RouteInfo {
 			break
 		}
 	}
+	// 无激活策略 → 走全局系统策略（管理员维护，user_id=0）
 	if active == nil || len(active.Options) == 0 {
-		return nil
+		active = loadGlobalSystemStrategy()
+		if active == nil || len(active.Options) == 0 {
+			return nil
+		}
 	}
 
 	// 预查 enabled key 列表，禁用的 key 一开始就不参与轮询
@@ -565,9 +767,12 @@ func GetAllRoutesForFailover(userID int) []model.RouteInfo {
 			break
 		}
 	}
-	// 任何策略都应支持故障转移；无策略则无兜底
+	// 无激活策略 → 走全局系统策略做故障转移
 	if active == nil {
-		return nil
+		active = loadGlobalSystemStrategy()
+		if active == nil {
+			return nil
+		}
 	}
 
 	// 收集所有可用模型
@@ -619,9 +824,16 @@ func enrichRouteInfo(opt *model.StrategyOption) *model.RouteInfo {
 	}
 
 	var apiKey, keyName string
-	if err := conn.QueryRow("SELECT api_key, name FROM sys_api_key WHERE id = ? AND enabled = 1", opt.KeyID).Scan(&apiKey, &keyName); err != nil || apiKey == "" {
+	// 路由解析时不带 enabled 过滤：软删除的 key 仍可能被历史策略引用
+	// 实际有效性由 IsKeyExhausted 和故障转移控制，这里只负责拿 api_key 和名称
+	if err := conn.QueryRow("SELECT api_key, name FROM sys_api_key WHERE id = ?", opt.KeyID).Scan(&apiKey, &keyName); err != nil || apiKey == "" {
 		return nil
 	}
+
+	// 查模型的 max_tokens（按 vendor_id + model_id 精确定位，同模型不同厂商上限可能不同）
+	// 实测：智谱 glm-5.2 上限 131072，火山 glm-5.2 上限 128000，deepseek-v4-pro 上限 393216
+	var maxTokens sql.NullInt64
+	conn.QueryRow("SELECT max_tokens FROM sys_model WHERE vendor_id = ? AND model_id = ?", opt.VendorID, opt.ModelID).Scan(&maxTokens)
 
 	ri := &model.RouteInfo{
 		VendorID:   opt.VendorID,
@@ -631,6 +843,7 @@ func enrichRouteInfo(opt *model.StrategyOption) *model.RouteInfo {
 		KeyID:      opt.KeyID,
 		KeyName:    keyName,
 		ModelID:    opt.ModelID,
+		MaxTokens:  int(maxTokens.Int64),
 	}
 	if IsKeyExhausted(opt.KeyID) {
 		ri.QuotaExhausted = true
