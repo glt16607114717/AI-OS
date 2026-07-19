@@ -70,3 +70,14 @@ func GetAvailableOptions(w http.ResponseWriter, r *http.Request) {
 	}
 	okResponse(w, options)
 }
+
+// GetAllOptions 返回全部选项（含已禁用的 key），供策略名称翻译使用
+// 历史策略可能引用 enabled=0 的 key，翻译时需要查到真实名称
+func GetAllOptions(w http.ResponseWriter, r *http.Request) {
+	options, err := service.GetAllOptionsIncludeDisabled()
+	if err != nil {
+		errResponse(w, err.Error(), 500)
+		return
+	}
+	okResponse(w, options)
+}

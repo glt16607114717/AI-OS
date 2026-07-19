@@ -3,6 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- 不缓存 index.html：确保浏览器每次都拿最新的 chunk 文件名，避免部署后菜单卡死 -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <title>AI-OS</title>
   <link rel="icon" href="/icon.ico" />
 </head>

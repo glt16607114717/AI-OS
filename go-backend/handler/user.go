@@ -73,14 +73,12 @@ func CreateUser(w http.ResponseWriter, r *http.Request) {
 		errResponse(w, "用户名和密码不能为空", 400)
 		return
 	}
+	// 全局系统策略改造后：新用户不再创建 system 策略
+	// 无激活策略时自动走管理员维护的全局系统策略（user_id=0）
 	result, err := service.CreateUser(username, password, isAdmin, userType)
 	if err != nil {
 		errResponse(w, err.Error(), 400)
 		return
-	}
-	// 新用户自动创建并激活系统接管策略
-	if userID, ok := result["id"].(int64); ok {
-		service.CreateSystemStrategy(int(userID))
 	}
 	okResponse(w, result)
 }
