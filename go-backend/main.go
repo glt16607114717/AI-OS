@@ -147,10 +147,15 @@ func main() {
 		// LLM 配置
 		r.Get("/api/llm/catalog", handler.GetCatalog)
 		r.Get("/api/llm/available-options", handler.GetAvailableOptions)
+		// 全部选项（含禁用 key），供策略名称翻译使用
+		r.Get("/api/llm/all-options", handler.GetAllOptions)
 		r.Get("/api/llm/strategies", handler.GetStrategies)
 		r.Post("/api/llm/save-strategy", handler.SaveStrategy)
 		r.Post("/api/llm/delete-strategy", handler.DeleteStrategy)
 		r.Post("/api/llm/set-active-strategy", handler.SetActiveStrategy)
+		// 全局系统策略（管理员维护，user_id=0，全局生效）
+		r.Get("/api/llm/global-system-strategy", handler.GetGlobalSystemStrategy)
+		r.Post("/api/llm/global-system-strategy", handler.SaveGlobalSystemStrategy)
 
 		// 用户管理（普通用户可访问，handler 内做权限隔离）
 		r.Get("/api/users", handler.ListUsers)
@@ -162,8 +167,17 @@ func main() {
 		// 退出
 		r.Post("/api/logout", handler.Logout)
 
-		// 需求管理（普通用户查看自己的需求）
+		// 需求管理（所有登录用户均可访问，不做权限校验）
 		r.Get("/api/requirements/my", handler.GetMyRequirements)
+		r.Get("/api/requirements/all", handler.GetAllRequirementsAdmin)
+		r.Post("/api/requirements/update-status", handler.UpdateRequirementStatus)
+		r.Post("/api/requirements/withdraw", handler.WithdrawRequirement)
+
+		// Bug 管理（所有登录用户均可访问，不做权限校验）
+		r.Get("/api/bugs/my", handler.GetMyBugs)
+		r.Get("/api/bugs/all", handler.GetAllBugs)
+		r.Post("/api/bugs/update-status", handler.UpdateBugStatus)
+		r.Post("/api/bugs/withdraw", handler.WithdrawBug)
 	})
 
 	// ── 需要管理员 ──
@@ -194,10 +208,6 @@ func main() {
 		r.Get("/api/prank/list", handler.GetPrankList)
 		r.Post("/api/prank/save", handler.SavePrank)
 		r.Delete("/api/prank/delete", handler.DeletePrank)
-
-		// 需求管理（管理员）
-		r.Get("/api/requirements/all", handler.GetAllRequirementsAdmin)
-		r.Post("/api/requirements/update-status", handler.UpdateRequirementStatus)
 
 		// 用户类型切换（管理员）
 		r.Post("/api/users/toggle-user-type", handler.ToggleUserType)

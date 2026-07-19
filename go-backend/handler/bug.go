@@ -7,14 +7,14 @@ import (
 	"net/http"
 )
 
-// GetMyRequirements 用户查看自己的需求列表
-func GetMyRequirements(w http.ResponseWriter, r *http.Request) {
+// GetMyBugs 用户查看自己的 Bug 列表
+func GetMyBugs(w http.ResponseWriter, r *http.Request) {
 	session := middleware.GetSessionFromCtx(r)
 	if session == nil {
 		errResponse(w, "未登录", 401)
 		return
 	}
-	list, err := service.GetMyRequirements(session.UserID)
+	list, err := service.GetMyBugs(session.UserID)
 	if err != nil {
 		errResponse(w, err.Error(), 500)
 		return
@@ -22,11 +22,10 @@ func GetMyRequirements(w http.ResponseWriter, r *http.Request) {
 	okResponse(w, list)
 }
 
-// GetAllRequirementsAdmin 查看所有需求
-// 权限：不做校验，所有登录用户均可访问（需求收件箱对所有用户开放）
-func GetAllRequirementsAdmin(w http.ResponseWriter, r *http.Request) {
+// GetAllBugs 查看所有 Bug（支持 status 过滤）
+func GetAllBugs(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
-	list, err := service.GetAllRequirements(status)
+	list, err := service.GetAllBugs(status)
 	if err != nil {
 		errResponse(w, err.Error(), 500)
 		return
@@ -34,9 +33,8 @@ func GetAllRequirementsAdmin(w http.ResponseWriter, r *http.Request) {
 	okResponse(w, list)
 }
 
-// UpdateRequirementStatus 更新需求状态
-// 权限：不做校验，所有登录用户均可操作
-func UpdateRequirementStatus(w http.ResponseWriter, r *http.Request) {
+// UpdateBugStatus 更新 Bug 状态
+func UpdateBugStatus(w http.ResponseWriter, r *http.Request) {
 	var body map[string]interface{}
 	json.NewDecoder(r.Body).Decode(&body)
 	id := intFloat(body["id"])
@@ -46,16 +44,15 @@ func UpdateRequirementStatus(w http.ResponseWriter, r *http.Request) {
 		errResponse(w, "缺少 id", 400)
 		return
 	}
-	if err := service.UpdateRequirementStatus(int(id), status, adminNote); err != nil {
+	if err := service.UpdateBugStatus(int(id), status, adminNote); err != nil {
 		errResponse(w, err.Error(), 500)
 		return
 	}
 	okResponse(w, "状态已更新")
 }
 
-// WithdrawRequirement 撤销需求（改 status=withdrawn，不删除）
-// 只能撤销自己提的需求
-func WithdrawRequirement(w http.ResponseWriter, r *http.Request) {
+// WithdrawBug 撤销 Bug（改 status=withdrawn，不删除）
+func WithdrawBug(w http.ResponseWriter, r *http.Request) {
 	session := middleware.GetSessionFromCtx(r)
 	if session == nil {
 		errResponse(w, "未登录", 401)
@@ -68,9 +65,9 @@ func WithdrawRequirement(w http.ResponseWriter, r *http.Request) {
 		errResponse(w, "缺少 id", 400)
 		return
 	}
-	if err := service.WithdrawRequirement(int(id), session.UserID); err != nil {
+	if err := service.WithdrawBug(int(id), session.UserID); err != nil {
 		errResponse(w, err.Error(), 500)
 		return
 	}
-	okResponse(w, "需求已撤销")
+	okResponse(w, "Bug 已撤销")
 }

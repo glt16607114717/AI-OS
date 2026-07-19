@@ -9,10 +9,13 @@ const router = useRouter()
 
 const devExpanded = ref(false)
 const llmExpanded = ref(false)
-const ragExpanded = ref(false)
+const ragExpanded = ref(false)       // 知识库（原信息沉淀拆分后只留知识库，但保留可展开结构便于后续扩展）
+const adviceReportExpanded = ref(false)  // 建议 & 日报
 const systemExpanded = ref(false)
 const skillExpanded = ref(false)
 const logsExpanded = ref(false)
+const requirementsExpanded = ref(false)
+const bugsExpanded = ref(false)
 const isAdmin = ref(false)
 const userType = ref('')
 const currentUser = ref('')
@@ -23,10 +26,14 @@ const sidebarCollapsed = ref(localStorage.getItem('aios_sidebar_collapsed') === 
 
 const isDevActive = computed(() => route.path.startsWith('/dev'))
 const isLlmActive = computed(() => ['/llm/strategy', '/llm/god-rules', '/llm/quota'].includes(route.path))
-const isRagActive = computed(() => route.path.startsWith('/rag') || route.path === '/llm/ai-advice')
+const isRagActive = computed(() => route.path.startsWith('/rag/knowledge'))  // 知识库独立一级菜单
+const isAdviceReportActive = computed(() => ['/rag/daily-report', '/llm/ai-advice'].includes(route.path))  // 建议 & 日报
+const isStatsActive = computed(() => route.path === '/llm/stats')  // 统计仪表独立一级菜单（单链接）
 const isSystemActive = computed(() => route.path.startsWith('/system') || route.path === '/llm/config')
 const isSkillActive = computed(() => route.path.startsWith('/skills'))
-const isLogsActive = computed(() => ['/llm/stats', '/llm/log', '/llm/errors'].includes(route.path))
+const isLogsActive = computed(() => ['/llm/log', '/llm/errors'].includes(route.path))  // 日志（统计仪表移出）
+const isRequirementsActive = computed(() => route.path.startsWith('/requirements'))
+const isBugsActive = computed(() => route.path.startsWith('/bugs'))
 const isBusinessUser = computed(() => userType.value === 'business')
 
 watch(isDevActive, (val) => {
@@ -41,6 +48,10 @@ watch(isRagActive, (val) => {
   if (val) ragExpanded.value = true
 }, { immediate: true })
 
+watch(isAdviceReportActive, (val) => {
+  if (val) adviceReportExpanded.value = true
+}, { immediate: true })
+
 watch(isSystemActive, (val) => {
   if (val) systemExpanded.value = true
 }, { immediate: true })
@@ -51,6 +62,14 @@ watch(isSkillActive, (val) => {
 
 watch(isLogsActive, (val) => {
   if (val) logsExpanded.value = true
+}, { immediate: true })
+
+watch(isRequirementsActive, (val) => {
+  if (val) requirementsExpanded.value = true
+}, { immediate: true })
+
+watch(isBugsActive, (val) => {
+  if (val) bugsExpanded.value = true
 }, { immediate: true })
 
 function toggleDevMenu() {
@@ -66,6 +85,21 @@ function toggleLlmMenu() {
 function toggleRagMenu() {
   if (sidebarCollapsed.value) return
   ragExpanded.value = !ragExpanded.value
+}
+
+function toggleAdviceReportMenu() {
+  if (sidebarCollapsed.value) return
+  adviceReportExpanded.value = !adviceReportExpanded.value
+}
+
+function toggleRequirementsMenu() {
+  if (sidebarCollapsed.value) return
+  requirementsExpanded.value = !requirementsExpanded.value
+}
+
+function toggleBugsMenu() {
+  if (sidebarCollapsed.value) return
+  bugsExpanded.value = !bugsExpanded.value
 }
 
 function toggleSystemMenu() {
@@ -208,28 +242,66 @@ onBeforeUnmount(() => {
           <span class="nav-text">工作台</span>
         </router-link>
 
-        <!-- 我的需求（所有用户可见） -->
-        <router-link to="/requirements/my" class="nav-item" active-class="active">
-          <div class="nav-icon">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M9 11H1v12h8V11zM23 1h-8v6h8V1zM23 13h-8v10h8V13zM15 7h-4v4h4V7z"/>
+        <!-- 需求收集（可展开，所有用户可见） -->
+        <div class="nav-group">
+          <div class="nav-item" :class="{ active: isRequirementsActive }" @click="toggleRequirementsMenu">
+            <div class="nav-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+              </svg>
+            </div>
+            <span class="nav-text">需求收集</span>
+            <svg class="nav-arrow" :class="{ expanded: requirementsExpanded }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="6 9 12 15 18 9" />
             </svg>
           </div>
-          <span class="nav-text">我的需求</span>
-        </router-link>
+          <div class="nav-sub" :class="{ 'show-inline': requirementsExpanded && !sidebarCollapsed, 'flyout': sidebarCollapsed }">
+            <div class="flyout-title">需求收集</div>
+            <router-link to="/requirements/my" class="nav-sub-item" active-class="active">
+              <svg class="sub-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11H1v12h8V11zM23 1h-8v6h8V1zM23 13h-8v10h8V13zM15 7h-4v4h4V7z"/></svg>
+              <span>我的需求</span>
+            </router-link>
+            <router-link to="/requirements/inbox" class="nav-sub-item" active-class="active">
+              <svg class="sub-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
+              <span>需求收件箱</span>
+            </router-link>
+          </div>
+        </div>
 
-        <!-- 需求收件箱（仅管理员且非业务用户） -->
-        <router-link to="/requirements/inbox" class="nav-item" active-class="active" v-if="isAdmin && !isBusinessUser">
-          <div class="nav-icon">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/>
-              <path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
+        <!-- Bug 收集（可展开，所有用户可见） -->
+        <div class="nav-group">
+          <div class="nav-item" :class="{ active: isBugsActive }" @click="toggleBugsMenu">
+            <div class="nav-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="8" y="6" width="8" height="14" rx="4"/>
+                <path d="m19 7-3 2"/>
+                <path d="m5 7 3 2"/>
+                <path d="m19 13-3-2"/>
+                <path d="m5 13 3-2"/>
+                <path d="M19 19l-3-2"/>
+                <path d="M5 19l3-2"/>
+                <path d="M12 2v4"/>
+              </svg>
+            </div>
+            <span class="nav-text">Bug 收集</span>
+            <svg class="nav-arrow" :class="{ expanded: bugsExpanded }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="6 9 12 15 18 9" />
             </svg>
           </div>
-          <span class="nav-text">需求收件箱</span>
-        </router-link>
+          <div class="nav-sub" :class="{ 'show-inline': bugsExpanded && !sidebarCollapsed, 'flyout': sidebarCollapsed }">
+            <div class="flyout-title">Bug 收集</div>
+            <router-link to="/bugs/my" class="nav-sub-item" active-class="active">
+              <svg class="sub-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11H1v12h8V11zM23 1h-8v6h8V1zM23 13h-8v10h8V13zM15 7h-4v4h4V7z"/></svg>
+              <span>我的 Bug</span>
+            </router-link>
+            <router-link to="/bugs/inbox" class="nav-sub-item" active-class="active">
+              <svg class="sub-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
+              <span>Bug 收件箱</span>
+            </router-link>
+          </div>
+        </div>
 
-        <!-- RAG Knowledge (expandable) -->
+        <!-- 知识库（独立一级菜单，可展开，后续会加更多二级项） -->
         <div class="nav-group" v-if="!isBusinessUser">
           <div class="nav-item" :class="{ active: isRagActive }" @click="toggleRagMenu">
             <div class="nav-icon">
@@ -240,17 +312,38 @@ onBeforeUnmount(() => {
                 <line x1="8" y1="11" x2="14" y2="11" />
               </svg>
             </div>
-            <span class="nav-text">信息沉淀</span>
+            <span class="nav-text">知识库</span>
             <svg class="nav-arrow" :class="{ expanded: ragExpanded }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="6 9 12 15 18 9" />
             </svg>
           </div>
           <div class="nav-sub" :class="{ 'show-inline': ragExpanded && !sidebarCollapsed, 'flyout': sidebarCollapsed }">
-            <div class="flyout-title">信息沉淀</div>
+            <div class="flyout-title">知识库</div>
             <router-link to="/rag/knowledge" class="nav-sub-item" active-class="active">
               <svg class="sub-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
-              <span>知识库</span>
+              <span>知识浏览</span>
             </router-link>
+          </div>
+        </div>
+
+        <!-- 建议 & 日报（可展开） -->
+        <div class="nav-group" v-if="!isBusinessUser">
+          <div class="nav-item" :class="{ active: isAdviceReportActive }" @click="toggleAdviceReportMenu">
+            <div class="nav-icon">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="16" y1="13" x2="8" y2="13"/>
+                <line x1="16" y1="17" x2="8" y2="17"/>
+              </svg>
+            </div>
+            <span class="nav-text">建议 &amp; 日报</span>
+            <svg class="nav-arrow" :class="{ expanded: adviceReportExpanded }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </div>
+          <div class="nav-sub" :class="{ 'show-inline': adviceReportExpanded && !sidebarCollapsed, 'flyout': sidebarCollapsed }">
+            <div class="flyout-title">建议 &amp; 日报</div>
             <router-link to="/rag/daily-report" class="nav-sub-item" active-class="active">
               <svg class="sub-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
               <span>工作日报</span>
@@ -261,6 +354,18 @@ onBeforeUnmount(() => {
             </router-link>
           </div>
         </div>
+
+        <!-- 统计仪表（独立一级菜单，单链接） -->
+        <router-link to="/llm/stats" class="nav-item" active-class="active" v-if="!isBusinessUser">
+          <div class="nav-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="12" y1="20" x2="12" y2="10"/>
+              <line x1="18" y1="20" x2="18" y2="4"/>
+              <line x1="6" y1="20" x2="6" y2="16"/>
+            </svg>
+          </div>
+          <span class="nav-text">统计仪表</span>
+        </router-link>
 
         <!-- LLM (expandable) -->
         <div class="nav-group" v-if="!isBusinessUser">
@@ -293,7 +398,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <!-- 日志模块 (expandable) -->
+        <!-- 日志（可展开） -->
         <div class="nav-group" v-if="!isBusinessUser">
           <div class="nav-item" :class="{ active: isLogsActive }" @click="toggleLogsMenu">
             <div class="nav-icon">
@@ -304,17 +409,13 @@ onBeforeUnmount(() => {
                 <line x1="16" y1="17" x2="8" y2="17"/>
               </svg>
             </div>
-            <span class="nav-text">日志模块</span>
+            <span class="nav-text">日志</span>
             <svg class="nav-arrow" :class="{ expanded: logsExpanded }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="6 9 12 15 18 9" />
             </svg>
           </div>
           <div class="nav-sub" :class="{ 'show-inline': logsExpanded && !sidebarCollapsed, 'flyout': sidebarCollapsed }">
-            <div class="flyout-title">日志模块</div>
-            <router-link to="/llm/stats" class="nav-sub-item" active-class="active">
-              <svg class="sub-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg>
-              <span>统计仪表</span>
-            </router-link>
+            <div class="flyout-title">日志</div>
             <router-link to="/llm/log" class="nav-sub-item" active-class="active">
               <svg class="sub-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
               <span>对话记录</span>
@@ -451,7 +552,11 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="content-main">
-        <router-view />
+        <router-view v-slot="{ Component }">
+          <keep-alive :include="['ChatWorkspace']">
+            <component :is="Component" />
+          </keep-alive>
+        </router-view>
       </div>
       <div class="page-footer">
         <span>AI-OS v1.0.0</span>

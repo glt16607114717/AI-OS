@@ -3,11 +3,12 @@ import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { API_BASE } from '../../api'
 
-interface Requirement {
+interface Bug {
   id: number
   title: string
   scenario: string
-  pain_point: string
+  expected: string
+  actual: string
   module: string
   status: string
   admin_note: string
@@ -15,7 +16,7 @@ interface Requirement {
   updated_at: string
 }
 
-const requirements = ref<Requirement[]>([])
+const bugs = ref<Bug[]>([])
 const loading = ref(false)
 
 function getToken(): string {
@@ -26,10 +27,10 @@ function statusText(status: string): string {
   const map: Record<string, string> = {
     submitted: '已提交',
     reviewing: '审核中',
-    accepted: '已采纳',
+    accepted: '已确认',
     scheduled: '已排期',
-    in_progress: '开发中',
-    done: '已完成',
+    in_progress: '修复中',
+    done: '已修复',
     rejected: '已拒绝',
     withdrawn: '已撤销',
   }
@@ -62,44 +63,40 @@ function formatTime(time: string): string {
   return `${y}-${m}-${day} ${h}:${min}`
 }
 
-async function fetchRequirements() {
+async function fetchBugs() {
   loading.value = true
   try {
-    const res = await fetch(`${API_BASE}/api/requirements/my`, {
+    const res = await fetch(`${API_BASE}/api/bugs/my`, {
       headers: { Authorization: `Bearer ${getToken()}` }
     })
     const data = await res.json()
     if (data?.ok) {
-      requirements.value = data.data?.requirements || data.data || []
+      bugs.value = data.data || []
     } else {
-      ElMessage.error(data?.error || '获取需求列表失败')
+      ElMessage.error(data?.error || '获取 Bug 列表失败')
     }
   } catch (e: any) {
-    ElMessage.error('获取需求列表失败: ' + e.message)
+    ElMessage.error('获取 Bug 列表失败: ' + e.message)
   }
   loading.value = false
 }
 
-onMounted(() => {
-  fetchRequirements()
-})
-
-async function withdrawRequirement(req: Requirement) {
+async function withdrawBug(bug: Bug) {
   try {
-    await ElMessageBox.confirm(`确定撤销需求「${req.title}」吗？撤销后仍保留记录作为沟通证据。`, '确认撤销', {
+    await ElMessageBox.confirm(`确定撤销 Bug「${bug.title}」吗？撤销后仍保留记录作为沟通证据。`, '确认撤销', {
       type: 'warning',
       confirmButtonText: '确定撤销',
       cancelButtonText: '取消'
     })
-    const res = await fetch(`${API_BASE}/api/requirements/withdraw`, {
+    const res = await fetch(`${API_BASE}/api/bugs/withdraw`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: req.id })
+      body: JSON.stringify({ id: bug.id })
     })
     const data = await res.json()
     if (data?.ok) {
-      ElMessage.success('需求已撤销')
-      fetchRequirements()
+      ElMessage.success('Bug 已撤销')
+      fetchBugs()
     } else {
       ElMessage.error(data?.error || '撤销失败')
     }
@@ -107,45 +104,47 @@ async function withdrawRequirement(req: Requirement) {
     // 用户取消
   }
 }
+
+onMounted(() => {
+  fetchBugs()
+})
 </script>
 
 <template>
-  <div class="my-requirements-page">
+  <div class="my-bugs-page">
     <div class="page-header">
-      <h2>我的需求</h2>
-      <p class="page-desc">查看你提交的需求及其处理进度</p>
+      <h2>我的 Bug</h2>
+      <p class="page-desc">查看你反馈的 Bug 及其修复进度</p>
     </div>
 
-    <el-table
-      :data="requirements"
-      v-loading="loading"
-      stripe
-      row-key="id"
-      style="width: 100%"
-    >
+    <el-table :data="bugs" v-loading="loading" stripe row-key="id" style="width: 100%">
       <el-table-column type="expand">
         <template #default="{ row }">
           <div class="expand-detail">
             <div class="detail-item" v-if="row.scenario">
-              <span class="detail-label">使用场景</span>
+              <span class="detail-label">触发场景</span>
               <span class="detail-text">{{ row.scenario }}</span>
             </div>
-            <div class="detail-item" v-if="row.pain_point">
-              <span class="detail-label">痛点描述</span>
-              <span class="detail-text">{{ row.pain_point }}</span>
+            <div class="detail-item" v-if="row.expected">
+              <span class="detail-label">预期结果</span>
+              <span class="detail-text">{{ row.expected }}</span>
+            </div>
+            <div class="detail-item" v-if="row.actual">
+              <span class="detail-label">实际结果</span>
+              <span class="detail-text">{{ row.actual }}</span>
             </div>
             <div class="detail-item" v-if="row.admin_note">
               <span class="detail-label">管理员备注</span>
               <span class="detail-text admin-note">{{ row.admin_note }}</span>
             </div>
-            <div class="detail-empty" v-if="!row.scenario && !row.pain_point && !row.admin_note">
+            <div class="detail-empty" v-if="!row.scenario && !row.expected && !row.actual && !row.admin_note">
               暂无详细信息
             </div>
           </div>
         </template>
       </el-table-column>
 
-      <el-table-column prop="title" label="需求标题" min-width="200" show-overflow-tooltip />
+      <el-table-column prop="title" label="Bug 标题" min-width="200" show-overflow-tooltip />
 
       <el-table-column prop="module" label="所属模块" width="140">
         <template #default="{ row }">
@@ -174,7 +173,7 @@ async function withdrawRequirement(req: Requirement) {
             size="small"
             type="warning"
             plain
-            @click="withdrawRequirement(row)"
+            @click="withdrawBug(row)"
           >
             撤销
           </el-button>
@@ -182,14 +181,14 @@ async function withdrawRequirement(req: Requirement) {
       </el-table-column>
 
       <template #empty>
-        <el-empty description="还没有提交过需求" />
+        <el-empty description="还没有反馈过 Bug" />
       </template>
     </el-table>
   </div>
 </template>
 
 <style scoped>
-.my-requirements-page {
+.my-bugs-page {
   max-width: 960px;
 }
 
@@ -210,7 +209,6 @@ async function withdrawRequirement(req: Requirement) {
   margin: 0;
 }
 
-/* Expand detail */
 .expand-detail {
   padding: 12px 20px 12px 48px;
   display: flex;
@@ -228,8 +226,8 @@ async function withdrawRequirement(req: Requirement) {
   flex-shrink: 0;
   font-size: 12px;
   font-weight: 600;
-  color: #6366f1;
-  background: #eef2ff;
+  color: #ef4444;
+  background: #fef2f2;
   padding: 2px 8px;
   border-radius: 4px;
   min-width: 70px;

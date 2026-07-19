@@ -5,7 +5,7 @@ import { ElMessage } from 'element-plus'
 
 interface Requirement {
   id: number
-  submitter: string
+  username: string
   title: string
   module: string
   status: string
@@ -207,7 +207,7 @@ onMounted(() => {
         </template>
       </el-table-column>
 
-      <el-table-column prop="submitter" label="提交人" width="120" />
+      <el-table-column prop="username" label="提交人" width="120" />
 
       <el-table-column prop="title" label="需求标题" min-width="200" show-overflow-tooltip />
 

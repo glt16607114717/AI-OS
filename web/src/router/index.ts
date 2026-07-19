@@ -109,6 +109,16 @@ const router = createRouter({
           name: 'RequirementInbox',
           component: () => import('../views/requirements/RequirementInbox.vue'),
         },
+        {
+          path: 'bugs/my',
+          name: 'MyBugs',
+          component: () => import('../views/bugs/MyBugs.vue'),
+        },
+        {
+          path: 'bugs/inbox',
+          name: 'BugInbox',
+          component: () => import('../views/bugs/BugInbox.vue'),
+        },
       ],
     },
   ],
@@ -166,16 +176,34 @@ router.beforeEach(async (to) => {
     return '/login'
   }
 
-  // business 用户只能访问工作台和我的需求
+  // business 用户访问范围：工作台、需求管理（我的需求+收件箱）
   const userType = localStorage.getItem('aios_user_type')
   if (userType === 'business') {
-    const allowedPaths = ['/workspace', '/requirements/my', '/login']
+    const allowedPaths = ['/workspace', '/requirements/my', '/requirements/inbox', '/bugs/my', '/bugs/inbox', '/login']
     if (!allowedPaths.some(p => to.path.startsWith(p))) {
       return '/workspace'
     }
   }
 
   return true
+})
+
+// 捕获动态导入失败（chunk 文件因部署更新而 404）
+// 表现：点击菜单无反应，控制台报 "Failed to fetch dynamically imported module"
+// 处理：自动刷新页面（重新请求 index.html 拿到新的 chunk 文件名）
+// 加防抖：避免连续多次失败导致循环刷新
+let reloadGuard = false
+router.onError((error) => {
+  if (
+    error instanceof TypeError &&
+    error.message.includes('Failed to fetch dynamically imported module')
+  ) {
+    console.error('[Router] 动态导入失败（可能是部署更新导致），自动刷新页面')
+    if (!reloadGuard) {
+      reloadGuard = true
+      window.location.reload()
+    }
+  }
 })
 
 export default router
