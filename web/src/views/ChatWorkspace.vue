@@ -58,6 +58,15 @@ renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
   return originalCode({ type: 'code', raw: text, text, lang })
 }
 
+// 自定义 image 渲染：给 AI 生成的图片加下载按钮（点击图片放大、点按钮下载）
+// 原生 marked 只输出 <img>，这里包一层容器并加交互按钮
+renderer.image = function ({ href, title, text }: { href: string; title?: string | null; text: string }) {
+  if (!href) return text || ''
+  const safeHref = href.replace(/"/g, '&quot;')
+  const safeAlt = (text || '').replace(/"/g, '&quot;')
+  return `<div class="ai-image-wrap"><img src="${safeHref}" alt="${safeAlt}" class="ai-gen-image" data-preview="${safeHref}" title="点击放大" /><button class="ai-image-download-btn" data-download="${safeHref}" title="下载图片">下载</button></div>`
+}
+
 marked.use({ renderer })
 
 interface ToolCall {
@@ -74,6 +83,7 @@ interface Message {
   done?: boolean
   toolCalls?: ToolCall[]
   references?: { index: number; source: string; similarity: number; text: string }[]
+  progress?: string[] // 技能执行进度提示（生图等慢操作的实时反馈）
 }
 
 const messages = ref<Message[]>([])
@@ -761,6 +771,48 @@ async function downloadLog(id: number) {
   }
 }
 
+// 下载 AI 生成的图片（走后端代理，绕开跨域）
+async function downloadImage(url: string) {
+  try {
+    const res = await fetch(`${API_BASE}/api/image/download?url=${encodeURIComponent(url)}`, { headers: authHeaders() })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'HTTP ' + res.status }))
+      ElMessage.error(err.error || '下载失败')
+      return
+    }
+    const blob = await res.blob()
+    const blobUrl = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = blobUrl
+    a.download = `aios_image_${Date.now()}.png`
+    a.click()
+    URL.revokeObjectURL(blobUrl)
+  } catch (e) {
+    ElMessage.error('图片下载失败: ' + (e as Error).message)
+  }
+}
+
+// 统一的图片交互事件委托（点击图片放大、点击下载按钮下载）
+// 因为图片是 v-html 渲染的，无法直接 @click，用事件委托挂在容器上
+function handleImageClick(e: MouseEvent) {
+  const target = e.target as HTMLElement
+  // 点下载按钮
+  const downloadBtn = target.closest('.ai-image-download-btn') as HTMLElement
+  if (downloadBtn) {
+    e.preventDefault()
+    e.stopPropagation()
+    const url = downloadBtn.dataset.download
+    if (url) downloadImage(url)
+    return
+  }
+  // 点图片 → 放大预览
+  const img = target.closest('.ai-gen-image') as HTMLElement
+  if (img) {
+    const url = img.dataset.preview || (img as HTMLImageElement).src
+    if (url) previewImage(url)
+  }
+}
+
 function handleKeydown(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
@@ -838,6 +890,12 @@ function onMessageDone() {
           <div v-else-if="msg.toolCalls && msg.toolCalls.length && msg.done" class="tool-status done">
             已完成 {{ msg.toolCalls.length }} 次数据查询
           </div>
+          <!-- 技能执行进度（生图等慢操作的实时反馈，来自后端 event:progress） -->
+          <div v-if="msg.progress && msg.progress.length && !msg.done" class="skill-progress">
+            <div v-for="(p, pidx) in msg.progress" :key="pidx" class="progress-item">
+              <span class="progress-spinner"></span>{{ p }}
+            </div>
+          </div>
           <!-- RAG 知识库引用 -->
           <div v-if="msg.references && msg.references.length && msg.done" class="rag-references">
             <div class="rag-ref-header">
@@ -853,7 +911,7 @@ function onMessageDone() {
             </div>
           </div>
           <!-- AI 回复内容 -->
-          <div v-if="msg.content" class="ai-text" v-html="renderMarkdown(msg.content, msg.done ?? false, i)"></div>
+          <div v-if="msg.content" class="ai-text" @click="handleImageClick" v-html="renderMarkdown(msg.content, msg.done ?? false, i)"></div>
         </div>
       </div>
     </div>
@@ -1315,11 +1373,49 @@ function onMessageDone() {
 .ai-text a { color: #3b82f6; text-decoration: none; }
 .ai-text a:hover { text-decoration: underline; }
 
-/* 图片 */
-.ai-text img {
+/* AI 生成图片容器（带下载按钮） */
+.ai-image-wrap {
+  position: relative;
+  display: inline-block;
   max-width: 100%;
+  margin: 0.5rem 0;
+}
+
+.ai-image-wrap .ai-gen-image {
+  max-width: 100%;
+  max-height: 500px;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+  cursor: pointer;
+  display: block;
+  transition: opacity 0.15s;
+}
+
+.ai-image-wrap .ai-gen-image:hover {
+  opacity: 0.92;
+}
+
+.ai-image-download-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+  border: none;
   border-radius: 4px;
-  margin: 0.3rem 0;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.ai-image-wrap:hover .ai-image-download-btn {
+  opacity: 1;
+}
+
+.ai-image-download-btn:hover {
+  background: rgba(0, 0, 0, 0.8);
 }
 
 /* 流式光标 */
@@ -1351,6 +1447,40 @@ function onMessageDone() {
   color: #6b7280;
   background: #f3f4f6;
   font-size: 11px;
+}
+
+/* 技能执行进度（生图等待期间的实时反馈） */
+.skill-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.skill-progress .progress-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #6366f1;
+  background: #eef2ff;
+  border-radius: 4px;
+}
+
+.skill-progress .progress-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid #c7d2fe;
+  border-top-color: #6366f1;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 /* RAG 知识库引用卡片 */

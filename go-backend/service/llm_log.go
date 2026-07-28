@@ -238,6 +238,27 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 		}
 	}
 
+	// 图片生成按用户统计（完全照搬 vision 统计逻辑，表名换 sys_image_gen_log）
+	imageGenByUser := map[string]interface{}{}
+	igRows, _ := conn.Query(`SELECT g.user_id, COALESCE(u.username, CONCAT('user_', g.user_id)),
+		COUNT(*) as count, SUM(g.success) as success_count,
+		SUM(CASE WHEN g.success=0 THEN 1 ELSE 0 END) as fail_count
+		FROM sys_image_gen_log g LEFT JOIN sys_user u ON g.user_id = u.id
+		WHERE g.created_at >= ? GROUP BY g.user_id ORDER BY count DESC`, cutoff)
+	if igRows != nil {
+		for igRows.Next() {
+			var uid, count, sc, fc int
+			var name string
+			if err := igRows.Scan(&uid, &name, &count, &sc, &fc); err != nil {
+				continue
+			}
+			imageGenByUser[fmt.Sprintf("%d", uid)] = map[string]interface{}{
+				"username": name, "count": count, "success_count": sc, "fail_count": fc,
+			}
+		}
+		igRows.Close()
+	}
+
 	return map[string]interface{}{
 		"total_requests": totalReqs,
 		"total_tokens": totalTokens,
@@ -246,6 +267,7 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 		"avg_latency_ms": int(avgLatency), "success_rate": successRate,
 		"by_vendor": byVendor, "by_model": byModel, "daily": daily,
 		"by_user": byUser, "by_key": byKey, "vision_by_user": visionByUser,
+		"image_gen_by_user": imageGenByUser,
 	}, nil
 }
 

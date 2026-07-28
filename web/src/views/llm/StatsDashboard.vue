@@ -84,6 +84,7 @@ const userRankRef = ref<HTMLCanvasElement | null>(null)
 const userPieRef = ref<HTMLCanvasElement | null>(null)
 const keyPieRef = ref<HTMLCanvasElement | null>(null)
 const visionPieRef = ref<HTMLCanvasElement | null>(null)
+const genPieRef = ref<HTMLCanvasElement | null>(null)
 
 let tokenTrend: Chart | null = null
 let modelPie: Chart | null = null
@@ -91,6 +92,7 @@ let userRank: Chart | null = null
 let userPie: Chart | null = null
 let keyPie: Chart | null = null
 let visionPie: Chart | null = null
+let genPie: Chart | null = null
 
 // 获取当前用户名
 async function fetchCurrentUser() {
@@ -344,6 +346,36 @@ function renderCharts() {
       },
     })
   }
+
+  // ── 饼图：图片生成用户占比（完全模仿图片识别饼图）──
+  if (genPieRef.value && stats.value?.image_gen_by_user) {
+    if (genPie) genPie.destroy()
+    const gens = Object.entries(stats.value.image_gen_by_user as Record<string, any>)
+      .map(([id, v]) => ({ id, ...v }))
+      .filter(v => v.count > 0)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 8)
+    const colors4 = ['#9b59b6', '#1abc9c', '#e74c3c', '#409eff', '#67c23a', '#e6a23c', '#f56c6c', '#909399']
+    genPie = new Chart(genPieRef.value, {
+      type: 'doughnut',
+      data: {
+        labels: gens.map(v => v.username || v.id),
+        datasets: [{
+          data: gens.map(v => v.count),
+          backgroundColor: colors4.slice(0, gens.length),
+          borderWidth: 2,
+          borderColor: '#fff',
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: true, position: 'right', labels: { font: { size: 11 }, boxWidth: 12, padding: 8 } },
+        },
+      },
+    })
+  }
 }
 
 async function fetchStats() {
@@ -403,6 +435,7 @@ onUnmounted(() => {
   userPie?.destroy()
   keyPie?.destroy()
   visionPie?.destroy()
+  genPie?.destroy()
 })
 </script>
 
@@ -493,6 +526,12 @@ onUnmounted(() => {
         <div class="chart-card">
           <div class="section-title">用户图片识别占比</div>
           <div class="chart-container"><canvas ref="visionPieRef"></canvas></div>
+        </div>
+
+        <!-- 饼图：用户图片生成占比 -->
+        <div class="chart-card">
+          <div class="section-title">用户图片生成占比</div>
+          <div class="chart-container"><canvas ref="genPieRef"></canvas></div>
         </div>
 
         <!-- 饼图：模型请求占比 -->

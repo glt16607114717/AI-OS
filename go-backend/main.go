@@ -44,7 +44,8 @@ func main() {
 	service.EnsureSuggestionTable()
 	service.EnsureDistillTable()
 	service.EnsureChatTable()
-	service.EnsureAuditTables() // 知识库巡检表
+	service.EnsureAuditTables()    // 知识库巡检表
+	service.EnsureImageGenLogTable() // 图片生成日志表
 	handler.EnsurePrankTable()
 	service.EnsureOtherSettingTable()
 
@@ -122,6 +123,9 @@ func main() {
 		r.Post("/api/chat/clear", handler.ClearChatHistory)
 		r.Get("/api/chat/download/{id}", handler.DownloadConversationLog)
 		r.Get("/api/chat/sessions", handler.GetChatSessions)
+
+		// 图片下载代理（解决跨域，仅允许智谱图片域名）
+		r.Get("/api/image/download", handler.ImageDownload)
 
 		// 技能管理
 		r.Get("/api/skills", handler.GetBuiltinSkills)

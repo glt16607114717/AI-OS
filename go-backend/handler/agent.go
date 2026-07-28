@@ -148,7 +148,7 @@ func agentLoop(w http.ResponseWriter, req map[string]interface{}, attempts []*se
 				streamProgressAsSSE(w, fmt.Sprintf("[调用技能 %s...]", skillCode))
 			}
 
-			result, execErr := service.ExecuteBuiltinSkill(skillCode, userID, isAdmin, args)
+			result, execErr := service.ExecuteBuiltinSkill(skillCode, userID, username, isAdmin, args)
 
 			// 通用收集 trace（任何技能只要返回 trace 字段就展示）
 			if execErr == nil && result != nil {

@@ -163,6 +163,7 @@ func GetBuiltinSkillByCode(code string) (*BuiltinSkill, error) {
 var universalSkills = map[string]bool{
 	"submit_requirement": true,
 	"submit_bug":         true,
+	"generate_image":     true,
 }
 
 // GetBuiltinSkillToolDefinitions 根据用户权限构造 tools 注入给 AI
@@ -505,7 +506,7 @@ func SetSkillPermissions(skillID int, permissions []struct {
 // ── 技能执行 ──
 
 // ExecuteBuiltinSkill 执行内置技能
-func ExecuteBuiltinSkill(code string, userID int, isAdmin bool, args map[string]interface{}) (map[string]interface{}, error) {
+func ExecuteBuiltinSkill(code string, userID int, username string, isAdmin bool, args map[string]interface{}) (map[string]interface{}, error) {
 	skill, err := GetBuiltinSkillByCode(code)
 	if err != nil {
 		return nil, fmt.Errorf("未知技能: %s", code)
@@ -526,6 +527,8 @@ func ExecuteBuiltinSkill(code string, userID int, isAdmin bool, args map[string]
 		return ExecuteSubmitRequirement(userID, args)
 	case "submit_bug":
 		return ExecuteSubmitBug(userID, args)
+	case "generate_image":
+		return ExecuteGenerateImage(userID, username, args)
 	default:
 		return nil, fmt.Errorf("未实现的技能: %s", code)
 	}
