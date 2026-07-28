@@ -107,9 +107,8 @@ function onSysKeyChange() {
 function onSysModelChange(modelId: string) {
   if (!modelId || !sysCascadeVendor.value || !sysCascadeKey.value) return
   const val = optionValue(sysCascadeVendor.value, sysCascadeKey.value, modelId)
-  if (!systemForm.value.options.includes(val)) {
-    systemForm.value.options.push(val)
-  }
+  // 允许重复选择同一模型：重复次数越多轮询权重越高
+  systemForm.value.options.push(val)
   sysShowAddOption.value = false
   sysCascadeVendor.value = ''
   sysCascadeKey.value = ''
@@ -279,9 +278,8 @@ function onModelChange(modelId: string) {
   if (editForm.value.type === 'fixed') {
     editForm.value.options = [val]
   } else {
-    if (!editForm.value.options.includes(val)) {
-      editForm.value.options.push(val)
-    }
+    // 允许重复选择同一模型：重复次数越多轮询权重越高（如 [A,A,B] → A占2/3流量）
+    editForm.value.options.push(val)
   }
   showAddOption.value = false
   cascadeVendor.value = ''
@@ -369,9 +367,8 @@ function addOption(val: string) {
   if (editForm.value.type === 'fixed') {
     editForm.value.options = [val]
   } else {
-    if (!editForm.value.options.includes(val)) {
-      editForm.value.options.push(val)
-    }
+    // 允许重复选择同一模型：重复次数越多轮询权重越高
+    editForm.value.options.push(val)
   }
   showAddOption.value = false
 }
@@ -581,7 +578,6 @@ onMounted(async () => {
                     :key="m.model_id"
                     :label="m.display_name"
                     :value="m.model_id"
-                    :disabled="systemForm.options.includes(optionValue(sysCascadeVendor, sysCascadeKey, m.model_id))"
                   />
                 </el-select>
               </div>
@@ -720,7 +716,6 @@ onMounted(async () => {
                         :key="m.model_id"
                         :label="m.display_name"
                         :value="m.model_id"
-                        :disabled="editForm.options.includes(optionValue(cascadeVendor, cascadeKey, m.model_id))"
                       />
                     </el-select>
                   </div>

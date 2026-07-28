@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -29,17 +31,77 @@ type KnowledgeItem struct {
 	Source    string   `json:"source"`
 	Priority  string   `json:"priority"`
 	Status    string   `json:"status"`
-	Score     float64  `json:"score,omitempty"` // 检索时带相似度
+	Score       float64  `json:"score,omitempty"`        // 检索排序分数（多向量时为 RRF 融合分数）
+	VectorScore float64  `json:"vector_score,omitempty"` // 最高向量相似度（用于阈值过滤和展示）
 	CreatedAt string   `json:"created_at"`
 }
 
 // 维度 → category 映射
-// 蒸馏 prompt 产出的 dimension: decisions/pitfalls/business/habits
+// 蒸馏 prompt 产出的 dimension: 技术规范/架构决策/开发流程/Bug修复/工具技巧/环境配置
+// 修复 B2：之前 map key 是英文（decisions/pitfalls/business/habits），与 prompt 输出的中文不匹配，导致全部兜底 other
 var dimensionToCategory = map[string]string{
+	"技术规范": "norm",
+	"架构决策": "decision",
+	"开发流程": "workflow",
+	"Bug修复": "bugfix",
+	"工具技巧": "tip",
+	"环境配置": "env",
+	// 兼容旧英文输出（迁移期防御）
 	"decisions": "decision",
 	"pitfalls":  "pitfall",
 	"business":  "business",
 	"habits":    "habit",
+}
+
+// normalizeDimension 归一化 dimension：去空格、去冒号
+func normalizeDimension(d string) string {
+	d = strings.TrimSpace(d)
+	d = strings.Trim(d, "：:")
+	return d
+}
+
+// normalizeProject 归一化 project（修复 B3）
+// 规则：小写化 + 同义词合并 + 兜底 general
+// 合法输出只有：ai-os / rmp / general
+func normalizeProject(p string) string {
+	p = strings.TrimSpace(p)
+	p = strings.ToLower(p)
+
+	// 同义词归并到 ai-os
+	aiOsAliases := map[string]bool{
+		"ai-os":   true,
+		"ai_os":   true,
+		"aios":    true,
+		"ai-os项目": true,
+		"ai-os 后端": true,
+	}
+	if aiOsAliases[p] {
+		return "ai-os"
+	}
+
+	// 同义词归并到 rmp（含 rmp-api/rmp-prd/nnd-robot/nnd-flow-api/chartsapi/socket 等所有 RMP 系）
+	rmpAliases := map[string]bool{
+		"rmp":          true,
+		"rmp-api":      true,
+		"rmp_api":      true,
+		"rmp-prd":      true,
+		"rmp-prd文档":    true,
+		"nnd-robot":    true,
+		"nnd_robot":    true,
+		"nnd-flow-api": true,
+		"nnd_flow_api": true,
+		"chartsapi":    true,
+		"charts-api":   true,
+		"socket":       true,
+		"rmp-api项目":    true,
+		"rmp系统":        true,
+	}
+	if rmpAliases[p] {
+		return "rmp"
+	}
+
+	// 其他所有值（含空串、"未知"、"德塔"、各种子项目名）统一归 general
+	return "general"
 }
 
 // sha256Hash 计算 SHA-256（替代旧的 FNV-1a，降低碰撞）
@@ -65,23 +127,32 @@ func StoreDistillKnowledge(userID int, date string, k DistillKnowledge, sessionI
 		return false, err
 	}
 
-	// 归一化 category
-	category := dimensionToCategory[strings.ToLower(k.Dimension)]
+	// 归一化 category（修复 B2：用 normalizeDimension 处理空格/冒号，再用 map 映射）
+	dimKey := normalizeDimension(k.Dimension)
+	category := dimensionToCategory[dimKey]
+	if category == "" {
+		// 二次尝试：原 ToLower 兜底（保留旧逻辑防御）
+		category = dimensionToCategory[strings.ToLower(dimKey)]
+	}
 	if category == "" {
 		category = "other"
 	}
 
 	// 归一化 priority
+	// 兼容 LLM 输出中文"高/中/低"的情况（蒸馏 prompt 已改为英文枚举，此处兜底防御旧模型输出）
 	priority := k.Priority
+	priorityCNMap := map[string]string{
+		"高": "high", "中": "medium", "低": "low",
+	}
+	if mapped, ok := priorityCNMap[strings.TrimSpace(priority)]; ok {
+		priority = mapped
+	}
 	if priority != "high" && priority != "medium" && priority != "low" {
 		priority = "medium"
 	}
 
-	// 归一化 project（由 LLM 判断，兜底 general）
-	project := k.Project
-	if project == "" {
-		project = "general"
-	}
+	// 归一化 project（修复 B3：大小写不敏感 + 同义词合并 + 兜底 general）
+	project := normalizeProject(k.Project)
 
 	// 内容去重（SHA-256 + session_id：不同 session 的同标题知识不视为重复）
 	hash := sha256Hash(k.Content)
@@ -127,22 +198,41 @@ func StoreDistillKnowledge(userID int, date string, k DistillKnowledge, sessionI
 	knowledgeID, _ := res.LastInsertId()
 
 	// 2. 向量化 + 存 Qdrant
+	// 修复 B5：向量化失败时回滚 MySQL（软删除 archived），避免产生孤儿数据（active 但无 qdrant_id）
 	vector, err := GetEmbedding(k.Content)
 	if err != nil {
-		log.Printf("[knowledge] 向量化失败（知识已入库但无向量，不可检索）: %v", err)
-		return true, nil
+		log.Printf("[knowledge] 向量化失败，回滚 MySQL 软删除（id=%d）: %v", knowledgeID, err)
+		rollbackKnowledgeInsert(conn, knowledgeID, "embedding_failed")
+		return false, nil
 	}
 
 	pointID := GeneratePointID(k.Content)
 	if err := QdrantUpsert(pointID, vector, knowledgeID, project, category, "active"); err != nil {
-		log.Printf("[knowledge] Qdrant 存入失败（知识已入库但向量未存）: %v", err)
-		return true, nil
+		log.Printf("[knowledge] Qdrant 存入失败，回滚 MySQL 软删除（id=%d）: %v", knowledgeID, err)
+		rollbackKnowledgeInsert(conn, knowledgeID, "qdrant_failed")
+		return false, nil
 	}
 
 	// 3. 回填 qdrant_id
 	conn.Exec("UPDATE sys_knowledge SET qdrant_id = ? WHERE id = ?", pointID, knowledgeID)
 
+	// 4. 采集入库日志（供每日巡检评审，source 带 distill: 前缀）
+	LogStoreAudit(userID, knowledgeID, project, category, k.Title, priority, k.Content, source)
+
 	return true, nil
+}
+
+// rollbackKnowledgeInsert 向量化失败时回滚刚插入的 MySQL 行（软删除 archived，留痕）
+// 不做物理删除是为了保留排查线索，archived 状态不会被检索到
+func rollbackKnowledgeInsert(conn *sql.DB, knowledgeID int64, reason string) {
+	if _, err := conn.Exec(
+		"UPDATE sys_knowledge SET status = 'archived' WHERE id = ? AND status = 'active'",
+		knowledgeID,
+	); err != nil {
+		log.Printf("[knowledge] 回滚失败（id=%d reason=%s）: %v", knowledgeID, reason, err)
+	} else {
+		log.Printf("[knowledge] 已回滚 id=%d reason=%s", knowledgeID, reason)
+	}
 }
 
 // SearchKnowledge 检索知识（带项目过滤，忽略 user_id）
@@ -392,23 +482,26 @@ func StoreUploadKnowledge(userID int, filename string, chunks []string) (int, er
 		}
 		knowledgeID, _ := res.LastInsertId()
 
-		// 3b. 向量化 + 存 Qdrant
+		// 3b. 向量化 + 存 Qdrant（修复 B5：失败时回滚 MySQL，避免孤儿数据）
 		vector, err := GetEmbedding(chunk)
 		if err != nil {
-			log.Printf("[knowledge] 向量化失败（知识已入库但无向量）: %v", err)
-			stored++
+			log.Printf("[knowledge] 上传向量化失败，回滚 MySQL（id=%d）: %v", knowledgeID, err)
+			rollbackKnowledgeInsert(conn, knowledgeID, "upload_embedding_failed")
 			continue
 		}
 
 		pointID := GeneratePointID(chunk)
 		if err := QdrantUpsert(pointID, vector, knowledgeID, "general", "document", "active"); err != nil {
-			log.Printf("[knowledge] Qdrant 存入失败: %v", err)
-			stored++
+			log.Printf("[knowledge] 上传 Qdrant 存入失败，回滚 MySQL（id=%d）: %v", knowledgeID, err)
+			rollbackKnowledgeInsert(conn, knowledgeID, "upload_qdrant_failed")
 			continue
 		}
 
 		// 3c. 回填 qdrant_id
 		conn.Exec("UPDATE sys_knowledge SET qdrant_id = ? WHERE id = ?", pointID, knowledgeID)
+
+		// 3d. 采集入库日志（供每日巡检评审）
+		LogStoreAudit(userID, knowledgeID, "general", "document", title, "medium", chunk, source)
 		stored++
 	}
 
@@ -622,4 +715,240 @@ func MigrateEmbeddingsToKnowledge() (migrated, skipped, failed int, err error) {
 
 	log.Printf("[migrate] 迁移完成：成功=%d, 跳过=%d, 失败=%d", migrated, skipped, failed)
 	return migrated, skipped, failed, nil
+}
+
+// ── 多向量检索（Multi-Vector Retrieval）──
+//
+// 背景：纯单向量检索（整段 query → 1 个向量 → Qdrant 检索）对两种场景效果差：
+//   1. 超长 prompt（含源码路径、Agent 指令模板）→ 主意图被噪声淹没
+//   2. 极短 prompt（如"继续"）→ 信息不足，召回碎片化
+//
+// 方案：将 query 拆分成多个语义片段，每片独立向量化检索，用 RRF 融合结果。
+//   - 片段提取是纯字符串处理，零 LLM 调用，纳秒级完成
+//   - 多片段共享一次 GetEmbeddings 批量调用，只多 1 次 HTTP RTT
+//   - RRF 融合保证被多片段共同召回的知识排到前面（语义双重确认）
+
+// ExtractQueryFragments 从一段（已做过 IDE 噪声清洗的）query 中提取多个语义片段
+// 返回去重后的片段列表（已去除空串），用于批量 embedding + 多路检索
+//
+// 策略：
+//   - 提取 <query> 标签内容（Agent 工具/技能调用时的标准格式）
+//   - 提取 <task> 标签内容（Agent 任务描述）
+//   - 提取「疑问句」——包含问号、或「帮我/怎么/如何/排查/实现/修复」等意图关键词的句子
+//   - 提取「代码标识符」——通过路径引用 (file.go:123) 或反引号 `xxx` 的技术实体名
+//   - 如果提取出的片段列表为空，回退用原始 query 兜底（保证不退化）
+func ExtractQueryFragments(query string) []string {
+	if query == "" {
+		return nil
+	}
+
+	var fragments []string
+	seen := make(map[string]bool)
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || len(s) < 3 {
+			return
+		}
+		// 截断超长片段（向量模型输入也有限制，512 token ≈ 1500 字符）
+		if len(s) > 500 {
+			s = s[:500]
+		}
+		if !seen[s] {
+			seen[s] = true
+			fragments = append(fragments, s)
+		}
+	}
+
+	// 1. <query> / <task> 标签内容
+	for _, tag := range []string{"query", "task"} {
+		re := regexp.MustCompile(`(?s)<` + tag + `>(.*?)</` + tag + `>`)
+		for _, m := range re.FindAllStringSubmatch(query, -1) {
+			add(m[1])
+		}
+	}
+
+	// 2. 按句子拆分，提取意图明确的句子
+	intentRe := regexp.MustCompile(`(帮我|怎么|如何|为什么|为何|排查|排查一下|实现|修复|解决|调研|审查|检查|分析|报错|错误|异常|失败|不支持|优化|重构|添加|新增|删除|修改|为什么不能|为什么没法)`)
+	sentences := splitSentences(query)
+	for _, s := range sentences {
+		if intentRe.MatchString(s) {
+			add(s)
+		}
+	}
+
+	// 3. 反引号包裹的技术标识符 `xxx`
+	backtickRe := regexp.MustCompile("`([^`]{3,80})`")
+	for _, m := range backtickRe.FindAllStringSubmatch(query, -1) {
+		add(m[1])
+	}
+
+	// 4. 文件路径引用（如 xxx/yyy.go:123）
+	pathRe := regexp.MustCompile(`[\w\-./]+\.\w+(:\d+)?`)
+	for _, m := range pathRe.FindAllString(query, -1) {
+		add(m)
+	}
+
+	// 5. 如果一条都没提取出来，回退用原始 query（保证不退化）
+	if len(fragments) == 0 {
+		add(query)
+	}
+
+	return fragments
+}
+
+// splitSentences 将文本拆分成句子（中英文标点、换行符）
+func splitSentences(text string) []string {
+	// 按中英文句号、问号、换行拆分
+	re := regexp.MustCompile(`[。？?！!\n]+`)
+	parts := re.Split(text, -1)
+	var result []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if len(p) >= 5 { // 过滤过短的碎片
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+// SearchKnowledgeMulti 多向量检索：将 query 拆分为多个语义片段，分路检索后用 RRF 融合
+//
+// 参数同 SearchKnowledge。融合策略：
+//   - 每个片段各检索 topK 条
+//   - RRF（Reciprocal Rank Fusion）：score = Σ 1/(k+rank)，默认 k=60
+//   - 被多个片段同时召回的知识会因多次累加而排到前面（语义双重确认提权）
+//   - VectorScore 保留每条知识的最高向量相似度，用于阈值过滤（兼容现有 0.5 阈值）
+func SearchKnowledgeMulti(query string, topK int, projects []string, categories []string) ([]KnowledgeItem, error) {
+	if topK <= 0 {
+		topK = 10
+	}
+
+	// 1. 提取语义片段
+	fragments := ExtractQueryFragments(query)
+	if len(fragments) == 0 {
+		// 兜底：回退到单向量检索
+		return SearchKnowledge(query, topK, projects, categories)
+	}
+
+	// 2. 批量获取所有片段的向量（一次 API 调用）
+	vectors, err := GetEmbeddings(fragments)
+	if err != nil {
+		log.Printf("[knowledge-multi] 批量 embedding 失败，降级单向量: %v", err)
+		return SearchKnowledge(query, topK, projects, categories)
+	}
+
+	// 3. 每个片段独立检索 topK，收集结果
+	// RRF: 每条知识的 rank 从 1 开始
+	type hitAccum struct {
+		rrfScore    float64
+		maxVecScore float64
+		hits        []QdrantHit
+	}
+	accum := make(map[int64]*hitAccum)
+
+	for _, vec := range vectors {
+		hits, err := QdrantSearch(vec, topK, projects, categories)
+		if err != nil {
+			log.Printf("[knowledge-multi] Qdrant 检索失败（片段已跳过）: %v", err)
+			continue
+		}
+		for rank, h := range hits {
+			acc, exists := accum[h.KnowledgeID]
+			if !exists {
+				acc = &hitAccum{}
+				accum[h.KnowledgeID] = acc
+			}
+			// RRF 融合：k=60
+			acc.rrfScore += 1.0 / float64(60+rank+1)
+			if h.Score > acc.maxVecScore {
+				acc.maxVecScore = h.Score
+			}
+			acc.hits = append(acc.hits, h)
+		}
+	}
+
+	if len(accum) == 0 {
+		return nil, nil
+	}
+
+	// 4. 按 RRF 分数排序，取 topK
+	type scored struct {
+		id     int64
+		rrf    float64
+		vecMax float64
+	}
+	scoredList := make([]scored, 0, len(accum))
+	for id, acc := range accum {
+		scoredList = append(scoredList, scored{id: id, rrf: acc.rrfScore, vecMax: acc.maxVecScore})
+	}
+	sort.Slice(scoredList, func(i, j int) bool {
+		return scoredList[i].rrf > scoredList[j].rrf
+	})
+	if len(scoredList) > topK {
+		scoredList = scoredList[:topK]
+	}
+
+	// 5. 回 MySQL 取完整内容
+	conn, err := GetDB()
+	if err != nil {
+		return nil, err
+	}
+
+	ids := make([]interface{}, len(scoredList))
+	rrfMap := make(map[int64]float64, len(scoredList))
+	vecMap := make(map[int64]float64, len(scoredList))
+	for i, s := range scoredList {
+		ids[i] = s.id
+		rrfMap[s.id] = s.rrf
+		vecMap[s.id] = s.vecMax
+	}
+
+	placeholders := make([]string, len(ids))
+	for i := range ids {
+		placeholders[i] = "?"
+	}
+	querySQL := fmt.Sprintf(
+		"SELECT k.id, k.user_id, COALESCE(u.username, '') as username, k.project, k.category, k.title, k.summary, k.content, k.context, k.tags, k.source, k.priority, k.status, k.created_at FROM sys_knowledge k LEFT JOIN sys_user u ON k.user_id = u.id WHERE k.id IN (%s) AND k.status = 'active'",
+		strings.Join(placeholders, ","),
+	)
+
+	rows, err := conn.Query(querySQL, ids...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []KnowledgeItem
+	for rows.Next() {
+		var item KnowledgeItem
+		var tagsJSON string
+		var contextStr sql.NullString
+		if err := rows.Scan(&item.ID, &item.UserID, &item.Username, &item.Project, &item.Category, &item.Title, &item.Summary, &item.Content, &contextStr, &tagsJSON, &item.Source, &item.Priority, &item.Status, &item.CreatedAt); err != nil {
+			continue
+		}
+		item.Context = contextStr.String
+		if tagsJSON != "" && tagsJSON != "null" {
+			json.Unmarshal([]byte(tagsJSON), &item.Tags)
+		}
+		item.Score = rrfMap[item.ID]
+		item.VectorScore = vecMap[item.ID]
+		items = append(items, item)
+	}
+
+	// 按 RRF 分数降序
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Score > items[j].Score
+	})
+
+	log.Printf("[knowledge-multi] query=%q fragments=%d candidates=%d returned=%d",
+		truncateForLog(query, 60), len(fragments), len(accum), len(items))
+
+	return items, nil
+}
+
+func truncateForLog(s string, maxLen int) string {
+	if len(s) > maxLen {
+		return s[:maxLen] + "..."
+	}
+	return s
 }

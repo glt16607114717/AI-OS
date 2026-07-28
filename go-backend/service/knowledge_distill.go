@@ -138,9 +138,9 @@ func buildDistillPrompt(date, convContent string) string {
       "title": "知识标题（≤30字）",
       "context": "这条知识产生的原因和背景",
       "content": "知识的具体内容（≤1500字，超过请拆分为多条）",
-      "priority": "高/中/低",
+      "priority": "high|medium|low（high=阻断级Bug修复/核心架构决策/重大数据变更，medium=常规规范/工具技巧/流程说明，low=辅助性备注）",
       "tags": ["标签1", "标签2"],
-      "project": "项目名称（AI-OS/rmp-api/未知）"
+      "project": "项目名称（ai-os/rmp/general 三选一，未知填 general）"
     }
   ],
   "suggestions": [                     // 工作流程优化建议
@@ -166,6 +166,19 @@ func buildDistillPrompt(date, convContent string) string {
 7. 当提供了 session 摘要时，仅从中提取知识概要，不逐句复述
 8. 不要编造对话中不存在的内容
 9. session_summary 用于连接多段对话，必须概括当前对话的核心内容
+10. knowledge.dimension 必须使用以下六个中文枚举值之一（严禁改写、严禁大小写变化、严禁用英文）：
+    - 技术规范：代码规范、命名约定、编码风格、最佳实践
+    - 架构决策：技术选型、模块划分、设计模式、架构权衡
+    - 开发流程：开发步骤、部署流程、发布流程、协作流程
+    - Bug修复：具体 Bug 的根因分析与修复方案
+    - 工具技巧：IDE、脚本、命令行、工具链的使用技巧
+    - 环境配置：开发/测试/生产环境配置、依赖管理、端口分配
+    无法归类的内容不要提炼为知识（直接跳过），严禁编造未在枚举里的维度
+11. knowledge.project 必须使用以下三个枚举值之一（严禁大小写变化、严禁用中文、严禁用其他值）：
+    - ai-os：AI-OS 项目相关（Go 后端、Web 前端、桌面端、代理网关、知识库、技能、LLM 路由）
+    - rmp：RMP 系统相关（rmp-api、chartsapi、socket、nnd-robot、rmp-prd、nnd-flow-api）
+    - general：通用知识、与具体项目无关、或无法明确判断归属
+    严禁输出 "AI-OS"（大写）、"rmp-api"、"rmp-prd"、"nnd-robot"、"未知" 等非枚举值
 
 【对话内容】
 %s`, date, convContent)
@@ -195,6 +208,8 @@ func buildReducePrompt(date, reduceContent string) string {
 3. suggestions.priority 必须使用以下枚举值之一：high、medium、low
 4. 每条 knowledge.content 必须 ≤ 1500 个中文字符
 5. 只输出 JSON，不要添加任何解释文字
+6. knowledge.dimension 必须使用以下六个中文枚举值之一（严禁大小写变化、严禁用英文）：技术规范 / 架构决策 / 开发流程 / Bug修复 / 工具技巧 / 环境配置
+7. knowledge.project 必须使用以下三个枚举值之一（严禁大小写变化、严禁用中文、严禁用其他值）：ai-os / rmp / general
 
 【原始蒸馏结果】
 %s`, date, reduceContent)
@@ -1151,23 +1166,32 @@ func RunDistillForDateWithTrigger(userID int, username, date, triggerType string
 	// ══════════════════════════════════════════════
 	storeStart := time.Now()
 
-	// 知识入库（关联 session_id）
+	// 知识入库：优先用 Reduce 精炼结果（reducedKnowledge），Reduce 失败时回退到 Map 原始产出（allKnowledge）
+	// 修复 B1：之前错误地遍历 mapResults（Map 原始数据），导致 Reduce 精炼白做
+	knowledgeToStore := reducedKnowledge
+	useReduce := true
+	if len(knowledgeToStore) == 0 {
+		knowledgeToStore = allKnowledge
+		useReduce = false
+	}
+	log.Printf("[distill] [user=%d] [stage=store] 入库数据源=%s，待入库条数=%d",
+		userID, func() string { if useReduce { return "reduce" }; return "map_fallback" }(), len(knowledgeToStore))
+
 	knowledgeStored := 0
 	knowledgeSkipped := 0
-	for _, mr := range mapResults {
-		for _, k := range mr.Knowledge {
-			saved, err := StoreDistillKnowledge(userID, date, k, mr.SessionID)
-			if err != nil {
-				log.Printf("[distill] [user=%d] [session=%s] [stage=store] 知识入库失败: %v, title=%s", userID, mr.SessionID, err, k.Title)
-				distillLog(userID, username, date, triggerType, "save_knowledge", "fail",
-					fmt.Sprintf("session=%s 知识入库失败: %v, title=%s", mr.SessionID, err, k.Title), "", 0, mr.SessionID)
-				continue
-			}
-			if saved {
-				knowledgeStored++
-			} else {
-				knowledgeSkipped++
-			}
+	for _, k := range knowledgeToStore {
+		// Reduce 合并后的知识是跨 session 的，session_id 留空串；Map 兜底场景按 source 区分
+		saved, err := StoreDistillKnowledge(userID, date, k, "")
+		if err != nil {
+			log.Printf("[distill] [user=%d] [stage=store] 知识入库失败: %v, title=%s", userID, err, k.Title)
+			distillLog(userID, username, date, triggerType, "save_knowledge", "fail",
+				fmt.Sprintf("知识入库失败: %v, title=%s", err, k.Title), "", 0, "")
+			continue
+		}
+		if saved {
+			knowledgeStored++
+		} else {
+			knowledgeSkipped++
 		}
 	}
 	log.Printf("[distill] [user=%d] [stage=store] 知识入库完成：新增=%d，跳过(重复)=%d", userID, knowledgeStored, knowledgeSkipped)

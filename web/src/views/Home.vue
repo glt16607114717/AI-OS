@@ -26,7 +26,7 @@ const sidebarCollapsed = ref(localStorage.getItem('aios_sidebar_collapsed') === 
 
 const isDevActive = computed(() => route.path.startsWith('/dev'))
 const isLlmActive = computed(() => ['/llm/strategy', '/llm/god-rules', '/llm/quota'].includes(route.path))
-const isRagActive = computed(() => route.path.startsWith('/rag/knowledge'))  // 知识库独立一级菜单
+const isRagActive = computed(() => route.path.startsWith('/rag'))  // 知识库及巡检报告
 const isAdviceReportActive = computed(() => ['/rag/daily-report', '/llm/ai-advice'].includes(route.path))  // 建议 & 日报
 const isStatsActive = computed(() => route.path === '/llm/stats')  // 统计仪表独立一级菜单（单链接）
 const isSystemActive = computed(() => route.path.startsWith('/system') || route.path === '/llm/config')
@@ -323,6 +323,10 @@ onBeforeUnmount(() => {
               <svg class="sub-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
               <span>知识浏览</span>
             </router-link>
+            <router-link to="/rag/audit-report" class="nav-sub-item" active-class="active">
+              <svg class="sub-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+              <span>巡检报告</span>
+            </router-link>
           </div>
         </div>
 
@@ -499,6 +503,10 @@ onBeforeUnmount(() => {
             <router-link to="/system/prank" class="nav-sub-item" active-class="active">
               <svg class="sub-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
               <span>逗你玩</span>
+            </router-link>
+            <router-link to="/system/other" class="nav-sub-item" active-class="active" v-if="isAdmin">
+              <svg class="sub-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+              <span>其他设置</span>
             </router-link>
             <router-link to="/llm/config" class="nav-sub-item" active-class="active" v-if="isAdmin">
               <svg class="sub-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>

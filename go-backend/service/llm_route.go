@@ -621,7 +621,14 @@ func saveStrategiesToDB(strategies []model.Strategy, userID int) {
 }
 
 func GetStrategies(userID int, isAdmin bool) []model.Strategy {
-	return loadStrategiesFromDB(userID, isAdmin)
+	strategies := loadStrategiesFromDB(userID, isAdmin)
+	if len(strategies) == 0 {
+		// 用户无个人策略，fallback 全局系统策略（保证前端工作台始终有可用模型）
+		if globalStrat := loadGlobalSystemStrategy(); globalStrat != nil {
+			strategies = append(strategies, *globalStrat)
+		}
+	}
+	return strategies
 }
 
 func SaveStrategy(s model.Strategy, userID int) {

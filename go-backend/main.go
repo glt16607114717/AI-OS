@@ -1,7 +1,7 @@
 package main
 
 import (
-	"ai-os-server/circuit"
+	// "ai-os-server/circuit" // [DISABLED 2025-07-22] 熔断机制暂时关闭
 	"ai-os-server/config"
 	"ai-os-server/handler"
 	"ai-os-server/middleware"
@@ -44,19 +44,28 @@ func main() {
 	service.EnsureSuggestionTable()
 	service.EnsureDistillTable()
 	service.EnsureChatTable()
+	service.EnsureAuditTables() // 知识库巡检表
 	handler.EnsurePrankTable()
+	service.EnsureOtherSettingTable()
 
 	// 启动额度监控
 	service.StartQuotaMonitor()
 	log.Println("[init] 额度监控已启动")
 
-	// 启动熔断器（独立 goroutine，每1分钟扫库检测）
-	cb := circuit.Init(service.GetDB)
-	go cb.StartMonitor()
+	// 启动智谱 5 小时窗口自动锚定调度器
+	// 每天 6 点主动锚定，让高峰自动分摊到多个窗口
+	service.StartZhipuAnchor()
+	log.Println("[init] 智谱窗口自动锚定调度器已启动（每日 06:00 锚定）")
 
-	// 启动每日知识蒸馏（凌晨3点）
+	// [DISABLED 2025-07-22] API key 大量熔断，暂时关闭熔断机制
+	// cb := circuit.Init(service.GetDB)
+	// go cb.StartMonitor()
+	// log.Println("[init] 熔断器已启动")
+
+	// 启动每日知识蒸馏（改为晚上 11 点，避免抢白天的锚点窗口）
+	// 蒸馏会走智谱 API，锚定夜间窗口 23:00-04:00
 	c := cron.New()
-	c.AddFunc("0 3 * * *", func() {
+	c.AddFunc("0 23 * * *", func() {
 		log.Println("[cron] 开始执行每日知识蒸馏...")
 		if err := service.RunDailyDistill(); err != nil {
 			log.Printf("[cron] 蒸馏失败: %v", err)
@@ -64,8 +73,26 @@ func main() {
 			log.Println("[cron] 每日知识蒸馏完成")
 		}
 	})
+
+	// 启动每日知识库巡检（改为晚上 11:30，与蒸馏错开，同样锚定夜间窗口）
+	c.AddFunc("30 23 * * *", func() {
+		log.Println("[cron] 开始执行每日知识库巡检...")
+		if err := service.RunDailyAudit(); err != nil {
+			log.Printf("[cron] 巡检失败: %v", err)
+		} else {
+			log.Println("[cron] 每日知识库巡检完成")
+		}
+	})
+
+	// 启动每日 dump 文件清理（凌晨4点，蒸馏后1小时）
+	// 性能优化：请求时不再清理 dump 文件（避免并发 panic + 磁盘 IO 锁竞争）
+	// 改为凌晨单线程定时清理，单日累积约 2.8G 完全可接受
+	c.AddFunc("0 4 * * *", func() {
+		service.CleanupDumpFiles()
+	})
+
 	c.Start()
-	log.Println("[init] 定时任务已启动（每天凌晨3:00 蒸馏）")
+	log.Println("[init] 定时任务已启动（晚上23:00 蒸馏，23:30 巡检，凌晨4:00 清理 dump）")
 
 	// 路由
 	r := chi.NewRouter()
@@ -104,9 +131,8 @@ func main() {
 		r.Get("/api/ai-advisor/suggestions", handler.GetSuggestions)
 		r.Post("/api/ai-advisor/process", handler.MarkSuggestionProcessed)
 		r.Get("/api/ai-advisor/knowledge", handler.GetDistillKnowledge)
-		r.Post("/api/ai-advisor/trigger", handler.TriggerDistill) // 手动触发蒸馏
+		r.Post("/api/ai-advisor/trigger", handler.TriggerDistill)     // 手动触发蒸馏
 		r.Get("/api/ai-advisor/distill-logs", handler.GetDistillLogs) // 蒸馏日志
-
 
 		// RAG 知识库
 		r.Get("/api/rag/status", handler.RagStatus)
@@ -178,6 +204,11 @@ func main() {
 		r.Get("/api/bugs/all", handler.GetAllBugs)
 		r.Post("/api/bugs/update-status", handler.UpdateBugStatus)
 		r.Post("/api/bugs/withdraw", handler.WithdrawBug)
+
+		// 知识库巡检（只读路由对所有登录用户开放，写操作在管理员组）
+		r.Get("/api/audit/reports", handler.GetAuditReports)
+		r.Get("/api/audit/reports/{id}", handler.GetAuditReportDetail)
+		r.Get("/api/audit/pending-archives", handler.GetPendingArchives)
 	})
 
 	// ── 需要管理员 ──
@@ -209,8 +240,17 @@ func main() {
 		r.Post("/api/prank/save", handler.SavePrank)
 		r.Delete("/api/prank/delete", handler.DeletePrank)
 
+		// 其他设置（管理员）
+		r.Get("/api/other-setting", handler.GetOtherSettingHandler)
+		r.Post("/api/other-setting", handler.SaveOtherSettingHandler)
+
 		// 用户类型切换（管理员）
 		r.Post("/api/users/toggle-user-type", handler.ToggleUserType)
+
+		// 知识库巡检（管理员写操作）
+		r.Post("/api/audit/run", handler.RunAuditManually)
+		r.Post("/api/audit/pending-archives/{id}/approve", handler.ApprovePendingArchive)
+		r.Post("/api/audit/pending-archives/{id}/reject", handler.RejectPendingArchive)
 	})
 
 	// 启动

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"regexp"
 	"strings"
@@ -111,11 +112,8 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 		service.AddChatMessage(userID, "user", cleanedMsg, sessionID, msgId)
 	}
 
-	// 注入角色定位（工作台专属，在上帝指令和 RAG 之前）
-	injectWorkspaceRole(req, session)
-
-	// 注入上帝指令 + RAG
-	injectGodRulesAndRAG(req, userMsgRaw, userID, username)
+	// 注入上帝指令 + RAG（修复 B4：从请求头 X-AIOS-Project 读取项目提示，动态收窄检索范围）
+	injectGodRulesAndRAG(req, userMsgRaw, userID, username, r.Header.Get("X-AIOS-Project"))
 
 	// 提示词精简（强制开启，不需要用户配置）
 	// 工作台场景没有编辑器噪音，不需要精简
@@ -278,8 +276,11 @@ func WorkspaceChat(w http.ResponseWriter, r *http.Request) {
 		service.AddChatMessage(userID, "user", cleanedMsg, sessionID, msgId)
 	}
 
-	// 注入上帝指令 + RAG
-	injectGodRulesAndRAG(req, userMsgRaw, userID, username)
+	// 注入角色定位（工作台专属，在上帝指令和 RAG 之前）
+	injectWorkspaceRole(req, session)
+
+	// 注入上帝指令 + RAG（修复 B4：从请求头 X-AIOS-Project 读取项目提示，动态收窄检索范围）
+	injectGodRulesAndRAG(req, userMsgRaw, userID, username, r.Header.Get("X-AIOS-Project"))
 
 	// 注入服务端技能（工作台专属）
 	tools, _ := service.GetBuiltinSkillToolDefinitions(userID, isAdmin)
@@ -538,7 +539,8 @@ func injectWorkspaceRole(req map[string]interface{}, session *model.Session) {
 }
 
 // injectGodRulesAndRAG 注入上帝指令和 RAG 知识库上下文
-func injectGodRulesAndRAG(req map[string]interface{}, userMsgRaw string, userID int, username string) {
+// projectHint: 可选，从请求头 X-AIOS-Project 读取，用于收窄 RAG 检索范围
+func injectGodRulesAndRAG(req map[string]interface{}, userMsgRaw string, userID int, username string, projectHint string) {
 	messages, ok := req["messages"].([]interface{})
 	if !ok {
 		return
@@ -548,7 +550,7 @@ func injectGodRulesAndRAG(req map[string]interface{}, userMsgRaw string, userID 
 		msgMaps[i], _ = m.(map[string]interface{})
 	}
 	msgMaps = service.InjectGodRules(msgMaps, userID)
-	msgMaps = injectRAGContext(msgMaps, extractUserQuery(userMsgRaw), userID)
+	msgMaps = injectRAGContext(msgMaps, extractUserQuery(userMsgRaw), userID, username, projectHint)
 
 	// 图片识别预处理：检测最后一条 user message 的图片（上传/URL），识别后追加文字描述
 	msgMaps, visionResult := service.ProcessImages(msgMaps, userID, username)
@@ -668,20 +670,168 @@ func extractUserQuery(raw string) string {
 		cleaned = strings.ReplaceAll(cleaned, "\n\n\n", "\n\n")
 	}
 
+	// 5. 英文指令前缀截断：IDE 注入的系统提示词（intent. / When a skill / You are ...）
+	//    是英文段落，真实用户问题是中文段落，从第一个中文段落截取到末尾
+	cleaned = stripEnglishInstructionPrefix(cleaned)
+
+	// 6. 网页内容过滤：IDE fetch 工具抓取的网页全文当 query 检索，严重污染向量
+	//    典型特征：以 "Web page content:" 开头，或包含大量 HTML 标签/超链接
+	if strings.HasPrefix(cleaned, "Web page content:") || strings.HasPrefix(cleaned, "Web Page Content:") {
+		return "" // 网页全文不作为检索 query
+	}
+	// HTML 标签密度检测：如果 <a href / <div / <span 等标签占比过高，判定为 HTML 噪音
+	if isHTMLHeavyContent(cleaned) {
+		return ""
+	}
+
+	// 6b. <result> 标签过滤：AI 工具执行结果被当 query 检索
+	if strings.HasPrefix(cleaned, "<result>") || strings.HasPrefix(cleaned, "<result ") {
+		return ""
+	}
+
+	// 6c. 代码片段过滤：以代码语法开头的纯代码内容，无业务语义
+	codePrefixes := []string{"//", "/*", "func ", "function ", "const ", "import ", "package ", "type "}
+	for _, p := range codePrefixes {
+		if strings.HasPrefix(cleaned, p) {
+			return ""
+		}
+	}
+
+	// 6d. JSON 报文过滤：API 返回的 JSON 数据被当 query 检索
+	if strings.HasPrefix(cleaned, "{") || strings.HasPrefix(cleaned, "[{") {
+		// 轻量检测：如果是 JSON 格式（含引号包裹的 key），判定为报文噪音
+		if strings.Contains(cleaned, "\":") || strings.Contains(cleaned, "\",") {
+			return ""
+		}
+	}
+
+	// 6e. 操作日志过滤：带时间戳格式的运行日志（14:14:08音频上传成功...）
+	logRe := regexp.MustCompile(`^\d{2}:\d{2}:\d{2}`)
+	if logRe.MatchString(cleaned) {
+		return ""
+	}
+
+	// 6f. 纯文件路径过滤：反引号包裹的文件路径，或纯 Windows/Unix 路径
+	if strings.HasPrefix(cleaned, "`") || strings.HasPrefix(cleaned, "d:\\") || strings.HasPrefix(cleaned, "D:\\") ||
+		strings.HasPrefix(cleaned, "c:\\") || strings.HasPrefix(cleaned, "C:\\") ||
+		strings.HasPrefix(cleaned, "/home/") || strings.HasPrefix(cleaned, "/opt/") {
+		return ""
+	}
+
+	// 7. 纯闲聊过滤：过短或无业务语义的对话（"好的"、"没看到"等）
+	//    只有 CJK 字符 < 8 且无代码/技术关键词的短消息不送检索
+	runes := []rune(cleaned)
+	cjk := countCJKChars(cleaned)
+	if cjk < 8 && !hasTechnicalKeywords(cleaned) {
+		return ""
+	}
+	_ = runes // 保持变量使用
+
 	return cleaned
 }
 
+// isHTMLHeavyContent 检测内容是否以 HTML 标签为主（标签数占比高）
+func isHTMLHeavyContent(text string) bool {
+	htmlTags := regexp.MustCompile(`<(?:a|div|span|img|p|li|ul|ol|table|tr|td|th|br|hr|h[1-6])\b[^>]*>`)
+	matches := htmlTags.FindAllString(text, -1)
+	if len(matches) > 10 {
+		return true // 超过10个HTML标签，判定为网页噪音
+	}
+	// 超链接密度：javascript:void 或 https:// 链接超过 5 个
+	linkCount := strings.Count(text, "http") + strings.Count(text, "javascript:")
+	return linkCount > 5
+}
+
+// hasTechnicalKeywords 检测是否包含技术/业务关键词（用于区分闲聊和业务查询）
+func hasTechnicalKeywords(text string) bool {
+	keywords := []string{
+		"bug", "error", "fix", "deploy", "部署", "测试", "生产", "代码",
+		"接口", "api", "sql", "数据库", "配置", "权限", "功能", "需求",
+		"principle", "架构", "逻辑", "字段", "页面", "模块", "路由",
+		"model", "prompt", "rag", "knowledge", "优化", "修复", "实现",
+		"refactor", "review", "merge", "branch", "commit",
+	}
+	lower := strings.ToLower(text)
+	for _, kw := range keywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// stripEnglishInstructionPrefix 截断 IDE 注入的英文指令前缀，提取真实中文用户意图
+// 仅当文本较长（>200字符）时触发截断，短消息不动，避免误伤纯英文提问
+func stripEnglishInstructionPrefix(text string) string {
+	runes := []rune(text)
+	if len(runes) < 200 {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		rl := len([]rune(line))
+		if rl < 5 {
+			continue
+		}
+		cjk := countCJKChars(line)
+		if cjk > 0 && float64(cjk)/float64(rl) > 0.3 {
+			result := strings.TrimSpace(strings.Join(lines[i:], "\n"))
+			if len([]rune(result)) >= 5 {
+				return result
+			}
+		}
+	}
+	return text
+}
+
+// countCJKChars 统计中日韩字符数量（含全角标点）
+func countCJKChars(s string) int {
+	count := 0
+	for _, r := range s {
+		if (r >= 0x4E00 && r <= 0x9FFF) || // CJK 统一汉字
+			(r >= 0x3400 && r <= 0x4DBF) || // CJK 扩展A
+			(r >= 0x3000 && r <= 0x303F) || // CJK 标点
+			(r >= 0xFF00 && r <= 0xFFEF) { // 全角字符
+			count++
+		}
+	}
+	return count
+}
+
+// buildRAGProjects 构建检索范围
+// 设计决策（2026-07-24）：取消 project 过滤，全库检索
+// 原因：入库端无法准确判断 project（AI 只看到文本片段，缺乏上下文），
+// 强行分类导致 93% 标为 general，project 过滤形同虚设。
+// 改为全库检索 + 向量相似度排序，让 score 自己说话。
+// projectHint 参数保留兼容但不再使用。
+func buildRAGProjects(projectHint string) []string {
+	return nil // 全库检索，不做 project 过滤
+}
+
 // injectRAGContext 检索知识库（Qdrant），将相关内容注入 system prompt 最前面
-func injectRAGContext(messages []map[string]interface{}, userMsg string, userID int) []map[string]interface{} {
+// projectHint: 保留兼容，当前不做 project 过滤（全库检索 + score 排序）
+// username: 当前用户名（用于巡检日志采集）
+//
+// 阈值：0.6（2026-07-24 从 0.5 提升，拦截低质量召回）
+// 巡检采集：userID % 10 == 0 的用户采样记录检索日志（供每日巡检评审）
+func injectRAGContext(messages []map[string]interface{}, userMsg string, userID int, username string, projectHint string) []map[string]interface{} {
 	if userMsg == "" || userID <= 0 {
 		return messages
 	}
 
-	// Qdrant 向量检索（忽略用户隔离，全员共享，按项目过滤）
-	results, err := service.SearchKnowledge(userMsg, 5, []string{"ai-os", "rmp", "general"}, nil)
+	// 归一化 projectHint
+	projects := buildRAGProjects(projectHint)
+
+	// 多向量检索：将 query 拆分为多个语义片段，分路检索后用 RRF 融合
+	// 优势：超长 prompt 不会被噪声淹没，短 prompt 有更多检索入口
+	results, err := service.SearchKnowledgeMulti(userMsg, 5, projects, nil)
 	if err != nil || len(results) == 0 {
 		return messages
 	}
+
+	// 巡检采样标记：10% 随机采样
+	shouldAudit := rand.Intn(10) == 0
 
 	// 构建知识上下文
 	var ctx strings.Builder
@@ -689,11 +839,27 @@ func injectRAGContext(messages []map[string]interface{}, userMsg string, userID 
 	ctx.WriteString("以下内容来自企业知识库，在回答时必须优先参考：\n\n")
 	count := 0
 	for _, r := range results {
-		if r.Score < 0.35 {
+		// 阈值过滤：用 VectorScore（最高向量相似度）判断，不用 RRF 融合分数
+		// RRF 分数是相对排序分，不能直接作为相似度阈值使用
+		vecScore := r.VectorScore
+		if r.Score > vecScore { // 兼容单向量检索（Score=VectorScore）
+			vecScore = r.Score
+		}
+		if vecScore < 0.6 {
 			continue
 		}
 		count++
-		ctx.WriteString(fmt.Sprintf("--- 参考 %d（相似度 %.0f%%）---\n%s\n\n", count, r.Score*100, r.Content))
+		displayScore := vecScore
+		if r.VectorScore > 0 && r.Score != r.VectorScore {
+			// 多向量融合：显示 "RRF排序 / 最高向量分"
+			displayScore = r.VectorScore
+		}
+		ctx.WriteString(fmt.Sprintf("--- 参考 %d（相似度 %.0f%%）---\n%s\n\n", count, displayScore*100, r.Content))
+
+		// 巡检采集：记录最高向量相似度（vector_score），供日报检索质量 avg_score 使用
+		if shouldAudit {
+			service.LogRetrieveAudit(userID, username, userMsg, projects, r)
+		}
 	}
 
 	if count == 0 {

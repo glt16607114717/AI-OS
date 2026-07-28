@@ -57,3 +57,4 @@ _python_backup/
 # === 临时数据库查询脚本 ===
 tool/check-*.json
 tool/*-table.json
+logs/quota

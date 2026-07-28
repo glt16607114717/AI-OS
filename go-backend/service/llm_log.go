@@ -40,6 +40,20 @@ func RecordStat(stat *model.LLMStat) {
 		stat.LatencyMs, success, errMsg, stat.SessionID, stat.MsgID, stat.ChatHistoryID)
 }
 
+// UpdateStatsChatHistoryID 补写本轮 msg_id 下所有 stats 记录的 chat_history_id
+// 时序问题修复：agent 循环中 RecordStat 在 AddChatMessage 之前执行，导致 chat_history_id=0
+// 在 agent 收尾拿到真实 chatID 后，用 msg_id 批量补写
+func UpdateStatsChatHistoryID(msgID string, chatID int64) {
+	if msgID == "" || chatID <= 0 {
+		return
+	}
+	conn, err := GetDB()
+	if err != nil {
+		return
+	}
+	conn.Exec("UPDATE sys_llm_stats SET chat_history_id = ? WHERE msg_id = ? AND chat_history_id = 0", chatID, msgID)
+}
+
 func CleanupStats() int {
 	conn, err := GetDB()
 	if err != nil {

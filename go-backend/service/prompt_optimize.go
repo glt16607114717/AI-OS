@@ -72,25 +72,16 @@ func optimizeTraeMessages(messages []map[string]interface{}, cfg *model.GodRules
 		return messages
 	}
 
-	// ── 20 轮截断（Trae 编辑器无限累加的防护）──
-	// 与 ZCode 链路共用同一阈值和逻辑
-	// 阈值依据：20 轮之前的对话与当前任务几乎无关，重要节点应通过 task log 记录而非依赖上下文
-	messages = truncateByRounds(messages, 20, "optimizeTrae")
+	// ── 消息轮次截断（Trae 编辑器无限累加的防护）──
+	// 轮数从 sys_other_setting 配置读取，默认 10，可在"系统设置 → 其他设置"修改
+	// 阈值依据（2026-07-21 实测）：分析 710 条消息的真实请求发现：
+	//   - 10 轮之前的对话与当前任务几乎无关（实测零引用）
+	//   - 平均单回合 1.55 万 token，保留 10 轮约 15-19 万 token
+	//   - 长任务（如 36 次工具调用）在单回合内即可完成，不需要跨回合上下文
+	messages = truncateByRounds(messages, GetOtherSetting().MessageRounds, "optimizeTrae")
 
-	// 找第 10 条 user 消息的索引（保护边界：此索引及之后的 tool 结果不截断）
-	// 5 轮太激进，放宽到 10 轮，保留更多历史上下文
-	keepFromIdx := 0
-	userCount := 0
-	for i := len(messages) - 1; i >= 0; i-- {
-		if role, _ := messages[i]["role"].(string); role == "user" {
-			userCount++
-			if userCount == 10 {
-				keepFromIdx = i
-				break
-			}
-		}
-	}
-
+	// 注：truncateByRounds 已经把 10 轮之前的所有消息（含 tool 结果）整段删除
+	// 不再做"保留区外 tool 截断到 200 字符"——既然要丢就全丢，截断反而浪费 token
 	result := make([]map[string]interface{}, len(messages))
 	stripCount := 0
 	for i, msg := range messages {
@@ -123,13 +114,11 @@ func optimizeTraeMessages(messages []map[string]interface{}, cfg *model.GodRules
 			}
 
 		case "tool":
-			// 先清 hooks_context，再按轮次截断（system-reminder/toolcall_status 等保留）
+			// 保留区内的 tool 结果一律完整保留（不再截断）
+			// 只清 hooks_context 噪音
 			content := StringifyContent(msg["content"])
 			if cfg.StripNoise {
 				content = stripHooksContext(content)
-			}
-			if cfg.CompressToolResult && i < keepFromIdx && len(content) > 200 {
-				content = content[:200] + "\n[...结果已截断，如需完整内容请重新执行该工具]"
 			}
 			result[i] = map[string]interface{}{
 				"role":         "tool",

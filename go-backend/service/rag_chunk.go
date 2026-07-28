@@ -1,6 +1,7 @@
 package service
 
 import (
+	"regexp"
 	"strings"
 )
 
@@ -114,10 +115,11 @@ func chunkMarkdown(text string, cfg ChunkConfig) []string {
 		chunks[len(chunks)-1] += "\n\n" + current.String()
 	}
 
+	// 过滤纯代码块/Mermaid 碎片：文本占比 < 30% 的块无检索价值
+	chunks = filterCodeOnlyChunks(chunks)
+
 	return chunks
 }
-
-// splitByMarkdownHeaders 按 ## / ### 标题分割
 func splitByMarkdownHeaders(text string) []string {
 	lines := strings.Split(text, "\n")
 	var sections []string
@@ -299,4 +301,42 @@ func chunkParagraphs(text string, cfg ChunkConfig) []string {
 	}
 
 	return chunks
+}
+
+// filterCodeOnlyChunks 过滤纯代码块/Mermaid 碎片
+// 逻辑：移除 ```...``` 包裹的纯代码内容（剔除代码后剩余文本 < 30%），防止无上下文的流程图残片入库
+// 对纯 Markdown 代码块不影响（没有 ``` 包裹的段落不受影响）
+func filterCodeOnlyChunks(chunks []string) []string {
+	// 匹配三反引号代码块（含 mermaid/flowchart/graph/sequenceDiagram 等）
+	codeBlockRe := regexp.MustCompile("(?s)```[a-zA-Z]*\\n.*?```")
+
+	var filtered []string
+	for _, chunk := range chunks {
+		// 剔除所有代码块后的纯文本
+		textOnly := codeBlockRe.ReplaceAllString(chunk, "")
+		textOnly = strings.TrimSpace(textOnly)
+
+		// 去除标题行（# 开头）后计算纯文本
+		textLines := []string{}
+		for _, line := range strings.Split(textOnly, "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "#") {
+				textLines = append(textLines, line)
+			}
+		}
+		pureText := strings.Join(textLines, " ")
+
+		// 纯文本占原 chunk 比例 < 30% → 丢弃（碎片化的纯代码/流程图无检索价值）
+		if len(chunk) > 0 && float64(len(pureText))/float64(len(chunk)) < 0.3 {
+			continue
+		}
+		filtered = append(filtered, chunk)
+	}
+
+	// 兜底：如果全部被过滤了，保留原始 chunks（防止极端情况丢全部数据）
+	if len(filtered) == 0 && len(chunks) > 0 {
+		return chunks
+	}
+
+	return filtered
 }

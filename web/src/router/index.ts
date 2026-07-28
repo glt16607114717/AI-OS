@@ -85,6 +85,11 @@ const router = createRouter({
           component: () => import('../views/rag/DailyReport.vue'),
         },
         {
+          path: 'rag/audit-report',
+          name: 'AuditReport',
+          component: () => import('../views/rag/AuditReport.vue'),
+        },
+        {
           path: 'system/account',
           name: 'AccountSettings',
           component: () => import('../views/system/AccountSettings.vue'),
@@ -93,6 +98,11 @@ const router = createRouter({
           path: 'system/prank',
           name: 'Prank',
           component: () => import('../views/llm/Prank.vue'),
+        },
+        {
+          path: 'system/other',
+          name: 'OtherSettings',
+          component: () => import('../views/system/OtherSettings.vue'),
         },
         {
           path: 'skills/mysql_query',

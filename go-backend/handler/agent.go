@@ -42,6 +42,17 @@ func agentLoop(w http.ResponseWriter, req map[string]interface{}, attempts []*se
 	log.Printf("[agent] start user=%s tools=%d", username, len(tools))
 
 	for round := 0; ; round++ {
+		// 每轮重新获取路由（修复 round_robin 不轮询：agent 多轮 tool_calls 只调用一次
+		// GetRouteByStrategy 导致同一对话 N 轮全走同一个 key）
+		// round_robin 计数器每轮递增，允许切换模型（tool_calls 格式各厂商兼容）
+		if round > 0 {
+			if newRoute := service.GetRouteByStrategy(userID); newRoute != nil {
+				req["model"] = newRoute.ModelID
+				attempts = buildFailoverAttempts(newRoute, userID)
+				log.Printf("[agent] round=%d 轮询切换 key=%s model=%s", round+1, newRoute.KeyName, newRoute.ModelID)
+			}
+		}
+
 		// 1. 请求 LLM（真流式，带故障转移）-- content 实时推给前端
 		result, err := callLLMStreamWithFailover(w, messages, tools, attempts, convCtx)
 		if err != nil {
@@ -193,6 +204,10 @@ func finishAgent(w http.ResponseWriter, req map[string]interface{}, content stri
 	convCtx.AssistantContent = content
 	chatID := service.AddChatMessage(convCtx.UserID, "assistant", content, convCtx.SessionID, convCtx.MsgId)
 	convCtx.ChatHistoryID = chatID
+
+	// 补写本轮所有 stats 记录的 chat_history_id（修复时序：RecordStat 先于 AddChatMessage 执行）
+	service.UpdateStatsChatHistoryID(convCtx.MsgId, chatID)
+
 	latency := int(time.Since(convCtx.StartTime).Milliseconds())
 	go service.SaveConversationLogWithUser(chatID, convCtx.UserID, convCtx.Username, req, content, modelID, vendorID,
 		convCtx.TotalPrompt, convCtx.TotalCompletion, 0, latency)
@@ -217,6 +232,10 @@ func finishAgentStream(w http.ResponseWriter, req map[string]interface{}, conten
 	convCtx.AssistantContent = content
 	chatID := service.AddChatMessage(convCtx.UserID, "assistant", content, convCtx.SessionID, convCtx.MsgId)
 	convCtx.ChatHistoryID = chatID
+
+	// 补写本轮所有 stats 记录的 chat_history_id（修复时序：RecordStat 先于 AddChatMessage 执行）
+	service.UpdateStatsChatHistoryID(convCtx.MsgId, chatID)
+
 	latency := int(time.Since(convCtx.StartTime).Milliseconds())
 	go service.SaveConversationLogWithUser(chatID, convCtx.UserID, convCtx.Username, req, content, modelID, vendorID,
 		convCtx.TotalPrompt, convCtx.TotalCompletion, 0, latency)
