@@ -85,6 +85,14 @@ func setCachedImage(key, desc string) {
 	rdb.Set(ctx, "vision_cache:"+key, desc, imageCacheTTL)
 }
 
+// isUnsupportedImage 判断图片格式是否被视觉模型支持
+// 智谱 GLM-4V 不支持 GIF 动图（返回 code 1210），直接跳过避免无意义调用
+func isUnsupportedImage(url string) bool {
+	lower := strings.ToLower(url)
+	// data:image/gif;base64,... 或 http(s)://xxx.gif
+	return strings.HasPrefix(lower, "data:image/gif") || strings.HasSuffix(lower, ".gif")
+}
+
 // getZhipuAPIKey 获取智谱 API Key（复用系统已配置的）
 func getZhipuAPIKey() string {
 	conn, err := GetDB()
@@ -227,6 +235,14 @@ func ProcessImages(messages []map[string]interface{}, userID int, username strin
 					continue
 				}
 
+				// 智谱视觉不支持 GIF 动图，提前拦截避免浪费 API 调用
+				if isUnsupportedImage(url) {
+					urlCache[url] = ""
+					imageCount++
+					tasks = append(tasks, imgTask{url: url, idx: idx, cached: "[GIF格式不支持，已跳过识别]", needCall: false})
+					continue
+				}
+
 				urlCache[url] = "" // 标记已处理
 				imageCount++
 				tasks = append(tasks, imgTask{url: url, idx: idx, needCall: true})
@@ -251,10 +267,10 @@ func ProcessImages(messages []map[string]interface{}, userID int, username strin
 				defer wg.Done()
 				desc, err := RecognizeImage(userID, username, task.url, "")
 				imageSize := len(task.url)
-				if err != nil {
-					LogVisionRecognize(userID, username, task.url, imageSize, "", "", visionModelID, false, err.Error())
-					task.cached = ""
-				} else if desc != "" {
+if err != nil {
+				LogVisionRecognize(userID, username, task.url, imageSize, "", "", visionModelID, false, err.Error())
+				task.cached = ""
+			} else if desc != "" {
 					task.cached = desc
 					setCachedImage(imageCacheKey(task.url), desc)
 					LogVisionRecognize(userID, username, task.url, imageSize, "", desc, visionModelID, true, "")

@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	// pprof 仅用于排查内存泄漏，注册到 DefaultServeMux，由下方独立端口 127.0.0.1:16060 暴露
+	// 抓完 heap profile 后这行连同下方 goroutine 一并删除
+	_ "net/http/pprof"
 	"os"
 	"time"
 
@@ -85,7 +88,19 @@ func main() {
 		}
 	})
 
-	// 启动每日 dump 文件清理（凌晨4点，蒸馏后1小时）
+	// 启动每日对话历史清理（凌晨 1 点，保留 7 天）
+	// 避免每天插入几千条时重复执行，改为凌晨一次定时清理
+	c.AddFunc("0 1 * * *", func() {
+		log.Println("[cron] 开始清理 7 天前的对话历史...")
+		deleted := service.CleanupOldChatHistory()
+		if deleted < 0 {
+			log.Println("[cron] 对话历史清理失败")
+		} else {
+			log.Printf("[cron] 对话历史清理完成: 删除 %d 条", deleted)
+		}
+	})
+
+	// 启动每日 dump 文件清理（凌晨 4 点，蒸馏后 1 小时）
 	// 性能优化：请求时不再清理 dump 文件（避免并发 panic + 磁盘 IO 锁竞争）
 	// 改为凌晨单线程定时清理，单日累积约 2.8G 完全可接受
 	c.AddFunc("0 4 * * *", func() {
@@ -156,6 +171,7 @@ func main() {
 		// 统计
 		r.Get("/api/stats/summary", handler.GetStatsSummary)
 		r.Get("/api/stats/errors", handler.GetRecentErrors)
+		r.Get("/api/stats/token-daily", handler.GetTokenDailyStats)
 		r.Post("/api/stats/cleanup", handler.CleanupStats)
 
 		// 错误日志
@@ -256,6 +272,16 @@ func main() {
 		r.Post("/api/audit/pending-archives/{id}/approve", handler.ApprovePendingArchive)
 		r.Post("/api/audit/pending-archives/{id}/reject", handler.RejectPendingArchive)
 	})
+
+	// ── pprof 诊断端点（仅本机 127.0.0.1，排查内存泄漏用，抓完即删）──
+	// 独立端口 16060，用 DefaultServeMux（pprof init 已注册 handler）
+	// 不绑 0.0.0.0，外网和 Nginx 都访问不到，仅 SSH 进本机可 curl
+	go func() {
+		log.Println("[pprof] 诊断端点启动: http://127.0.0.1:16060/debug/pprof/")
+		if err := http.ListenAndServe("127.0.0.1:16060", nil); err != nil {
+			log.Printf("[pprof] 诊断端点异常: %v", err)
+		}
+	}()
 
 	// 启动
 	addr := fmt.Sprintf("0.0.0.0:%s", port)

@@ -6,8 +6,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -213,59 +211,7 @@ func checkZhipuKey(apiKey, keyID, keyName string) *QuotaInfo {
 		}
 	}
 
-	// 落盘：把智谱返回的完整原始数据缓存到本地文件，供后续分析重置时间规律
-	saveQuotaSnapshot(keyID, keyName, body, info)
-
 	return info
-}
-
-// saveQuotaSnapshot 把智谱额度查询的完整原始响应缓存到本地 JSON 文件
-// 文件位置：logs/quota/zhipu_<key_id>_<YYYYMMDD_HHMMSS>.json
-// 每次采集一个文件，便于按时间排序分析
-// 失败不阻断主流程（只 log）
-func saveQuotaSnapshot(keyID, keyName string, rawBody []byte, info *QuotaInfo) {
-	// 确保目录存在
-	if err := os.MkdirAll("logs/quota", 0755); err != nil {
-		log.Printf("[quota] 创建 logs/quota 目录失败: %v", err)
-		return
-	}
-
-	// 解析原始 body 为 map（用于结构化保存）
-	var rawResponse interface{}
-	if err := json.Unmarshal(rawBody, &rawResponse); err != nil {
-		// 解析失败也保存（用原始字符串）
-		rawResponse = string(rawBody)
-	}
-
-	// 组装快照数据
-	snapshot := map[string]interface{}{
-		"captured_at":  time.Now().Format("2006-01-02 15:04:05"),
-		"vendor":       "zhipu",
-		"key_id":       keyID,
-		"key_name":     keyName,
-		"raw_response": rawResponse,
-		"parsed": map[string]interface{}{
-			"level":      info.Level,
-			"pct":        info.Pct,
-			"next_reset": info.NextReset,
-		},
-	}
-
-	// 序列化（带缩进，便于人工查看）
-	data, err := json.MarshalIndent(snapshot, "", "  ")
-	if err != nil {
-		log.Printf("[quota] 序列化快照失败 key_id=%s: %v", keyID, err)
-		return
-	}
-
-	// 文件名：zhipu_<key_id>_<时间戳>.json
-	filename := fmt.Sprintf("zhipu_%s_%s.json", keyID, time.Now().Format("20060102_150405"))
-	filepath := filepath.Join("logs/quota", filename)
-
-	if err := os.WriteFile(filepath, data, 0644); err != nil {
-		log.Printf("[quota] 写入快照失败 key_id=%s: %v", keyID, err)
-		return
-	}
 }
 
 func calcStatus(pct float64) string {

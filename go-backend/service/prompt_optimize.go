@@ -141,10 +141,17 @@ func optimizeTraeMessages(messages []map[string]interface{}, cfg *model.GodRules
 // 在 user 消息边界截断，避免 tool_calls 配对断裂
 func truncateByRounds(messages []map[string]interface{}, maxRounds int, tag string) []map[string]interface{} {
 	// 从后往前数 user 消息，找到第 maxRounds 条 user 的位置
+	// 注意：ZCode 初始化 user 消息（技能列表/AGENTS.md，不含 <user_input>）不纳入轮次计数
 	keepFrom := len(messages) // 默认保留全部（不超过阈值时不截断）
 	uc := 0
 	for i := len(messages) - 1; i >= 0; i-- {
 		if role, _ := messages[i]["role"].(string); role == "user" {
+			if isZCodeInitMessage(messages[i]) {
+				continue // ZCode 初始化消息不占轮次配额
+			}
+			if isZCodeNoiseUserMessage(messages[i]) {
+				continue // ZCode 每轮注入的 <system-reminder> 噪音不占配额
+			}
 			uc++
 			if uc == maxRounds {
 				keepFrom = i
@@ -158,23 +165,67 @@ func truncateByRounds(messages []map[string]interface{}, maxRounds int, tag stri
 		return messages
 	}
 
-	// 分离 system 消息和保留区消息
-	systemMsgs := []map[string]interface{}{}
+	// 分离始终保留的消息和保留区消息
+	// 始终保留：system 消息 + ZCode 初始化 user 消息（技能列表/AGENTS.md）
+	preservedMsgs := []map[string]interface{}{}
 	recentMsgs := []map[string]interface{}{}
 	for i, msg := range messages {
 		role, _ := msg["role"].(string)
 		if role == "system" {
 			// system 消息始终保留（上帝指令/角色定位/RAG 上下文不能丢）
-			systemMsgs = append(systemMsgs, msg)
+			preservedMsgs = append(preservedMsgs, msg)
+		} else if role == "user" && isZCodeInitMessage(msg) {
+			// ZCode 初始化 user 消息（技能列表/AGENTS.md）始终保留
+			preservedMsgs = append(preservedMsgs, msg)
 		} else if i >= keepFrom {
 			recentMsgs = append(recentMsgs, msg)
 		}
 	}
 
-	result := append(systemMsgs, recentMsgs...)
+	result := append(preservedMsgs, recentMsgs...)
 	log.Printf("[%s] %d轮截断: %d -> %d 条消息 (丢弃 %d 条更早历史)",
 		tag, maxRounds, len(messages), len(result), len(messages)-len(result))
 	return result
+}
+
+// isZCodeInitMessage 判断是否为 ZCode 编辑器注入的初始化 user 消息
+// ZCode 把技能列表和 AGENTS.md 项目指令塞在 user 消息的前几条（而非 system），
+// 这些消息的特征是包含特定初始化标记词，而非普通用户对话。
+// 它们不是用户发起的对话轮次，必须始终保留，否则技能列表和项目规则会丢失。
+//
+// ⚠️ 注意：不能只靠 <system-reminder> 判断——ZCode 每轮都会注入大量
+// <system-reminder>（TodoWrite 提醒、TRACE 上下文、日期变更等），这些是噪音不是初始化消息。
+// 只匹配真正的初始化消息（技能列表 / 代码库指令）。
+func isZCodeInitMessage(msg map[string]interface{}) bool {
+	content := StringifyContent(msg["content"])
+	if strings.Contains(content, "<user_input>") {
+		return false // 有 <user_input> 标签的是真正的用户对话消息
+	}
+	// 只匹配真正的 ZCode 初始化消息特征
+	// 技能列表消息："The following skills are available for use with the Skill tool"
+	// AGENTS.md 消息："Codebase and user instructions are shown below"
+	if strings.Contains(content, "skills are available for use with the Skill tool") ||
+		strings.Contains(content, "Codebase and user instructions are shown below") {
+		return true
+	}
+	return false
+}
+
+// isZCodeNoiseUserMessage 判断是否为 ZCode 每轮注入的噪音 user 消息
+// ZCode 每轮对话都会注入 `<system-reminder>` 包裹的辅助信息：
+//   - TodoWrite 提醒（todo 列表状态）
+//   - UserPromptSubmit hook 上下文（TRACE 日志）
+//   - 日期变更提醒
+//
+// 这些是编辑器注入的辅助上下文，本身不是真实用户输入，不占用轮次配额。
+// 特征：role = user + 以 `<system-reminder>` 开头 + 不是初始化消息。
+func isZCodeNoiseUserMessage(msg map[string]interface{}) bool {
+	content := StringifyContent(msg["content"])
+	if isZCodeInitMessage(msg) {
+		return false // 初始化消息不是噪音，已经单独处理了
+	}
+	// 内容开头就是 <system-reminder> → 每轮注入的噪音
+	return strings.HasPrefix(strings.TrimSpace(content), "<system-reminder>")
 }
 
 // isLatestUser 判断 msg[idx] 是否为最后一条 user 消息
@@ -297,12 +348,7 @@ func stripHooksFromUserMsg(msg map[string]interface{}) map[string]interface{} {
 
 // stripHooksContext 删除 hooks_context 块（所有消息通用）
 func stripHooksContext(content string) string {
-	before := len(content)
-	result := strings.TrimSpace(reHooksContext.ReplaceAllString(content, ""))
-	if before != len(result) {
-		log.Printf("[DEBUG:stripHooksContext] %d -> %d (stripped %d)", before, len(result), before-len(result))
-	}
-	return result
+	return strings.TrimSpace(reHooksContext.ReplaceAllString(content, ""))
 }
 
 // ── 第3刀：精简工具定义 ──

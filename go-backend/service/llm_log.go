@@ -436,10 +436,25 @@ func AddChatMessage(userID int, role, content, sessionID, msgID string) int64 {
 	if err != nil {
 		return 0
 	}
-	// 清理超过 10000 条
-	conn.Exec("DELETE FROM sys_chat_history WHERE id IN (SELECT id FROM (SELECT id FROM sys_chat_history ORDER BY created_at ASC LIMIT 9999) t) AND (SELECT COUNT(*) FROM sys_chat_history) > 10000")
 	id, _ := res.LastInsertId()
 	return id
+}
+
+// CleanupOldChatHistory 清理 7 天前的对话历史（定时任务调用，每天凌晨执行一次）
+func CleanupOldChatHistory() int {
+	conn, err := GetDB()
+	if err != nil {
+		log.Printf("[chat-history] 清理失败: 获取数据库连接失败: %v", err)
+		return -1
+	}
+	res, err := conn.Exec("DELETE FROM sys_chat_history WHERE created_at < DATE_SUB(NOW(), INTERVAL 7 DAY)")
+	if err != nil {
+		log.Printf("[chat-history] 清理失败: %v", err)
+		return -1
+	}
+	affected, _ := res.RowsAffected()
+	log.Printf("[chat-history] 清理完成: 删除 %d 条 7 天前的对话记录", affected)
+	return int(affected)
 }
 
 const CONVERSATION_LOG_DIR = "logs/conversations"
@@ -944,4 +959,46 @@ func batchGetRequestChains(conn *sql.DB, msgIDs []string) (map[string][]RequestC
 		}
 	}
 	return chainResult, modelResult
+}
+
+// TokenDailyData 按天聚合的 token 平均数据
+type TokenDailyData struct {
+	Day       string `json:"day"`
+	GlobalAvg int    `json:"global_avg"`
+}
+
+// GetTokenDailyStats 返回按天聚合的单请求平均 token 统计（仅全局平均）
+func GetTokenDailyStats(days int) ([]TokenDailyData, error) {
+	conn, err := GetDB()
+	if err != nil {
+		return nil, err
+	}
+	cutoff := time.Now().AddDate(0, 0, -days+1).Format("2006-01-02") + " 00:00:00"
+
+	// 全局平均（所有请求的 AVG，按天）
+	rows, err := conn.Query(`
+		SELECT DATE_FORMAT(ts, '%Y-%m-%d') AS day,
+			ROUND(AVG(total_tokens)) AS avg_total
+		FROM sys_llm_stats WHERE ts >= ?
+		GROUP BY day ORDER BY day
+	`, cutoff)
+	if err != nil {
+		log.Printf("[token-daily] 全局查询失败: %v", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []TokenDailyData
+	for rows.Next() {
+		var day string
+		var avg int
+		if err := rows.Scan(&day, &avg); err != nil {
+			continue
+		}
+		result = append(result, TokenDailyData{
+			Day:       day,
+			GlobalAvg: avg,
+		})
+	}
+	return result, nil
 }

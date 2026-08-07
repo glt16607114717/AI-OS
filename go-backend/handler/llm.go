@@ -133,10 +133,8 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 			msgMaps[i], _ = m.(map[string]interface{})
 		}
 	default:
-		log.Printf("[DEBUG:Optimize] messages type mismatch: %T", req["messages"])
+		// messages 类型不匹配时静默跳过优化（罕见分支，无需日志）
 	}
-	// 调试：打印代理收到的原始 messages 数量（排查 ZCode tail 窗口 vs 实际请求数）
-	log.Printf("[DEBUG:RAW-RECV] 收到 %d 条消息 (ZCode rollout 说只有 64)", len(msgMaps))
 	if len(msgMaps) > 0 {
 		// 对话轮次管理（防止无限制累加）
 		// 计算当前对话轮次（user 消息数）
@@ -146,20 +144,20 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 				userRounds++
 			}
 		}
-		// 硬上限：超过 300 轮拒绝服务，防止截断本身也变成负担
-		if userRounds > 300 {
-			log.Printf("[chat] 对话已达 %d 轮，超过 300 轮硬上限，拒绝服务", userRounds)
+		// 硬上限：超过 600 轮拒绝服务，防止截断本身也变成负担
+		if userRounds > 600 {
+			log.Printf("[chat] 对话已达 %d 轮，超过 600 轮硬上限，拒绝服务", userRounds)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(400)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"ok": false,
-				"error": "当前对话已超过 300 轮上限，无法继续处理。请开一个新对话窗口。\n" +
+				"error": "当前对话已超过 600 轮上限，无法继续处理。请开一个新对话窗口。\n" +
 					"建议：让当前 AI 汇总一下之前的上下文要点，复制到新对话中继续。",
 			})
 			return
 		}
-		// 270 轮提醒：在最新 user 消息前追加提示（留 30 轮空隙让用户操作上下文切换）
-		if userRounds >= 270 && userRounds <= 300 {
+		// 570 轮提醒：在最新 user 消息前追加提示（留 30 轮空隙让用户操作上下文切换）
+		if userRounds >= 570 && userRounds <= 600 {
 			lastUserIdx := -1
 			for i := len(msgMaps) - 1; i >= 0; i-- {
 				if role, _ := msgMaps[i]["role"].(string); role == "user" {
@@ -169,40 +167,14 @@ func ProxyChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			if lastUserIdx >= 0 {
 				warning := "\n\n[系统提醒] 当前对话已达 " + fmt.Sprintf("%d", userRounds) +
-					" 轮，即将达到 300 轮上限。建议尽快让 AI 汇总之前的上下文要点，" +
-					"复制到新对话窗口继续。达到 300 轮后将无法继续对话。"
+					" 轮，即将达到 600 轮上限。建议尽快让 AI 汇总之前的上下文要点，" +
+					"复制到新对话窗口继续。达到 600 轮后将无法继续对话。"
 				content := service.StringifyContent(msgMaps[lastUserIdx]["content"])
 				msgMaps[lastUserIdx]["content"] = content + warning
 				log.Printf("[chat] 对话已达 %d 轮，追加提醒", userRounds)
 			}
 		}
-		// DEBUG: dump 优化前的原始 messages（仅历史 user 消息，用于对比）
-		for i, m := range msgMaps {
-			if role, _ := m["role"].(string); role == "user" && i < len(msgMaps)-1 {
-				c := service.StringifyContent(m["content"])
-				if len(c) > 200 {
-					preview := c
-					if len(preview) > 1500 {
-						preview = preview[:1500]
-					}
-					log.Printf("[DEBUG:Optimize-BEFORE] msg[%d] user len=%d content=%q", i, len(c), preview)
-				}
-			}
-		}
-		before := len(msgMaps)
 		msgMaps = service.OptimizeMessages(msgMaps, optimizeCfg)
-		// DEBUG: dump 优化后
-		for i, m := range msgMaps {
-			if role, _ := m["role"].(string); role == "user" && i < len(msgMaps)-1 {
-				c := service.StringifyContent(m["content"])
-				preview := c
-				if len(preview) > 200 {
-					preview = preview[:200]
-				}
-				log.Printf("[DEBUG:Optimize-AFTER]  msg[%d] user len=%d preview=%q", i, len(c), preview)
-			}
-		}
-		log.Printf("[DEBUG:Optimize] messages %d -> %d, StripNoise=%v", before, len(msgMaps), optimizeCfg.StripNoise)
 		req["messages"] = msgMaps
 	}
 	if tools, ok := req["tools"].([]interface{}); ok && len(tools) > 0 {
@@ -809,14 +781,63 @@ func buildRAGProjects(projectHint string) []string {
 	return nil // 全库检索，不做 project 过滤
 }
 
+// cleanQueryNoise 清洗 query 噪音：剥离系统 prompt 残留、丢弃网页/日志垃圾
+// 返回清洗后的 query；返回空字符串表示整条是噪音，应跳过检索
+func cleanQueryNoise(query string) string {
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return ""
+	}
+
+	// ① 网页爬取内容："Web page content:\n---\n..." — 整条丢弃
+	if strings.HasPrefix(q, "Web page content") {
+		return ""
+	}
+
+	// ② 运行日志：以 "HH:MM:SS" 时间戳开头 — 整条丢弃
+	//    典型：15:59:33音频上传成功... 15:59:49开始处理...
+	timeLogRe := regexp.MustCompile(`^\d{2}:\d{2}:\d{2}`)
+	if timeLogRe.MatchString(q) {
+		return ""
+	}
+
+	// ③ 系统 prompt 前缀粘连：剥离前缀，保留后面的真实问题
+	//    典型："intent. When a skill...IMMEDIATELY...\n\n[真实问题]"
+	//    策略：找到第一个 \n\n，取后半段
+	promptPrefixPatterns := []string{
+		"intent. When a skill",
+		"You are an interactive",
+		"IMPORTANT: Assist with",
+	}
+	for _, prefix := range promptPrefixPatterns {
+		if strings.HasPrefix(q, prefix) {
+			// 找第一个双换行，取之后的内容
+			idx := strings.Index(q, "\n\n")
+			if idx >= 0 && idx < len(q)-2 {
+				rest := strings.TrimSpace(q[idx+2:])
+				if rest != "" {
+					q = rest
+				}
+			}
+			break // 只剥离一次
+		}
+	}
+
+	return q
+}
+
 // injectRAGContext 检索知识库（Qdrant），将相关内容注入 system prompt 最前面
 // projectHint: 保留兼容，当前不做 project 过滤（全库检索 + score 排序）
-// username: 当前用户名（用于巡检日志采集）
-//
 // 阈值：0.6（2026-07-24 从 0.5 提升，拦截低质量召回）
 // 巡检采集：userID % 10 == 0 的用户采样记录检索日志（供每日巡检评审）
 func injectRAGContext(messages []map[string]interface{}, userMsg string, userID int, username string, projectHint string) []map[string]interface{} {
 	if userMsg == "" || userID <= 0 {
+		return messages
+	}
+
+	// ── 噪音清洗：去除系统 prompt 残留、网页垃圾、运行日志 ──
+	userMsg = cleanQueryNoise(userMsg)
+	if userMsg == "" { // 清洗完空了，不查库了
 		return messages
 	}
 
@@ -825,7 +846,7 @@ func injectRAGContext(messages []map[string]interface{}, userMsg string, userID 
 
 	// 多向量检索：将 query 拆分为多个语义片段，分路检索后用 RRF 融合
 	// 优势：超长 prompt 不会被噪声淹没，短 prompt 有更多检索入口
-	results, err := service.SearchKnowledgeMulti(userMsg, 5, projects, nil)
+	results, err := service.SearchKnowledgeMulti(userMsg, 10, projects, nil)
 	if err != nil || len(results) == 0 {
 		return messages
 	}

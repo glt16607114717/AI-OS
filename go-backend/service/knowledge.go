@@ -172,17 +172,18 @@ func StoreDistillKnowledge(userID int, date string, k DistillKnowledge, sessionI
 		}
 	}
 
-	// summary：没有则从 title 或 content 截取
+	// summary：没有则从 title 或 content 截取（按 rune 截断，避免截断 UTF-8 多字节字符）
 	summary := k.Title
 	if summary == "" && len(k.Content) > 0 {
-		if len(k.Content) > 100 {
-			summary = k.Content[:100]
+		runes := []rune(k.Content)
+		if len(runes) > 100 {
+			summary = string(runes[:100])
 		} else {
 			summary = k.Content
 		}
 	}
-	if len(summary) > 500 {
-		summary = summary[:500]
+	if len([]rune(summary)) > 500 {
+		summary = string([]rune(summary)[:500])
 	}
 
 	source := fmt.Sprintf("distill:%s:%s:%s", date, k.Dimension, k.Title)
@@ -467,8 +468,8 @@ func StoreUploadKnowledge(userID int, filename string, chunks []string) (int, er
 			title = fmt.Sprintf("%s (第%d块)", filename, i+1)
 		}
 		summary := chunk
-		if len(summary) > 200 {
-			summary = summary[:200]
+		if len([]rune(summary)) > 200 {
+			summary = string([]rune(summary)[:200])
 		}
 
 		// 3a. 写 MySQL

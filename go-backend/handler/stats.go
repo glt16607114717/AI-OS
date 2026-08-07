@@ -92,3 +92,19 @@ func GetCircuitBreakerStatus(w http.ResponseWriter, r *http.Request) {
 		"open_keys": cb.GetOpenKeys(),
 	})
 }
+
+// ── 单请求平均 Token 按天统计 ──
+
+func GetTokenDailyStats(w http.ResponseWriter, r *http.Request) {
+	daysStr := r.URL.Query().Get("days")
+	days, _ := strconv.Atoi(daysStr)
+	if days == 0 {
+		days = 7
+	}
+	data, err := service.GetTokenDailyStats(days)
+	if err != nil {
+		errResponse(w, err.Error(), 500)
+		return
+	}
+	okResponse(w, data)
+}

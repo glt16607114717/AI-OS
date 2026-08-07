@@ -34,23 +34,17 @@ const expandedIds = ref<Set<number>>(new Set())
 const categoryMap: Record<string, string> = {
   skill: '技能封装',
   rule: '规则加强',
-  bug: 'Bug 归因',
   tech_vision: '技术视野',
-  prompt: '提示词优化',
   workflow: '流程工具',
   env: '环境配置',
-  other: '其他建议',
 }
 
 const categoryColorMap: Record<string, string> = {
   skill: '#409eff',
   rule: '#f56c6c',
-  bug: '#e6a23c',
   tech_vision: '#67c23a',
-  prompt: '#67c23a',
   workflow: '#9b59b6',
   env: '#1abc9c',
-  other: '#909399',
 }
 
 const priorityColorMap: Record<string, string> = {

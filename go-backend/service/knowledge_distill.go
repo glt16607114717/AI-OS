@@ -145,7 +145,7 @@ func buildDistillPrompt(date, convContent string) string {
   ],
   "suggestions": [                     // 工作流程优化建议
     {
-      "category": "skill|bug|tech_vision|rule|workflow|env|prompt|other",
+      "category": "skill|tech_vision|rule|workflow|env",
       "title": "建议标题",
       "problem": "当前存在的问题",
       "suggestion": "具体的改进建议",
@@ -160,7 +160,7 @@ func buildDistillPrompt(date, convContent string) string {
 1. 每条 knowledge.content 必须 ≤ 1500 个中文字符，超过请拆分为多条
 2. 只提炼有价值的技术知识，不要提炼闲聊内容
 3. suggestions 的 title、problem、suggestion 三个字段都必须填写，不能留空或省略。title 用简短概括的一句话（≤30字），problem 描述当前存在的问题（不能只重复 title），suggestion 给出具体可执行的改进方案
-4. suggestions.category 必须使用以下枚举值之一：skill(技能封装)、bug(Bug归因)、tech_vision(技术视野)、rule(规则加强)、workflow(流程工具)、env(环境配置)、prompt(提示词优化)、other(其他)。严禁使用其他值
+4. suggestions.category 必须使用以下枚举值之一：skill(技能封装)、tech_vision(技术视野)、rule(规则加强)、workflow(流程工具)、env(环境配置)。严禁使用其他值
 5. suggestions.priority 必须使用以下枚举值之一：high(高)、medium(中)、low(低)
 6. 每条 knowledge 的 content 字段必须自成一体、可独立被理解，不得使用"如前所述"等指代性表述
 7. 当提供了 session 摘要时，仅从中提取知识概要，不逐句复述
@@ -204,7 +204,7 @@ func buildReducePrompt(date, reduceContent string) string {
 
 【重要规则】
 1. suggestions 的 title、problem、suggestion 三个字段都必须填写，不能留空或省略
-2. suggestions.category 必须使用以下枚举值之一：skill、bug、tech_vision、rule、workflow、env、prompt、other
+2. suggestions.category 必须使用以下枚举值之一：skill、tech_vision、rule、workflow、env
 3. suggestions.priority 必须使用以下枚举值之一：high、medium、low
 4. 每条 knowledge.content 必须 ≤ 1500 个中文字符
 5. 只输出 JSON，不要添加任何解释文字

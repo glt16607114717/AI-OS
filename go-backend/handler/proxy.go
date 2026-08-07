@@ -167,16 +167,40 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 			err  error
 		}
 		lineCh := make(chan readResult, 1)
+		// readerDone 在 SSE 循环退出后关闭，确保读 goroutine 不会因无消费者而泄漏
+		// （之前 goroutine 阻塞在 lineCh <- 上，外层 continue 后无人消费 → goroutine + bufio.Reader 永久驻留）
+		readerDone := make(chan struct{})
 		go func() {
 			defer close(lineCh)
+			defer func() {
+				// 恢复可能 panic（lineCh 已关闭后再次发送）
+				recover()
+			}()
 			for {
 				line, err := reader.ReadBytes('\n')
-				lineCh <- readResult{line, err}
+				select {
+				case lineCh <- readResult{line, err}:
+				case <-readerDone:
+					return
+				}
 				if err != nil {
 					return
 				}
 			}
 		}()
+
+		// cleanup 统一关闭 resp.Body + readerDone，用闭包变量保证只执行一次
+		// 修复内存泄漏：之前超时/异常分支 continue 跳过了 resp.Body.Close()，
+		// 导致连接池里的连接、bufio.Reader buffer、httpReq body 全部无法回收
+		cleanupDone := false
+		cleanup := func() {
+			if cleanupDone {
+				return
+			}
+			cleanupDone = true
+			resp.Body.Close()
+			close(readerDone) // 通知读 goroutine 退出，释放 bufio.Reader 引用
+		}
 
 		for !done && !streamFailed {
 			var rr readResult
@@ -195,6 +219,7 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 				failedKeys[route.KeyID] = true
 				switched = true
 				streamFailed = true
+				cleanup()
 				continue
 			}
 
@@ -266,6 +291,7 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 					failedKeys[route.KeyID] = true
 					switched = true
 					streamFailed = true
+					cleanup()
 					continue
 				}
 
@@ -282,6 +308,7 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 				failedKeys[route.KeyID] = true
 				switched = true
 				streamFailed = true
+				cleanup()
 				continue
 		}
 
@@ -308,6 +335,7 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 					failedKeys[route.KeyID] = true
 					switched = true
 					streamFailed = true
+					cleanup()
 					continue
 				}
 				done = true
@@ -349,7 +377,7 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 			}
 		}
 
-		resp.Body.Close()
+		cleanup()
 
 		if done && (totalContent.Len() > 0 || hasToolCalls) {
 			// 正常结束：收到 [DONE] 且有内容

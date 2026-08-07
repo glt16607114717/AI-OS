@@ -79,6 +79,7 @@ const dailyStats = ref<Stats | null>(null)  // 每日 Token 消耗专用（始�
 
 // Chart refs
 const tokenTrendRef = ref<HTMLCanvasElement | null>(null)
+const avgTokenHourlyRef = ref<HTMLCanvasElement | null>(null)
 const modelPieRef = ref<HTMLCanvasElement | null>(null)
 const userRankRef = ref<HTMLCanvasElement | null>(null)
 const userPieRef = ref<HTMLCanvasElement | null>(null)
@@ -87,6 +88,7 @@ const visionPieRef = ref<HTMLCanvasElement | null>(null)
 const genPieRef = ref<HTMLCanvasElement | null>(null)
 
 let tokenTrend: Chart | null = null
+let avgTokenHourly: Chart | null = null
 let modelPie: Chart | null = null
 let userRank: Chart | null = null
 let userPie: Chart | null = null
@@ -378,6 +380,57 @@ function renderCharts() {
   }
 }
 
+// ── 渲染：单请求平均 Token 按天折线图 ──
+function renderAvgTokenDailyChart() {
+  if (!avgTokenHourlyRef.value) return
+  if (avgTokenHourly) avgTokenHourly.destroy()
+
+  const data = tokenDailyData.value
+  if (!data || data.length === 0) return
+
+  const labels = data.map(d => d.day.slice(5)) // 去掉年份，显示 MM-DD
+
+  const datasets: any[] = [
+    {
+      label: '全局平均',
+      data: data.map(d => d.global_avg),
+      borderColor: '#f56c6c',
+      backgroundColor: 'rgba(245,108,108,0.08)',
+      borderWidth: 3,
+      tension: 0.3,
+      pointRadius: 3,
+      pointHoverRadius: 6,
+      fill: false,
+    },
+  ]
+
+  avgTokenHourly = new Chart(avgTokenHourlyRef.value, {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'nearest', intersect: false },
+      plugins: {
+        legend: { display: true, position: 'top', labels: { font: { size: 11 }, boxWidth: 12, padding: 6 } },
+        tooltip: {
+          callbacks: {
+            label: (ctx: any) => `${ctx.dataset.label}: ${formatNumber(ctx.parsed.y)}`,
+          },
+        },
+      },
+      scales: {
+        y: {
+          beginAtZero: true,
+          grid: { color: '#f0f0f0' },
+          ticks: { font: { size: 11 }, callback: (v: any) => formatNumber(v) },
+          title: { display: true, text: '平均 Token / 请求', font: { size: 11 } },
+        },
+        x: { grid: { display: false }, ticks: { font: { size: 11 }, maxRotation: 45, autoSkip: true, maxTicksLimit: 31 } },
+      },
+    },
+  })
+}
 async function fetchStats() {
   loading.value = true
   try {
@@ -408,6 +461,28 @@ async function fetchDailyStats() {
   }
 }
 
+// ── 单请求平均 Token 按天统计（始终查近 30 天） ──
+interface TokenDailyItem {
+  day: string
+  global_avg: number
+}
+const tokenDailyData = ref<TokenDailyItem[]>([])
+const tokenDailyDays = ref(30)
+
+async function fetchTokenDailyStats() {
+  try {
+    const response = await fetch(`${API_BASE}/api/stats/token-daily?days=${tokenDailyDays.value}`, { headers: authHeaders() })
+    const result = await response.json()
+    if (result.ok) {
+      tokenDailyData.value = result.data || []
+      await nextTick()
+      renderAvgTokenDailyChart()
+    }
+  } catch (e) {
+    console.error('[StatsDashboard] fetchTokenDailyStats error:', e)
+  }
+}
+
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 const autoRefresh = ref(true)
 
@@ -424,12 +499,14 @@ onMounted(async () => {
   await fetchCurrentUser()
   await fetchStats()
   await fetchDailyStats()
+  await fetchTokenDailyStats()
   refreshTimer = setInterval(fetchStats, 30000)
 })
 
 onUnmounted(() => {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null }
   tokenTrend?.destroy()
+  avgTokenHourly?.destroy()
   modelPie?.destroy()
   userRank?.destroy()
   userPie?.destroy()
@@ -514,6 +591,12 @@ onUnmounted(() => {
         <div class="chart-card">
           <div class="section-title">每日 Token 消耗</div>
           <div class="chart-container"><canvas ref="tokenTrendRef"></canvas></div>
+        </div>
+
+        <!-- 折线图：单请求平均 Token 按天 -->
+        <div class="chart-card">
+          <div class="section-title">单请求平均 Token（按天）</div>
+          <div class="chart-container"><canvas ref="avgTokenHourlyRef"></canvas></div>
         </div>
 
         <!-- 饼图：用户 Token 占比 -->

@@ -163,6 +163,12 @@ func splitLongContent(text string, maxSize int) []string {
 				result = append(result, current.String())
 				current.Reset()
 			}
+			// 代码块（``` 包裹）不允许从中间切断，整块保留
+			// 切断代码块会产生没有 ``` 闭合的碎片，filterCodeOnlyChunks 无法识别
+			if strings.HasPrefix(p, "```") {
+				result = append(result, p)
+				continue
+			}
 			// 按 maxSize 硬切
 			for i := 0; i < len(p); i += maxSize {
 				end := i + maxSize
@@ -331,11 +337,6 @@ func filterCodeOnlyChunks(chunks []string) []string {
 			continue
 		}
 		filtered = append(filtered, chunk)
-	}
-
-	// 兜底：如果全部被过滤了，保留原始 chunks（防止极端情况丢全部数据）
-	if len(filtered) == 0 && len(chunks) > 0 {
-		return chunks
 	}
 
 	return filtered

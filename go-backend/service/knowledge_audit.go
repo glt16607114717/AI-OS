@@ -443,18 +443,22 @@ func buildStoreMetrics(logs []auditLogRow) map[string]interface{} {
 	return m
 }
 
-// sampleRetrieveLogs 检索日志分层抽样（高/中/低 score 各 1/3）
+// sampleRetrieveLogs 检索日志分层抽样（高/中/低向量相似度各 1/3）
 func sampleRetrieveLogs(logs []auditLogRow, max int) []auditLogRow {
 	if len(logs) <= max {
 		return logs
 	}
 
-	// 分层
+	// 分层（用 VectorScore 判断，不是 RRF 融合分数）
 	var high, mid, low []auditLogRow
 	for _, l := range logs {
-		if l.Score >= 0.8 {
+		s := l.VectorScore
+		if s == 0 {
+			s = l.Score // 回退：没有 vector_score 时用 score（兼容旧数据）
+		}
+		if s >= 0.8 {
 			high = append(high, l)
-		} else if l.Score >= 0.6 {
+		} else if s >= 0.6 {
 			mid = append(mid, l)
 		} else {
 			low = append(low, l)
@@ -745,7 +749,7 @@ func buildAuditPrompt(date string, metricsRetrieve, metricsStore map[string]inte
 【入库指标】
 %s
 
-【检索抽样案例】（分层抽样，含 query/召回知识/score）
+【检索抽样案例】（分层抽样，含 query/召回知识/vector_score=最高向量相似度/score=RRF排序分）
 %s
 
 【入库抽样案例】（全量，含分类/项目/内容预览）
@@ -796,7 +800,8 @@ func buildAuditPrompt(date string, metricsRetrieve, metricsStore map[string]inte
 
 【判断"检索不相关"的特征】（suggested_action=archive 或 fix_category）
 - query 与召回的 title/content 主题不相关
-- score < 0.6 但被注入了对话（阈值已经 0.5）
+- 注意：vector_score（最高向量相似度）才是相关度，score 是 RRF 排序分（相对分，通常很小）
+- vector_score < 0.6 的不可能被注入对话（阈值 0.6 已生效），不要因为 score 小就误判为"低分被注入"
 
 【重要规则】
 1. problem_cases 的 log_id 和 knowledge_id 必须来自上面的抽样案例，不要编造
@@ -855,7 +860,8 @@ func simplifySamples(samples []auditLogRow) []map[string]interface{} {
 		}
 		if s.LogType == "retrieve" {
 			m["query"] = s.Query
-			m["score"] = s.Score
+			m["score"] = s.Score                // RRF 融合排序分（相对分，不是相似度）
+			m["vector_score"] = s.VectorScore   // 最高向量相似度（绝对分，0-1，真正的相关度）
 		}
 		if s.ContentPreview != "" {
 			m["content_preview"] = s.ContentPreview
