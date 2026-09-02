@@ -39,6 +39,13 @@ func OptimizeMessages(messages []map[string]interface{}, cfg *model.GodRulesConf
 		return messages
 	}
 
+	// ── 协议归一化：assistant 空字符串 content → nil ──
+	// OpenAI 协议规定 assistant 消息携带 tool_calls 时 content 应为 null。
+	// 部分客户端（Trae）会把 tool_calls 轮的 assistant 消息写成 content:""，
+	// 严格校验的模型（如 Kimi K3）会拒绝并报 400:
+	// "the message at position N with role 'assistant' must not be empty"
+	messages = normalizeAssistantContent(messages)
+
 	// 客户端识别：ZCode 客户端硬编码注入 "You are ZCode" 作为 system 消息（Trae 无此特征）
 	if isZCodeClient(messages) {
 		optimized, stripped := optimizeZCodeMessages(messages, cfg)
@@ -50,6 +57,37 @@ func OptimizeMessages(messages []map[string]interface{}, cfg *model.GodRulesConf
 	optimized := optimizeTraeMessages(messages, cfg)
 	log.Printf("[OptimizeMessages] client=trae, messages=%d->%d", len(messages), len(optimized))
 	return optimized
+}
+
+// normalizeAssistantContent 清洗 assistant 消息的空 content：
+//   - 带 tool_calls + content:""  → 归一化为 nil（OpenAI 协议规范，K3 接受）
+//   - 无 tool_calls + content 空  → 直接删除（零信息量的空壳消息，客户端把失败轮次
+//     存成了空 assistant 历史；转 nil 依然会被 K3 拒绝 "must not be empty"，
+//     删除安全——无 tool_calls 则无配对的 tool 消息，不会破坏消息结构）
+func normalizeAssistantContent(messages []map[string]interface{}) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(messages))
+	dropped := 0
+	for _, msg := range messages {
+		if role, _ := msg["role"].(string); role == "assistant" {
+			s, isStr := msg["content"].(string)
+			isEmpty := msg["content"] == nil || (isStr && s == "")
+			if _, hasTC := msg["tool_calls"]; hasTC {
+				// 带 tool_calls 的空 content → nil（协议规范形态）
+				if isStr && s == "" {
+					msg["content"] = nil
+				}
+			} else if isEmpty {
+				// 无 tool_calls 的空壳 assistant：删除
+				dropped++
+				continue
+			}
+		}
+		result = append(result, msg)
+	}
+	if dropped > 0 {
+		log.Printf("[normalizeAssistantContent] dropped %d empty assistant messages (no tool_calls)", dropped)
+	}
+	return result
 }
 
 // isZCodeClient 通过 system 消息特征识别 ZCode 客户端

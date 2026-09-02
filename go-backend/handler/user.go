@@ -137,6 +137,8 @@ func DeleteUser(w http.ResponseWriter, r *http.Request) {
 		errResponse(w, err.Error(), 500)
 		return
 	}
+	// 同步清理该用户所有 session，防止已删除用户 token 继续有效（越权风险）
+	middleware.DeleteUserSessions(id)
 	okResponse(w, "用户已删除")
 }
 

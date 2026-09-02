@@ -1,4 +1,4 @@
-﻿package handler
+package handler
 
 import (
 	// "ai-os-server/circuit" // [DISABLED 2025-07-22] 熔断机制暂时关闭
@@ -48,7 +48,7 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 	var lastError string
 
 	for idx, route := range attempts {
-		if failedKeys[route.KeyID] {
+		if failedKeys[routeIdentity(route)] {
 			continue
 		}
 		// [DISABLED 2025-07-22] API key 大量熔断，暂时关闭熔断机制
@@ -101,7 +101,7 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 			LatencyMs: latency, Success: false, Error: err.Error(),
 		})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 网络错误: %s", route.VendorName, err.Error()))
-			failedKeys[route.KeyID] = true
+			failedKeys[routeIdentity(route)] = true
 			lastError = err.Error()
 			continue
 		}
@@ -122,7 +122,7 @@ func callLLMWithFailover(messages []interface{}, tools []interface{}, attempts [
 		LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: errMsg,
 	})
 		convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
-		failedKeys[route.KeyID] = true
+		failedKeys[routeIdentity(route)] = true
 		lastError = errMsg
 		continue
 	}
@@ -198,7 +198,7 @@ type StreamResult struct {
 //   - 累积 content 和 tool_calls（按 index 累积分块 tool_calls）
 //
 // 用于 agentLoop，替代原来的非流式 callLLMWithFailover
-func callLLMStreamWithFailover(w http.ResponseWriter, messages []interface{}, tools []interface{}, attempts []*service.RouteInfoType, convCtx *ConversationContext) (*StreamResult, error) {
+func callLLMStreamWithFailover(w http.ResponseWriter, messages []interface{}, tools []interface{}, attempts []*service.RouteInfoType, convCtx *ConversationContext, toolChoice string) (*StreamResult, error) {
 	userID := convCtx.UserID
 	username := convCtx.Username
 	startTime := convCtx.StartTime
@@ -209,7 +209,7 @@ func callLLMStreamWithFailover(w http.ResponseWriter, messages []interface{}, to
 	var lastError string
 
 	for idx, route := range attempts {
-		if failedKeys[route.KeyID] {
+		if failedKeys[routeIdentity(route)] {
 			continue
 		}
 		// [DISABLED 2025-07-22] API key 大量熔断，暂时关闭熔断机制
@@ -237,6 +237,12 @@ func callLLMStreamWithFailover(w http.ResponseWriter, messages []interface{}, to
 		}
 		if len(tools) > 0 {
 			llmReq["tools"] = tools
+			// tool_choice 透传（required=强制调工具 / auto=模型自由选）
+			// 之前代理把这参数丢了，客户端发的 required 到上游变成默认 auto，
+			// 模型可以只输出文本不调工具，导致 AgentRunner 端"纯文本重试循环"
+			if toolChoice != "" {
+				llmReq["tool_choice"] = toolChoice
+			}
 		}
 
 		bodyJSON, _ := json.Marshal(llmReq)
@@ -257,7 +263,7 @@ func callLLMStreamWithFailover(w http.ResponseWriter, messages []interface{}, to
 				LatencyMs: latency, Success: false, Error: err.Error(),
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 网络错误: %s", route.VendorName, err.Error()))
-			failedKeys[route.KeyID] = true
+			failedKeys[routeIdentity(route)] = true
 			lastError = err.Error()
 			log.Printf("[llm-stream] %s/%s 首字节前失败(静默切换): %s", route.VendorName, route.ModelID, err.Error())
 			continue
@@ -277,7 +283,7 @@ func callLLMStreamWithFailover(w http.ResponseWriter, messages []interface{}, to
 				LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: errMsg,
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
-			failedKeys[route.KeyID] = true
+			failedKeys[routeIdentity(route)] = true
 			lastError = errMsg
 			log.Printf("[llm-stream] %s/%s 首字节前 HTTP %d(静默切换)", route.VendorName, route.ModelID, resp.StatusCode)
 			continue
@@ -307,7 +313,7 @@ func callLLMStreamWithFailover(w http.ResponseWriter, messages []interface{}, to
 				Error: result.StreamError,
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 流中断: %s", route.VendorName, result.StreamError))
-			failedKeys[route.KeyID] = true
+			failedKeys[routeIdentity(route)] = true
 			switched = true
 			lastError = result.StreamError
 			log.Printf("[llm-stream] %s/%s 流中断(切换): %s", route.VendorName, route.ModelID, result.StreamError)

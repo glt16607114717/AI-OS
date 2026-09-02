@@ -25,7 +25,6 @@ ai-os/
 ├── web/                     # Web 前端（Vue 3）
 ├── tool/                    # Electron 桌面端（独立小工具，与主体无关）
 ├── docs/                    # 技术文档
-│   ├── rmp-docs/            # RMP 业务知识库（操作手册/知识库）
 │   └── *.md                 # 架构设计文档
 ├── tools/                   # 运维脚本
 └── .trae/                   # TRAE IDE 配置（规则/技能/MCP）
@@ -41,4 +40,4 @@ ai-os/
 
 ## 作者
 
-桂良涛 (桂良涛@nndrobot.com)
+桂良涛 (1938559091@qq.com)

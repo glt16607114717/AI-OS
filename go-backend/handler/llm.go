@@ -535,14 +535,22 @@ func injectGodRulesAndRAG(req map[string]interface{}, userMsgRaw string, userID 
 	}
 }
 
+// routeIdentity 路由唯一标识：厂商+key+模型 三元组
+// 用于故障转移去重。不能只用 KeyID：同一 key 可配多个模型（如 glm-5.3 + glm-5.2），
+// key 没死只是某个模型挂了时，同 key 的其他模型仍应参与故障转移。
+func routeIdentity(r *service.RouteInfoType) string {
+	return fmt.Sprintf("%d/%s/%s", r.VendorID, r.KeyID, r.ModelID)
+}
+
 // buildFailoverAttempts 构建故障转移路由列表（策略路由优先 + 轮询其他可用路由）
+// 不去重：策略里同一 key+模型 配置 N 次，就生成 N 条记录，故障时轮询 N 次
+// 这是为了实现「同一 API Key 配置 3 次 → 故障轮询 3 次」的业务需求
 func buildFailoverAttempts(primary *service.RouteInfoType, userID int) []*service.RouteInfoType {
 	attempts := []*service.RouteInfoType{primary}
 	failoverRoutes := service.GetAllRoutesForFailover(userID)
 	for i := range failoverRoutes {
-		if failoverRoutes[i].KeyID != primary.KeyID {
-			attempts = append(attempts, &failoverRoutes[i])
-		}
+		// 不去重，原样追加策略配置的每一次
+		attempts = append(attempts, &failoverRoutes[i])
 	}
 	return attempts
 }

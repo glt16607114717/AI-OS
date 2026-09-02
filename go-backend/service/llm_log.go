@@ -259,6 +259,28 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 		igRows.Close()
 	}
 
+	// 用户使用情况：所有启用账户的最后调用时间（不限时间窗口，看全量历史）
+	// LEFT JOIN 保证从未调用过的启用用户也进列表（last_ts 空串）
+	userLastActive := []map[string]interface{}{}
+	uaRows, uaErr := conn.Query(`SELECT u.id, u.username, COALESCE(MAX(s.ts), '') as last_ts
+		FROM sys_user u LEFT JOIN sys_llm_stats s ON s.user_id = u.id
+		WHERE u.status = 1
+		GROUP BY u.id, u.username
+		ORDER BY last_ts DESC`)
+	if uaErr == nil {
+		for uaRows.Next() {
+			var uid int
+			var name, lastTs string
+			if err := uaRows.Scan(&uid, &name, &lastTs); err != nil {
+				continue
+			}
+			userLastActive = append(userLastActive, map[string]interface{}{
+				"user_id": uid, "username": name, "last_ts": lastTs,
+			})
+		}
+		uaRows.Close()
+	}
+
 	return map[string]interface{}{
 		"total_requests": totalReqs,
 		"total_tokens": totalTokens,
@@ -268,6 +290,7 @@ func GetStatsSummary(days int) (map[string]interface{}, error) {
 		"by_vendor": byVendor, "by_model": byModel, "daily": daily,
 		"by_user": byUser, "by_key": byKey, "vision_by_user": visionByUser,
 		"image_gen_by_user": imageGenByUser,
+		"user_last_active": userLastActive,
 	}, nil
 }
 

@@ -25,6 +25,9 @@ func agentLoop(w http.ResponseWriter, req map[string]interface{}, attempts []*se
 
 	messages := toInterfaceSlice(req["messages"])
 	tools := toInterfaceSlice(req["tools"])
+	// tool_choice 透传给上游（客户端传 required=强制调工具 / auto=模型自由选）
+	// 不透传则上游默认 auto，模型可只输出文本不调工具，客户端会陷入纯文本重试循环
+	toolChoice := strVal(req["tool_choice"])
 
 	// 收集每轮执行的 SQL（最终展示给用户，保证查询可追溯）
 	var sqlTrace []string
@@ -54,7 +57,7 @@ func agentLoop(w http.ResponseWriter, req map[string]interface{}, attempts []*se
 		}
 
 		// 1. 请求 LLM（真流式，带故障转移）-- content 实时推给前端
-		result, err := callLLMStreamWithFailover(w, messages, tools, attempts, convCtx)
+		result, err := callLLMStreamWithFailover(w, messages, tools, attempts, convCtx, toolChoice)
 		if err != nil {
 			convCtx.SummarizeAndLog()
 			errResponse(w, fmt.Sprintf("所有厂商均失败: %s", err.Error()), 502)
@@ -93,7 +96,7 @@ func agentLoop(w http.ResponseWriter, req map[string]interface{}, attempts []*se
 			if stuckCount >= stuckRoundsLimit {
 				log.Printf("[agent] stuck loop detected user=%s round=%d (same tool_calls %d times)", username, round+1, stuckCount)
 				// 强制总结（不带 tools，流式）
-				forceResult, forceErr := callLLMStreamWithFailover(w, messages, nil, attempts, convCtx)
+				forceResult, forceErr := callLLMStreamWithFailover(w, messages, nil, attempts, convCtx, toolChoice)
 				if forceErr != nil {
 					finishAgentStream(w, req, "检测到查询陷入循环，且总结失败。请尝试换一种问法。", nil, convCtx, sqlTrace)
 					return
@@ -131,9 +134,12 @@ func agentLoop(w http.ResponseWriter, req map[string]interface{}, attempts []*se
 	}
 
 		// 执行所有 skill_ 工具
+		// 注意：content 必须是 nil 而非空字符串——OpenAI 协议规定 assistant+tool_calls 时
+		// content 为 null；部分严格校验的模型（如 Kimi K3）会拒绝空字符串 content 报
+		// "the message with role 'assistant' must not be empty"
 		messages = append(messages, map[string]interface{}{
 			"role":       "assistant",
-			"content":    "",
+			"content":    nil,
 			"tool_calls": toolCalls,
 		})
 

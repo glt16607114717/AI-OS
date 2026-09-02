@@ -115,8 +115,10 @@ func CreateSession(userID int, username string, isAdmin bool, userType string) s
 
 	authMutex.Lock()
 	// 踢掉旧会话
+	kicked := make([]string, 0, 1)
 	if oldToken, ok := UserTokens[userID]; ok {
 		delete(Sessions, oldToken)
+		kicked = append(kicked, oldToken)
 	}
 	Sessions[token] = session
 	UserTokens[userID] = token
@@ -128,9 +130,65 @@ func CreateSession(userID int, username string, isAdmin bool, userType string) s
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		rdb.Set(ctx, "session:"+token, data, 30*24*time.Hour)
+		// 同步清理被踢旧会话的 Redis 残留（否则旧 token 在 Redis 里仍有效）
+		for _, t := range kicked {
+			rdb.Del(ctx, "session:"+t)
+		}
 	}
 
 	return token
+}
+
+// DeleteUserSessions 删除指定用户的所有会话（内存 + Redis），用于删除用户/降权时强制下线
+func DeleteUserSessions(userID int) {
+	authMutex.Lock()
+	tokens := make([]string, 0, 2)
+	if token, ok := UserTokens[userID]; ok {
+		tokens = append(tokens, token)
+		delete(UserTokens, userID)
+	}
+	// 保险起见全扫内存表（正常单点互踢下只有一个 token）
+	for t, s := range Sessions {
+		if s.UserID == userID {
+			tokens = append(tokens, t)
+			delete(Sessions, t)
+		}
+	}
+	authMutex.Unlock()
+
+	if rdb == nil {
+		if len(tokens) > 0 {
+			log.Printf("[auth] 已删除用户 %d 的 %d 个内存 session", userID, len(tokens))
+		}
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for _, t := range tokens {
+		rdb.Del(ctx, "session:"+t)
+	}
+
+	// 扫描 Redis 历史残留 session（旧版本踢会话未清 Redis 导致的多 token 残留）
+	keys, err := rdb.Keys(ctx, "session:*").Result()
+	if err != nil {
+		log.Printf("[auth] 清理用户 %d 残留 session 失败: %v", userID, err)
+		return
+	}
+	cleaned := 0
+	for _, key := range keys {
+		data, err := rdb.Get(ctx, key).Result()
+		if err != nil {
+			continue
+		}
+		var s model.Session
+		if json.Unmarshal([]byte(data), &s) == nil && s.UserID == userID {
+			rdb.Del(ctx, key)
+			cleaned++
+		}
+	}
+	if len(tokens)+cleaned > 0 {
+		log.Printf("[auth] 已删除用户 %d 的 %d 个 session（内存 %d + Redis 残留 %d）", userID, len(tokens)+cleaned, len(tokens), cleaned)
+	}
 }
 
 // GetSession 从请求获取会话（内存 → Redis → API Key 三级回退）

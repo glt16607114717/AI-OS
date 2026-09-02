@@ -56,6 +56,12 @@ interface KeyStat {
   errors: number
 }
 
+interface UserLastActive {
+  user_id: number
+  username: string
+  last_ts: string
+}
+
 interface Stats {
   total_requests: number
   total_tokens: number
@@ -69,6 +75,7 @@ interface Stats {
   by_user: Record<string, UserStat>
   by_key: Record<string, KeyStat>
   daily: Record<string, DailyStat>
+  user_last_active?: UserLastActive[]
 }
 
 const stats = ref<Stats | null>(null)
@@ -163,6 +170,39 @@ function formatLatency(ms: number) {
   if (ms >= 1000) return (ms / 1000).toFixed(1) + 's'
   return Math.round(ms) + 'ms'
 }
+
+// ── 用户使用情况 ──
+
+// 格式化最后调用时间：YMDHIS 普通格式（YYYY-MM-DD HH:mm:ss），空显示"从未使用"
+function formatActiveTime(t: string): string {
+  if (!t) return '从未使用'
+  // 后端已是 YYYY-MM-DD HH:mm:ss 格式，直接展示
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(t)) return t
+  // 兼容其他格式（ISO 等），转成普通格式
+  const d = new Date(t)
+  if (isNaN(d.getTime())) return t
+  const p = (v: number) => String(v).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+// 活跃度标签：空→从未使用 / 24h内→今日活跃 / 7天内→本周活跃 / 其他→不活跃
+function activeLevel(t: string): { text: string; type: 'info' | 'success' | 'primary' | 'warning' } {
+  if (!t) return { text: '从未使用', type: 'info' }
+  const d = new Date(t.replace(' ', 'T'))
+  if (isNaN(d.getTime())) return { text: '未知', type: 'info' }
+  const hours = (Date.now() - d.getTime()) / 3600000
+  if (hours <= 24) return { text: '今日活跃', type: 'success' }
+  if (hours <= 168) return { text: '本周活跃', type: 'primary' }
+  return { text: '不活跃', type: 'warning' }
+}
+
+// 用户使用情况列表数据
+const userActiveList = computed(() => stats.value?.user_last_active || [])
+
+// 今日活跃人数
+const todayActiveCount = computed(() =>
+  userActiveList.value.filter(u => activeLevel(u.last_ts).text === '今日活跃').length
+)
 
 function renderCharts() {
   if (!stats.value) return
@@ -579,6 +619,31 @@ onUnmounted(() => {
         </div>
       </div>
 
+      <!-- 用户使用情况：启用账户的最后调用时间 -->
+      <div class="section-card user-active-card">
+        <div class="section-header">
+          <div class="section-title">用户使用情况</div>
+          <div class="section-sub">共 {{ userActiveList.length }} 个启用账户 · 今日活跃 {{ todayActiveCount }} 人</div>
+        </div>
+        <div v-if="userActiveList.length === 0" class="table-empty">暂无数据</div>
+        <table v-else class="stats-table">
+          <thead>
+            <tr>
+              <th>用户</th>
+              <th>最后调用时间</th>
+              <th>活跃度</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="u in userActiveList" :key="u.user_id" :class="{ 'my-row': u.username === currentUsername }">
+              <td class="cell-name" :class="{ 'cell-name-red': u.username === currentUsername }">{{ u.username }}</td>
+              <td>{{ formatActiveTime(u.last_ts) }}</td>
+              <td><el-tag :type="activeLevel(u.last_ts).type" size="small">{{ activeLevel(u.last_ts).text }}</el-tag></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
       <!-- Charts Grid -->
       <div class="charts-grid">
         <!-- 柱状图：用户用量排行 -->
@@ -837,6 +902,15 @@ onUnmounted(() => {
   color: #303133;
   margin-bottom: 14px;
 }
+
+/* 用户使用情况卡片：标题行 + 副标题 + 限高滚动 */
+.user-active-card { margin-top: 16px; }
+.section-header { display: flex; align-items: baseline; justify-content: space-between; }
+.section-header .section-title { margin-bottom: 0; }
+.section-sub { font-size: 12px; color: #909399; margin-bottom: 14px; }
+.user-active-card .stats-table tbody { display: block; max-height: 320px; overflow-y: auto; }
+.user-active-card .stats-table thead,
+.user-active-card .stats-table tbody tr { display: table; width: 100%; table-layout: fixed; }
 
 /* Table */
 .table-empty { text-align: center; padding: 24px 0; font-size: 13px; color: #c0c4cc; }

@@ -1,4 +1,4 @@
-﻿package handler
+package handler
 
 import (
 	// "ai-os-server/circuit" // [DISABLED 2025-07-22] 熔断机制暂时关闭
@@ -67,14 +67,10 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 
 	var totalContent strings.Builder
 	var usage map[string]interface{}
-	failedKeys := make(map[string]bool)
 	var finalRoute *service.RouteInfoType
 	switched := false // 是否发生过模型切换
 
 	for idx, route := range attempts {
-		if failedKeys[route.KeyID] {
-			continue
-		}
 		// [DISABLED 2025-07-22] API key 大量熔断，暂时关闭熔断机制
 		// if circuit.GetBreaker().IsOpen(route.ModelID, route.KeyID) {
 		// 	log.Printf("[proxy] circuit breaker open for %s/%s, skip", route.ModelID, route.KeyID)
@@ -119,7 +115,6 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 				LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: err.Error(),
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 网络错误: %s", route.VendorName, err.Error()))
-			failedKeys[route.KeyID] = true
 			continue
 		}
 
@@ -137,7 +132,6 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 				LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false, Error: errMsg,
 			})
 			convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s HTTP %d: %s", route.VendorName, resp.StatusCode, errMsg))
-			failedKeys[route.KeyID] = true
 			continue
 		}
 
@@ -159,6 +153,7 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 		done := false
 		streamFailed := false
 		hasToolCalls := false
+		hasFinishReason := false
 		reasoningChars := 0
 		chunkCount := 0
 
@@ -216,7 +211,6 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 					Error: fmt.Sprintf("SSE 流 %v 无输出，判定卡死", sseIdleTimeout),
 				})
 				convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s SSE 流 %v 无输出，判定卡死", route.VendorName, sseIdleTimeout))
-				failedKeys[route.KeyID] = true
 				switched = true
 				streamFailed = true
 				cleanup()
@@ -237,18 +231,23 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 							} else {
 								log.Printf("[proxy] stream %s user=%s ZERO_DUMP: chunks=%d content=%d toolCalls=%v reasoning=%d", route.ModelID, username, chunkCount, totalContent.Len(), hasToolCalls, reasoningChars)
 								log.Printf("[proxy] stream %s user=%s ZERO_CONTENT_DONE: EOF携带[DONE]但无内容，切换模型", route.ModelID, username)
-								failedKeys[route.KeyID] = true
-								switched = true
+												switched = true
 								streamFailed = true
 							}
 						} else {
 							// 最后一行是数据 chunk，转发并累计
 							fmt.Fprintf(w, "data: %s\n\n", lastData)
-							if flusher != nil { flusher.Flush() }
+							if flusher != nil {
+								flusher.Flush()
+							}
 							var chunk map[string]interface{}
 							if json.Unmarshal([]byte(lastData), &chunk) == nil {
 								if choices, ok := chunk["choices"].([]interface{}); ok && len(choices) > 0 {
 									if choice, ok := choices[0].(map[string]interface{}); ok {
+										// finish_reason 检查（标记模型正常停止：stop/tool_calls）
+										if fr, ok := choice["finish_reason"].(string); ok && fr != "" {
+											hasFinishReason = true
+										}
 										if delta, ok := choice["delta"].(map[string]interface{}); ok {
 											if content, ok := delta["content"].(string); ok {
 												totalContent.WriteString(content)
@@ -265,19 +264,43 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 						if done {
 							break // 跳出 SSE 读取循环，正常结束
 						}
-						if totalContent.Len() > 0 || hasToolCalls {
-							// 有内容但未收到 [DONE]：上游可能在末尾截断了 [DONE]
-							// 内容已完整转发给客户端，当正常结束处理
-							log.Printf("[proxy] stream %s user=%s SSE_EOF_WITH_CONTENT (%d 字符，无[DONE]但内容已转发，当正常结束)",
+						if (totalContent.Len() > 0 || hasToolCalls) && hasFinishReason {
+							// 有内容且有 finish_reason：模型正常结束，只是上游截断了 [DONE]
+							log.Printf("[proxy] stream %s user=%s SSE_EOF_WITH_CONTENT (%d 字符，有finish_reason，当正常结束)",
 								route.ModelID, username, totalContent.Len())
 							done = true
 							break
+						}
+						// 有内容但无 finish_reason：流被异常截断，切换模型重试
+						if totalContent.Len() > 0 || hasToolCalls {
+							log.Printf("[proxy] stream %s user=%s SSE_TRUNCATED (%d 字符，无[DONE]且无finish_reason，流被截断，切换模型重试)",
+								route.ModelID, username, totalContent.Len())
+							service.RecordStat(&service.LLMStatType{
+								UserID: userID, Username: username, Source: convCtx.Source,
+								VendorID: route.VendorID, KeyID: route.KeyID, ModelID: route.ModelID,
+								SessionID: convCtx.SessionID, MsgID: convCtx.MsgId, ChatHistoryID: convCtx.ChatHistoryID,
+								LatencyMs: int(time.Since(startTime).Milliseconds()), Success: false,
+								Error: fmt.Sprintf("SSE 流被截断（已有 %d 字符内容，无 finish_reason）", totalContent.Len()),
+							})
+							convCtx.Errors = append(convCtx.Errors, "SSE 流被截断（有内容但无 finish_reason）")
+										switched = true
+							streamFailed = true
+							cleanup()
+							continue
 						}
 					}
 				}
 
 				if rr.err == io.EOF {
 					// 纯 EOF，无内容（上面已处理有内容的情况）
+					// MiniMax 等厂商流式响应不发 [DONE]：最后一个 chunk 带 finish_reason 后直接关流
+					// 若已有内容且收到 finish_reason，视为模型正常结束（与 275 行 EOF 携带数据分支的降级逻辑对齐）
+					if (totalContent.Len() > 0 || hasToolCalls) && hasFinishReason {
+						log.Printf("[proxy] stream %s user=%s SSE_EOF_NORMAL_DONE (无[DONE]但有finish_reason，%d 字符，当正常结束)",
+							route.ModelID, username, totalContent.Len())
+						done = true
+						break
+					}
 					log.Printf("[proxy] stream %s user=%s SSE_EOF_WITHOUT_DONE (已有 %d 字符内容，切换模型重试)",
 						route.ModelID, username, totalContent.Len())
 					service.RecordStat(&service.LLMStatType{
@@ -288,7 +311,6 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 						Error: fmt.Sprintf("SSE 流未收到 [DONE] 即关闭（已有 %d 字符内容）", totalContent.Len()),
 					})
 					convCtx.Errors = append(convCtx.Errors, "SSE 流未收到 [DONE] 即关闭")
-					failedKeys[route.KeyID] = true
 					switched = true
 					streamFailed = true
 					cleanup()
@@ -305,14 +327,13 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 				})
 				convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("SSE 流异常中断: %s", rr.err.Error()))
 				log.Printf("[proxy] stream %s user=%s SSE_ABORTED: %v", route.ModelID, username, rr.err)
-				failedKeys[route.KeyID] = true
 				switched = true
 				streamFailed = true
 				cleanup()
 				continue
-		}
+			}
 
-		lineStr := strings.TrimSpace(string(rr.line))
+			lineStr := strings.TrimSpace(string(rr.line))
 			if lineStr == "" {
 				continue
 			}
@@ -332,7 +353,6 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 						Error: "收到[DONE]但无内容输出",
 					})
 					convCtx.Errors = append(convCtx.Errors, fmt.Sprintf("%s 收到[DONE]但无内容输出", route.VendorName))
-					failedKeys[route.KeyID] = true
 					switched = true
 					streamFailed = true
 					cleanup()
@@ -358,6 +378,10 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 				}
 				if choices, ok := chunk["choices"].([]interface{}); ok && len(choices) > 0 {
 					if choice, ok := choices[0].(map[string]interface{}); ok {
+						// finish_reason 检查（标记模型正常停止：stop/tool_calls）
+						if fr, ok := choice["finish_reason"].(string); ok && fr != "" {
+							hasFinishReason = true
+						}
 						if delta, ok := choice["delta"].(map[string]interface{}); ok {
 							// content 检查（正文）
 							if content, ok := delta["content"].(string); ok {
@@ -388,7 +412,6 @@ func proxyForward(w http.ResponseWriter, r *http.Request, req map[string]interfa
 		if !streamFailed && !done {
 			// SSE 循环异常退出（既没 DONE 也没报错），记录并切换
 			log.Printf("[proxy] stream %s user=%s SSE_LOOP_EXIT: 异常退出，切换模型", route.ModelID, username)
-			failedKeys[route.KeyID] = true
 			switched = true
 		}
 	}

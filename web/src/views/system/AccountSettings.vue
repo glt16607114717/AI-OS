@@ -69,9 +69,13 @@ async function fetchMyInfo() {
     if (data.ok && data.data) {
       myApiKey.value = data.data.api_key || ''
       isAdmin.value = data.data.is_admin === true || data.data.is_admin === 1
+    } else {
+      console.error('[AccountSettings] fetchMyInfo bad response:', data)
+      ElMessage.error(data.error || '获取账户信息失败，管理功能不可用')
     }
-  } catch (e) {
+  } catch (e: any) {
     console.error('[AccountSettings] fetchMyInfo error:', e)
+    ElMessage.error('获取账户信息失败: ' + e.message)
   }
 }
 

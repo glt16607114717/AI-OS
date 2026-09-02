@@ -165,11 +165,15 @@ func SaveVendorKeys(vendorID int, keys []map[string]interface{}) error {
 		incomingNames[name] = true
 	}
 
-	// 软删除不在传入列表中的 key（改 enabled=0，保留记录供历史策略翻译名称）
-	// 注意：不能物理删除，否则策略 JSON 里引用的 key_id 会查不到名称，前端只能显示 ID
+	// 物理删除不在传入列表中的 key（真删除）
+	// 影响评估（2025-06 确认）：
+	//   - sys_llm_stats 日志 LEFT JOIN + IFNULL 兜底，历史日志 key 名称显示为空，不报错
+	//   - 策略 JSON 引用已删 key 时：getEnabledKeyIDs 查不到不参与轮询，
+	//     enrichRouteInfo 查不到返回 nil 走故障转移，行为与禁用一致
+	//   - 以后还用的 key 用页面开关禁用，彻底废弃的才点删除
 	for name, id := range existingMap {
 		if !incomingNames[name] {
-			if _, err := tx.Exec("UPDATE sys_api_key SET enabled = 0 WHERE id = ?", id); err != nil {
+			if _, err := tx.Exec("DELETE FROM sys_api_key WHERE id = ?", id); err != nil {
 				return err
 			}
 		}
